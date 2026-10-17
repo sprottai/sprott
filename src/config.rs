@@ -874,10 +874,10 @@ pub struct ServeArgs {
     /// WebAuthn relying party ID. Defaults to the host part of --origin
     /// (e.g. `custodian.example.com`), which is what 99% of deployments
     /// want. Override only for eTLD+1 sharing across subdomains. With
-    /// neither --origin nor --rp-id, a daemon paired with the SafeClaw
-    /// console (safeclaw.pro, dev.safeclaw.pro) accepts its root, `app.` and
-    /// `www.` origins under the root RP ID
-    /// (`passkey::webauthn::RelyingParty::console`); any other console
+    /// neither --origin nor --rp-id, a daemon paired with the first-party
+    /// console (either root of a prod or dev root pair) accepts the root,
+    /// `app.` and `www.` origins of both roots of the pair under either root
+    /// RP ID (`passkey::webauthn::RelyingParty::console`); any other console
     /// origin is matched exactly.
     #[arg(long, env = "SAFECLAW_RP_ID")]
     pub rp_id: Option<String>,
@@ -1099,9 +1099,10 @@ impl Config {
             crate::cli::active::frontend_origin()
                 .unwrap_or_else(|| format!("http://localhost:{}", args.port))
         });
-        // A paired daemon's console origin (stored at `sc login`, either the
-        // root or its `app.` host) gives the console relying party: the root
-        // RP ID and its root / `app.` / `www.` origins. Explicit --origin /
+        // A paired daemon's console origin (stored at `sc login`, the root or
+        // its `app.` host, on either root of a pair) gives the console relying
+        // party: both roots' RP IDs and their root / `app.` / `www.` origins.
+        // The stored value is read as is, never rewritten. Explicit --origin /
         // --rp-id, and a localhost or self-host origin, match exactly; the
         // rp_id then defaults to the origin's host (scheme, path and :port
         // stripped; "localhost" if it does not parse).
@@ -1137,11 +1138,11 @@ pub fn default_state_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./state"))
 }
 
-/// The WebAuthn relying party for `origin`: the SafeClaw console's (root RP
-/// ID, root / `app.` / `www.` origins) when `origin` is one of its hosts and
-/// neither the origin nor the RP ID was given explicitly. Every other origin
-/// (a self-hosted console, localhost) is matched exactly under `rp_id`
-/// (default: the origin's host).
+/// The WebAuthn relying party for `origin`: the console's (both RP IDs of the
+/// root pair, root / `app.` / `www.` origins of both roots) when `origin` is
+/// one of its hosts and neither the origin nor the RP ID was given
+/// explicitly. Every other origin (a self-hosted console, localhost) is
+/// matched exactly under `rp_id` (default: the origin's host).
 fn relying_party_for(
     origin: &str,
     explicit: bool,
@@ -1177,28 +1178,44 @@ mod relying_party_tests {
 
     #[test]
     fn stored_console_origin_gives_the_root_party_explicit_flags_stay_exact() {
-        for stored in ["https://safeclaw.pro", "https://app.safeclaw.pro"] {
+        for stored in [
+            "https://sprott.ai",
+            "https://app.sprott.ai",
+            "https://safeclaw.pro",     // rename:keep
+            "https://app.safeclaw.pro", // rename:keep
+        ] {
             let rp = relying_party_for(stored, false, None);
-            assert_eq!(rp.rp_id, "safeclaw.pro");
-            assert!(rp.allows("https://safeclaw.pro"));
-            assert!(rp.allows("https://app.safeclaw.pro"));
-            assert!(rp.allows("https://www.safeclaw.pro"));
-            assert!(!rp.allows("https://evil.safeclaw.pro"));
+            assert_eq!(rp.rp_ids, vec!["sprott.ai", "safeclaw.pro"], "{stored}"); // rename:keep
+            assert!(rp.allows("https://sprott.ai"));
+            assert!(rp.allows("https://app.sprott.ai"));
+            assert!(rp.allows("https://www.sprott.ai"));
+            assert!(rp.allows("https://app.safeclaw.pro")); // rename:keep
+            assert!(!rp.allows("https://evil.sprott.ai"));
+            assert!(!rp.allows("https://evil-sprott.ai"));
+            assert!(!rp.allows("https://evil.safeclaw.pro")); // rename:keep
+            assert!(!rp.allows("https://app.dev.sprott.ai"));
         }
-        let dev = relying_party_for("https://app.dev.safeclaw.pro", false, None);
-        assert_eq!(dev.rp_id, "dev.safeclaw.pro");
-        // --origin / --rp-id: exactly as given.
-        let explicit = relying_party_for("https://app.safeclaw.pro", true, None);
-        assert_eq!(explicit.rp_id, "app.safeclaw.pro");
-        assert_eq!(
-            explicit.origins,
-            vec!["https://app.safeclaw.pro".to_string()]
-        );
-        let rp_only = relying_party_for("https://safeclaw.pro", true, Some("safeclaw.pro".into()));
-        assert_eq!(rp_only.origins, vec!["https://safeclaw.pro".to_string()]);
+        for stored in [
+            "https://app.dev.sprott.ai",
+            "https://app.dev.safeclaw.pro", // rename:keep
+        ] {
+            let dev = relying_party_for(stored, false, None);
+            assert_eq!(dev.rp_ids, vec!["dev.sprott.ai", "dev.safeclaw.pro"]); // rename:keep
+            assert!(!dev.allows("https://app.sprott.ai"));
+        }
+        // --origin / --rp-id: exactly as given, one RP ID, on either root.
+        let legacy = relying_party_for("https://app.safeclaw.pro", true, None); // rename:keep
+        assert_eq!(legacy.rp_ids, vec!["app.safeclaw.pro"]); // rename:keep
+        assert_eq!(legacy.origins, vec!["https://app.safeclaw.pro".to_string()]); // rename:keep
+        let explicit = relying_party_for("https://app.sprott.ai", true, None);
+        assert_eq!(explicit.rp_ids, vec!["app.sprott.ai"]);
+        assert_eq!(explicit.origins, vec!["https://app.sprott.ai".to_string()]);
+        let rp_only = relying_party_for("https://sprott.ai", true, Some("sprott.ai".into()));
+        assert_eq!(rp_only.rp_ids, vec!["sprott.ai"]);
+        assert_eq!(rp_only.origins, vec!["https://sprott.ai".to_string()]);
         // Unpaired localhost.
         let local = relying_party_for("http://localhost:23293", false, None);
-        assert_eq!(local.rp_id, "localhost");
+        assert_eq!(local.rp_ids, vec!["localhost"]);
         assert_eq!(local.origins, vec!["http://localhost:23293".to_string()]);
         // A self-hosted console: its own hostname is the RP ID and its origin
         // the only one, whatever its labels.
@@ -1208,7 +1225,7 @@ mod relying_party_tests {
             ("https://www.corp.example", "www.corp.example"),
         ] {
             let rp = relying_party_for(stored, false, None);
-            assert_eq!(rp.rp_id, host, "{stored}");
+            assert_eq!(rp.rp_ids, vec![host], "{stored}");
             assert_eq!(rp.origins, vec![stored.to_string()], "{stored}");
             assert!(!rp.allows(&format!("https://app.{host}")));
             assert!(!rp.allows(&format!("https://www.{host}")));

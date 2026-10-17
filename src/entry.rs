@@ -434,7 +434,7 @@ async fn run_daemon(
     tracing::info!(
         listen = %addr,
         state_dir = %config.state_dir.display(),
-        rp_id = %config.relying_party.rp_id,
+        rp_ids = %config.relying_party.rp_ids.join(","),
         webauthn_origins = %config.relying_party.origins.join(","),
         origin = %config.origin,
         "safeclaw daemon starting"

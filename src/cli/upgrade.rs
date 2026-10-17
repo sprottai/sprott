@@ -250,10 +250,20 @@ mod tests {
 
     #[test]
     fn a_dev_pairing_is_dev_on_either_console_host() {
-        assert!(paired_to_dev("https://dev.safeclaw.pro"));
-        assert!(paired_to_dev("https://app.dev.safeclaw.pro"));
-        assert!(!paired_to_dev("https://app.safeclaw.pro"));
-        assert!(!paired_to_dev("https://safeclaw.pro"));
+        for (origin, dev) in [
+            ("https://dev.sprott.ai", true),
+            ("https://app.dev.sprott.ai", true),
+            ("https://www.dev.sprott.ai", true),
+            ("https://dev.safeclaw.pro", true),     // rename:keep
+            ("https://app.dev.safeclaw.pro", true), // rename:keep
+            ("https://sprott.ai", false),
+            ("https://app.sprott.ai", false),
+            ("https://safeclaw.pro", false),     // rename:keep
+            ("https://app.safeclaw.pro", false), // rename:keep
+            ("https://vault.example.com", false),
+        ] {
+            assert_eq!(paired_to_dev(origin), dev, "{origin}");
+        }
     }
 
     #[test]

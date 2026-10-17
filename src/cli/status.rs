@@ -404,11 +404,12 @@ fn origin_host(origin: &str) -> &str {
 }
 
 /// Short environment label for a paired cloud host: the first-party prod / dev
-/// domains, else `self-host`. Purely cosmetic — it never gates anything.
+/// domains (either root of the pair), else `self-host`. Purely cosmetic — it
+/// never gates anything.
 fn env_label(host: &str) -> &'static str {
-    match crate::passkey::webauthn::console_root_of_host(host).unwrap_or(host) {
-        "safeclaw.pro" => "prod",
-        "dev.safeclaw.pro" => "dev",
+    match crate::passkey::webauthn::console_new_root_of_host(host) {
+        Some("sprott.ai") => "prod",
+        Some("dev.sprott.ai") => "dev",
         _ => "self-host",
     }
 }
@@ -521,10 +522,23 @@ mod env_label_tests {
 
     #[test]
     fn either_console_host_names_its_environment() {
-        assert_eq!(env_label("dev.safeclaw.pro"), "dev");
-        assert_eq!(env_label("app.dev.safeclaw.pro"), "dev");
-        assert_eq!(env_label("app.safeclaw.pro"), "prod");
-        assert_eq!(env_label("vault.example.com"), "self-host");
+        for (host, label) in [
+            ("sprott.ai", "prod"),
+            ("app.sprott.ai", "prod"),
+            ("www.sprott.ai", "prod"),
+            ("dev.sprott.ai", "dev"),
+            ("app.dev.sprott.ai", "dev"),
+            ("safeclaw.pro", "prod"),        // rename:keep
+            ("app.safeclaw.pro", "prod"),    // rename:keep
+            ("dev.safeclaw.pro", "dev"),     // rename:keep
+            ("app.dev.safeclaw.pro", "dev"), // rename:keep
+            ("evil-sprott.ai", "self-host"),
+            ("app.app.sprott.ai", "self-host"),
+            ("sprott.ai.evil.com", "self-host"),
+            ("vault.example.com", "self-host"),
+        ] {
+            assert_eq!(env_label(host), label, "{host}");
+        }
     }
 
     #[test]

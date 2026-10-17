@@ -521,18 +521,22 @@ pub fn frontend_origin() -> Option<String> {
     Some(derive_frontend_from_backend(backend))
 }
 
-/// Where console pages are linked for this pairing: the `app.` host of a
-/// SafeClaw console (whichever form was stored at `sc login`), otherwise the
-/// stored origin. [`frontend_origin`] stays the stored value (it selects the
-/// passkey relying party).
+/// Where console pages are linked for this pairing: `https://app.<new root>`
+/// for a first-party console on either root of a pair (whichever form was
+/// stored at `sc login`; a legacy root maps to its new root here, at read
+/// time), otherwise the stored origin. [`frontend_origin`] stays the stored
+/// value (it selects the passkey relying party), and nothing rewrites it on
+/// disk, so an older binary reading the same config behaves as before.
 pub fn console_origin() -> Option<String> {
     frontend_origin().map(|o| crate::passkey::webauthn::console_link_origin(&o))
 }
 
 /// The console origin for a cloud backend URL, before any pairing is stored
 /// (`sc login`): the backend's frontend (`api.` dropped), at its console link
-/// host. The backend comes from the first-party allowlist / pinned config,
-/// never from a server response, so this is the origin `sc` pins for pairing.
+/// host (`https://app.<new root>` for either root of a pair). The backend
+/// comes from the first-party allowlist / pinned config, never from a server
+/// response, so this is the origin `sc` pins for pairing (the SPAKE2 identity,
+/// matching the console's `pairingOrigin` on that host).
 pub fn console_origin_for_backend(backend: &str) -> String {
     crate::passkey::webauthn::console_link_origin(&derive_frontend_from_backend(backend))
 }
@@ -1024,6 +1028,24 @@ mod tests {
             derive_frontend_from_backend("https://api.example.com/base"),
             "https://example.com/base"
         );
+    }
+
+    #[test]
+    fn either_root_of_a_pair_links_to_the_new_root() {
+        let prod = "https://app.sprott.ai";
+        let dev = "https://app.dev.sprott.ai";
+        for (backend, link) in [
+            ("https://api.sprott.ai", prod),
+            ("https://sprott.ai", prod),
+            ("https://api.dev.sprott.ai/", dev),
+            ("https://api.safeclaw.pro", prod),     // rename:keep
+            ("https://safeclaw.pro/", prod),        // rename:keep
+            ("https://api.dev.safeclaw.pro", dev),  // rename:keep
+            ("https://api.example.com", "https://example.com"),
+            ("http://localhost:8787", "http://localhost:8787"),
+        ] {
+            assert_eq!(console_origin_for_backend(backend), link, "{backend}");
+        }
     }
 
     #[test]
