@@ -440,9 +440,11 @@ async fn spawn_and_report(
 
 /// Is the machine's paired backend (`https://api.dev.safeclaw.pro`, as the server
 /// returned it) the environment a `--profile` names (`https://dev.safeclaw.pro`)?
+/// Both roots of a root pair are one environment: compared by the console
+/// they link to (`https://app.<new root>`); any other host exactly.
 fn same_environment(paired_backend: &str, profile_url: &str) -> bool {
-    crate::cli::active::derive_frontend_from_backend(paired_backend)
-        == profile_url.trim_end_matches('/')
+    use crate::cli::active::console_origin_for_backend;
+    console_origin_for_backend(paired_backend) == console_origin_for_backend(profile_url)
 }
 
 fn spawn_background(context: &Context, phase: SetupPhase) -> Result<u32, String> {
@@ -1079,6 +1081,25 @@ mod setup_tests {
         assert!(same_environment("https://api.safeclaw.pro/", "https://safeclaw.pro"));
         assert!(!same_environment("https://api.safeclaw.pro", "https://dev.safeclaw.pro"));
         assert!(!same_environment("https://api.dev.safeclaw.pro", "https://safeclaw.pro"));
+        // A machine paired before the move to the new roots: its legacy backend
+        // is the same environment as the profile's new root, and only that one.
+        let prod = "https://sprott.ai";
+        let dev = "https://dev.sprott.ai";
+        for (paired, profile, same) in [
+            ("https://api.sprott.ai", prod, true),
+            ("https://api.dev.sprott.ai/", dev, true),
+            ("https://api.safeclaw.pro", prod, true),      // rename:keep
+            ("https://api.dev.safeclaw.pro", dev, true),   // rename:keep
+            ("https://api.safeclaw.pro", dev, false),      // rename:keep
+            ("https://api.dev.safeclaw.pro", prod, false), // rename:keep
+            ("https://api.sprott.ai", dev, false),
+            ("https://api.evil-sprott.ai", prod, false),
+            ("https://api.vault.example.com", prod, false),
+            ("https://api.vault.example.com", "https://vault.example.com", true),
+        ] {
+            let got = same_environment(paired, profile);
+            assert_eq!(got, same, "{paired} / {profile}");
+        }
     }
 
     #[test]

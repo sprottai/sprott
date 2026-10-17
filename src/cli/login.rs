@@ -55,16 +55,18 @@ pub(crate) fn resolve_custodian(env_flag: Option<&str>) -> Result<String, String
             return Ok(u.to_string());
         }
     }
-    Ok("https://safeclaw.pro".to_string())
+    Ok("https://sprott.ai".to_string())
 }
 
 /// The `--profile` allowlist. A SYMBOL → first-party URL only; anything else is a
 /// hard error. This is the gate that keeps a hostile install prompt from
 /// steering pairing off first-party domains; do not widen it to accept URLs.
+/// Each symbol names its environment's new root; a machine paired to the
+/// legacy root of the same pair is the same environment.
 pub(crate) fn env_selector_to_url(env: &str) -> Result<String, String> {
     match env {
-        "prod" => Ok("https://safeclaw.pro".to_string()),
-        "dev" => Ok("https://dev.safeclaw.pro".to_string()),
+        "prod" => Ok("https://sprott.ai".to_string()),
+        "dev" => Ok("https://dev.sprott.ai".to_string()),
         other => Err(format!(
             "unknown --profile '{}': expected 'prod' or 'dev'",
             other
@@ -91,10 +93,16 @@ mod tests {
 
     #[test]
     fn env_selector_allowlist_maps_first_party_only() {
-        assert_eq!(env_selector_to_url("prod").unwrap(), "https://safeclaw.pro");
+        assert_eq!(env_selector_to_url("prod").unwrap(), "https://sprott.ai");
+        assert_eq!(env_selector_to_url("dev").unwrap(), "https://dev.sprott.ai");
+        // Pairing links and the SPAKE2 identity land on each new root's app host.
         assert_eq!(
-            env_selector_to_url("dev").unwrap(),
-            "https://dev.safeclaw.pro"
+            crate::cli::active::console_origin_for_backend(&env_selector_to_url("prod").unwrap()),
+            "https://app.sprott.ai"
+        );
+        assert_eq!(
+            crate::cli::active::console_origin_for_backend(&env_selector_to_url("dev").unwrap()),
+            "https://app.dev.sprott.ai"
         );
         // Anything that is not an exact first-party symbol is rejected — a
         // hostile prompt cannot smuggle a custodian URL through `--profile`.
