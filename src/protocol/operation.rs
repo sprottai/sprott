@@ -1,10 +1,10 @@
 //! `Operation` — re-export of [`sudp::Operation`] plus deployment-side
-//! helpers that pull SafeClaw-specific payloads out of `act.scope`.
+//! helpers that pull Sprott-specific payloads out of `act.scope`.
 //!
-//! SafeClaw maps its business actions onto the SUDP vocabulary
+//! Sprott maps its business actions onto the SUDP vocabulary
 //! (paper §5.4, §5.6):
 //!
-//! | SafeClaw action      | sudp::ActType  | scope shape                                   |
+//! | Sprott action      | sudp::ActType  | scope shape                                   |
 //! |----------------------|----------------|-----------------------------------------------|
 //! | First-time vault     | `Enroll`       | `{public_key_x, public_key_y, prf_salt, …}`   |
 //! | Edit vault contents  | `Write`        | `{body, wrapped_dek, prf_salt_next}`          |
@@ -20,7 +20,7 @@ pub use sudp::{Act, ActType, Bind, Operation, RecipientPk, Valid};
 
 use crate::error::{AppError, Result};
 
-/// SafeClaw-side validity check that reads the system clock and applies a
+/// Sprott-side validity check that reads the system clock and applies a
 /// 5-minute `iat` skew tolerance. Thin adapter over `sudp::Valid::check`.
 pub fn check_now(valid: &Valid) -> Result<()> {
     let now = std::time::SystemTime::now()
@@ -119,7 +119,7 @@ pub fn as_write_patch(op: &Operation) -> Result<WritePatch> {
 /// The dotted path (e.g. `env.api_key`) lives in `act.target`; scope is empty.
 ///
 /// **Note:** the SUDP standard `execute_export` requires a non-`None`
-/// `bind.recipient` for KEM-sealed delivery; SafeClaw currently uses an
+/// `bind.recipient` for KEM-sealed delivery; Sprott currently uses an
 /// out-of-band TLS-trusted reveal path (`bind.recipient = None`), pending the
 /// SUDP "TLS-trusted export" extension (see `project_sudp_tls_export.md`).
 pub fn as_export_path(op: &Operation) -> Result<&str> {

@@ -1,6 +1,6 @@
 # For your agent
 
-This page explains how an agent gets the SafeClaw skill, runs setup, loads its identity, and uses SafeClaw without handling credential values.
+This page explains how an agent gets the Sprott skill, runs setup, loads its identity, and uses Sprott without handling credential values.
 
 ## The skill
 
@@ -14,7 +14,7 @@ add it with:
 npx skills add getsafeclaw/safeclaw
 ```
 
-Install only from [safeclaw.pro](https://safeclaw.pro) or
+Install only from [sprott.ai](https://sprott.ai) or
 [github.com/getsafeclaw/safeclaw](https://github.com/getsafeclaw/safeclaw).
 
 ## Set up
@@ -22,7 +22,7 @@ Install only from [safeclaw.pro](https://safeclaw.pro) or
 If `sc` is not installed, run:
 
 ```bash
-curl -fsSL https://safeclaw.pro/install.sh | sh
+curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 The installer verifies the download's SHA256, puts `sc` in `~/.local/bin`,

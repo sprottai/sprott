@@ -427,7 +427,7 @@ impl BrokerHandler {
         if self.state.is_vault_upgrade_required(&vault_id) {
             return err_response(
                 ScCode::UpgradeRequired,
-                "SafeClaw needs an update to use this vault. Run `sc upgrade`",
+                "Sprott needs an update to use this vault. Run `sc upgrade`",
             )
             .into();
         }
@@ -861,7 +861,7 @@ impl BrokerHandler {
         if leaked_phantom {
             return err_response(
                 ScCode::PhantomUnresolved,
-                "a SafeClaw phantom in this request could not be resolved, so the request was \
+                "a Sprott phantom in this request could not be resolved, so the request was \
                  blocked before the placeholder could reach upstream. Check the connection/role \
                  name (`sc registry`), or run `sc unlock` if the vault is locked",
             )
@@ -1111,7 +1111,7 @@ impl BrokerHandler {
                     self.state.config.proxy_port, op_id
                 );
                 let body = format!(
-                    "SafeClaw approval needed to use this credential.\n\
+                    "Sprott approval needed to use this credential.\n\
                      Approve with your passkey:\n  {}\n\
                      {}Then re-run the same command.\n\n\
                      {}\n",
@@ -1197,7 +1197,7 @@ impl BrokerHandler {
                     self.state.config.proxy_port, op_id
                 );
                 let body = format!(
-                    "SafeClaw: connection '{}' is not anchored to '{}'.\n\
+                    "Sprott: connection '{}' is not anchored to '{}'.\n\
                      Approve adding this host as a PERMANENT grant (passkey):\n  {}\n\
                      {}Then re-run the same command.\n\n\
                      {}\n",
@@ -1654,9 +1654,9 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 
 /// A plain-text 4xx/5xx for the MITM plane. Status comes from the registry
 /// (`ScCode::row`, the same row every surface uses); the machine token rides
-/// `x-safeclaw-error` AND leads the body (`SafeClaw: <code>: <msg>`), so the
+/// `x-safeclaw-error` AND leads the body (`Sprott: <code>: <msg>`), so the
 /// error is attributable even when a tool surfaces only one of the two.
-/// text/plain is deliberate — a SafeClaw refusal must never parse as the
+/// text/plain is deliberate — a Sprott refusal must never parse as the
 /// upstream service's payload.
 fn err_response(code: ScCode, msg: &str) -> Response<Body> {
     let status = StatusCode::from_u16(code.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1665,7 +1665,7 @@ fn err_response(code: ScCode, msg: &str) -> Response<Body> {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .header("x-safeclaw-error", code.as_str())
         .body(Body::from(format!(
-            "SafeClaw: {}: {}\n",
+            "Sprott: {}: {}\n",
             code.as_str(),
             msg
         )))

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 940" width="1240" height="940" role="img">
-  <title>SafeClaw identity protocol: UIK/AIK/DIK keypairs, app-layer proof-of-possession (PoP, DPoP-style) signature on each hop, the in-vault authorized-agents table as the daemon's only authorization source, and where each verifier fetches the public key.</title>
+  <title>Sprott identity protocol: UIK/AIK/DIK keypairs, app-layer proof-of-possession (PoP, DPoP-style) signature on each hop, the in-vault authorized-agents table as the daemon's only authorization source, and where each verifier fetches the public key.</title>
   <style>
     text{font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',Roboto,Helvetica,Arial,sans-serif}
     .cap{font-size:13px;letter-spacing:.16em;fill:#8f7a52;font-weight:700}
@@ -25,7 +25,7 @@
   </defs>
 
   <rect x="0" y="0" width="1240" height="940" rx="24" fill="#0b0b0d"/>
-  <text x="40" y="46" class="cap">SAFECLAW · 身份协议 (UIK · AIK · DIK) · PoP 签名每一跳 · 库内授权表 = 唯一授权源</text>
+  <text x="40" y="46" class="cap">SPROTT · 身份协议 (UIK · AIK · DIK) · PoP 签名每一跳 · 库内授权表 = 唯一授权源</text>
 
   <!-- key legend strip -->
   <g transform="translate(40,66)">

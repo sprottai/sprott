@@ -335,7 +335,7 @@ pub struct StoredItem {
     /// `None` = unknown (the keep-both rule applies as is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// Written by SafeClaw's automatic upgrade of this vault (the legacy-row
+    /// Written by Sprott's automatic upgrade of this vault (the legacy-row
     /// migration), not by a person: a conflict on it pauses the upgrade,
     /// which retries. Local bookkeeping only (never sent).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3407,7 +3407,7 @@ impl PerItemVault {
         changed
     }
 
-    /// Mark the row at `iid` as written by SafeClaw's automatic upgrade.
+    /// Mark the row at `iid` as written by Sprott's automatic upgrade.
     fn mark_upgrade(&mut self, iid: &str) {
         if let Some(s) = self.items.get_mut(iid) {
             s.upgrade = true;
@@ -7562,7 +7562,7 @@ pub(crate) mod tests {
             pv.items[&ai_id].version, ai_version,
             "a native key keeps its record"
         );
-        // Each copy is marked as written by SafeClaw's automatic upgrade.
+        // Each copy is marked as written by Sprott's automatic upgrade.
         assert!(copies.iter().all(|id| pv.items[id].upgrade));
         assert!(!pv.items[&ai_id].upgrade);
         for field in [

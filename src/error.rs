@@ -5,7 +5,7 @@ use axum::{
 };
 use serde_json::json;
 
-/// THE error-code registry — every error SafeClaw raises on any surface
+/// THE error-code registry — every error Sprott raises on any surface
 /// (control-plane JSON, proxy text plane, CLI stderr) names exactly one of
 /// these. Codes are snake_case and self-describing (an agent never needs a
 /// lookup table); `docs/reference/diagnostics.md` is this enum's rendered table and must
@@ -36,7 +36,7 @@ pub enum ScCode {
     /// "bad key" (that sends the user debugging the wrong thing).
     AgentNotAuthorized,
     /// A cryptographically-valid agent AIK that this machine's paired account
-    /// does not have: set up (`sc agent add`) under another SafeClaw account,
+    /// does not have: set up (`sc agent add`) under another Sprott account,
     /// or removed from this one (the daemon can't tell which). Checked
     /// before any vault-level check, so it never reads as `agent_not_authorized`
     /// ("not turned on for this vault"), whose fix is a Console toggle; the fix
@@ -126,8 +126,8 @@ impl ScCode {
     /// don't work around it, per P2).
     ///
     /// `cause` attributes the failure: `request`, `auth`, `vault`, `policy`,
-    /// `config`, `environment` (this machine's network, NOT SafeClaw),
-    /// `upstream` (the service side, NOT SafeClaw), `internal`.
+    /// `config`, `environment` (this machine's network, NOT Sprott),
+    /// `upstream` (the service side, NOT Sprott), `internal`.
     pub fn row(&self) -> (u16, &'static str, &'static str, &'static str, &'static str) {
         use ScCode::*;
         match self {
@@ -373,7 +373,7 @@ impl ScCode {
             UpgradeRequired => (
                 426,
                 "upgrade_required",
-                "SafeClaw needs an update",
+                "Sprott needs an update",
                 "configure",
                 "config",
             ),
@@ -406,21 +406,21 @@ pub const VAULT_KEY_CHANGED_STATUS_MSG: &str = "key changed: this vault's member
 pub const DEVICE_NOT_ADMITTED_MSG: &str = "This device needs to be paired again: run `sc login`.";
 
 pub const DEVICE_ACCOUNT_MISSING_MSG: &str =
-    "This device is no longer paired with a SafeClaw account. Run `sc login` to pair it again.";
+    "This device is no longer paired with a Sprott account. Run `sc login` to pair it again.";
 
 /// The ONE remediation line for [`ScCode::AgentNotAdmitted`].
-pub const AGENT_NOT_ADMITTED_MSG: &str = "This agent isn't admitted to the SafeClaw account this machine is signed in to (never approved, or removed). Run `sc agent add` to set it up again.";
+pub const AGENT_NOT_ADMITTED_MSG: &str = "This agent isn't admitted to the Sprott account this machine is signed in to (never approved, or removed). Run `sc agent add` to set it up again.";
 
 /// The ONE remediation line for [`ScCode::LedgerStale`].
-pub const LEDGER_STALE_MSG: &str = "locked: SafeClaw could not reach your account for 7 days. Check this machine's network; vaults unlock again once it reconnects (`sc up`).";
+pub const LEDGER_STALE_MSG: &str = "locked: Sprott could not reach your account for 7 days. Check this machine's network; vaults unlock again once it reconnects (`sc up`).";
 
 /// The ONE remediation line for [`ScCode::LedgerDeviceRevoked`].
 pub const LEDGER_DEVICE_REVOKED_MSG: &str =
-    "This device was removed from your SafeClaw account. Run `sc login` to pair it again.";
+    "This device was removed from your Sprott account. Run `sc login` to pair it again.";
 
 /// The remediation line for [`ScCode::AgentNotInAccount`] (raised by the cloud
 /// op relay; the daemon answers [`ScCode::AgentNotAdmitted`]).
-pub const AGENT_NOT_IN_ACCOUNT_MSG: &str = "This agent isn't registered to the SafeClaw account this machine is signed in to. Run `sc agent add` to set it up.";
+pub const AGENT_NOT_IN_ACCOUNT_MSG: &str = "This agent isn't registered to the Sprott account this machine is signed in to. Run `sc agent add` to set it up.";
 
 /// RFC 9457 `application/problem+json` body for a code + detail message.
 /// Extension members: `code` / `action` / `cause` (see [`ScCode::row`]),
@@ -429,7 +429,7 @@ pub const AGENT_NOT_IN_ACCOUNT_MSG: &str = "This agent isn't registered to the S
 pub fn problem_body(code: ScCode, detail: &str) -> serde_json::Value {
     let (status, code_s, title, action, cause) = code.row();
     json!({
-        "type": format!("https://safeclaw.pro/errors/{}", code_s),
+        "type": format!("https://sprott.ai/errors/{}", code_s),
         "title": title,
         "status": status,
         "detail": detail,
@@ -731,7 +731,7 @@ mod tests {
         );
         let (code, detail) = AppError::LedgerStale.code();
         assert_eq!((code.as_str(), code.status()), ("ledger_stale", 423));
-        assert!(detail.starts_with("locked: SafeClaw could not reach your account for 7 days"));
+        assert!(detail.starts_with("locked: Sprott could not reach your account for 7 days"));
     }
 
     /// problem_body carries both the 9457 members and the legacy dual-emit.
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(b["error"], "vault_locked");
         assert_eq!(b["status"], 423);
         assert_eq!(b["detail"], b["message"]);
-        assert_eq!(b["type"], "https://safeclaw.pro/errors/vault_locked");
+        assert_eq!(b["type"], "https://sprott.ai/errors/vault_locked");
         assert_eq!(b["action"], "unlock");
     }
 }

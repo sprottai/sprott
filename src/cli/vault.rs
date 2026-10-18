@@ -251,12 +251,12 @@ fn interactive_pick(on_empty: OnEmpty) -> Result<Option<String>, String> {
     Ok(Some(trimmed.to_string()))
 }
 
-/// `sc vault create`: vaults are created in the SafeClaw console, where the
+/// `sc vault create`: vaults are created in the Sprott console, where the
 /// identity key lives (it never reaches this daemon). Print the link; the new
 /// vault syncs to this machine on its own once created.
 async fn run_create(_args: VaultCreateArgs) -> Result<(), String> {
     let url = console_page("/vaults?new=vault")?;
-    eprintln!("Create the vault in the SafeClaw console:");
+    eprintln!("Create the vault in the Sprott console:");
     eprintln!("  {}", url);
     eprintln!("This machine picks it up automatically once it exists.");
     Ok(())
@@ -266,7 +266,7 @@ async fn run_create(_args: VaultCreateArgs) -> Result<(), String> {
 /// pairing. Vault creation and passkey enrollment happen there.
 pub(crate) fn console_page(path: &str) -> Result<String, String> {
     let origin = crate::cli::active::console_origin()
-        .ok_or("this machine isn't paired to SafeClaw yet: run `sc login` first")?;
+        .ok_or("this machine isn't paired to Sprott yet: run `sc login` first")?;
     Ok(format!("{}{}", origin.trim_end_matches('/'), path))
 }
 

@@ -1,6 +1,6 @@
 # `sc run` and phantoms: use a key without seeing it
 
-The one habit that makes SafeClaw work: **the agent handles phantoms, never
+The one habit that makes Sprott work: **the agent handles phantoms, never
 values**. A phantom is a placeholder like `__sc__github__`. Put it exactly
 where the credential would go, prefix the command with `sc run --`, and the
 proxy substitutes the real value at egress, only toward that connection's own
@@ -71,5 +71,5 @@ Check in order:
 1. Did the command actually run under `sc run --`?
 2. Is the phantom verbatim from `sc connection ls`?
 3. Is the destination one of that connection's hosts?
-4. Still failing: `sc doctor`, and the error's `SafeClaw: <code>` line maps to
+4. Still failing: `sc doctor`, and the error's `Sprott: <code>` line maps to
    a fix in [DIAGNOSTICS.md](reference/diagnostics.md).

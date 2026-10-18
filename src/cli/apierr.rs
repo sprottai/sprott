@@ -1,4 +1,4 @@
-//! Uniform CLI rendering of SafeClaw API error bodies.
+//! Uniform CLI rendering of Sprott API error bodies.
 //!
 //! Both daemon ports answer errors as RFC 9457 problem+json — `code` +
 //! `detail`, with legacy `error` / `message` dual-emitted. Render them as ONE
@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn parses_problem_json_and_legacy_and_raw() {
-        let p = r#"{"type":"https://safeclaw.pro/errors/vault_locked","code":"vault_locked","detail":"vault locked","error":"vault_locked","message":"vault locked"}"#;
+        let p = r#"{"type":"https://sprott.ai/errors/vault_locked","code":"vault_locked","detail":"vault locked","error":"vault_locked","message":"vault locked"}"#;
         assert_eq!(
             parse(p),
             (Some("vault_locked".into()), "vault locked".into())

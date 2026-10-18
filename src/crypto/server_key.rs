@@ -1,4 +1,4 @@
-//! Pinned SafeClaw server signing key + verification of the server-signed sync
+//! Pinned Sprott server signing key + verification of the server-signed sync
 //! envelope and contact token (team §9 — "谁是权威谁签名", the server-authority
 //! half).
 //!
@@ -21,7 +21,7 @@
 
 use crate::identity;
 
-/// The pinned DEV SafeClaw server signing public key (Ed25519, 32-byte hex). The
+/// The pinned DEV Sprott server signing public key (Ed25519, 32-byte hex). The
 /// matching private key lives server-side only (Supabase `server_signing_key`
 /// row, or the `SAFECLAW_SERVER_SIGNING_KEY` env in prod). Overridable at runtime
 /// via `SAFECLAW_SERVER_PUBKEY`.

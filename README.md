@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="docs/logo.png" alt="SafeClaw" width="80" />
+  <img src="docs/logo.png" alt="Sprott" width="80" />
 </p>
 
-<h1 align="center">SafeClaw</h1>
+<h1 align="center">Sprott</h1>
 
 <p align="center"><b>Let your AI agent use your API keys. It never holds them.</b></p>
 
 ## Set up
 
 ```bash
-curl -fsSL https://safeclaw.pro/install.sh | sh
+curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 Paste it to your AI agent, or run it in a terminal. It installs `sc` and the agent skill. When an agent runs it, the installer continues straight into `sc setup`; in a terminal it prints the next step.
 
-Are you an AI agent? Run the command above and follow what it prints. Install only from safeclaw.pro or github.com/getsafeclaw/safeclaw.
+Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/getsafeclaw/safeclaw.
 
 <p align="center">
   <a href="https://github.com/getsafeclaw/safeclaw/releases"><img src="https://img.shields.io/github/v/release/getsafeclaw/safeclaw?label=release&color=2ea44f" alt="release"></a>
@@ -23,7 +23,7 @@ Are you an AI agent? Run the command above and follow what it prints. Install on
 </p>
 
 <p align="center">
-  <a href="https://safeclaw.pro">safeclaw.pro</a> ·
+  <a href="https://sprott.ai">sprott.ai</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#faq">FAQ</a> ·
@@ -32,13 +32,13 @@ Are you an AI agent? Run the command above and follow what it prints. Install on
 
 <!-- demo GIF goes here once recorded: see demo/README.md -->
 
-Pasting an API key into an agent's env hands it to every prompt injection, rogue skill, and log line downstream. SafeClaw takes the key out of the agent's hands entirely:
+Pasting an API key into an agent's env hands it to every prompt injection, rogue skill, and log line downstream. Sprott takes the key out of the agent's hands entirely:
 
 ```bash
 GITHUB_TOKEN=__sc__github__ sc run -- gh pr list
 ```
 
-`__sc__github__` is a **phantom**: a placeholder the agent uses instead of the credential. SafeClaw's local proxy swaps it for the real token at the network edge, only toward that service's own hosts. The agent gets the API response, never the key. Sensitive calls pause until you approve them with a passkey tap (Touch ID, Windows Hello, or a security key).
+`__sc__github__` is a **phantom**: a placeholder the agent uses instead of the credential. Sprott's local proxy swaps it for the real token at the network edge, only toward that service's own hosts. The agent gets the API response, never the key. Sensitive calls pause until you approve them with a passkey tap (Touch ID, Windows Hello, or a security key).
 
 ## Why
 
@@ -51,7 +51,7 @@ GITHUB_TOKEN=__sc__github__ sc run -- gh pr list
 ## How it works
 
 ```
-AI agent ──── sc run -- gh pr list ────► SafeClaw proxy ── real token ──► api.github.com
+AI agent ──── sc run -- gh pr list ────► Sprott proxy ── real token ──► api.github.com
  holds only                               (localhost)
  __sc__github__                                │
                                                ├─ vault: sealed under your passkey;
@@ -60,7 +60,7 @@ AI agent ──── sc run -- gh pr list ────► SafeClaw proxy ──
                                                   passkey tap
 ```
 
-`safeclaw` and `sc` are the same binary. The daemon runs on your machine; the control plane at [safeclaw.pro](https://safeclaw.pro) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
+`safeclaw` and `sc` are the same binary. The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
 
 Only traffic routed through `sc run` is touched. A phantom sent anywhere else reaches the upstream as a literal string and fails with a clean 401: nothing to leak.
 
@@ -71,7 +71,7 @@ GitHub, OpenAI, Anthropic, Gemini, Gmail, Google Drive, GCP, Supabase, Railway, 
 **1. Install.** Run the one setup command:
 
 ```bash
-curl -fsSL https://safeclaw.pro/install.sh | sh
+curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 It installs `sc` in `~/.local/bin`, verifies the download's SHA256, and installs the agent skill. When run by an agent, it continues straight into `sc setup`; in a terminal it prints the next step. It uses no sudo.
@@ -108,7 +108,7 @@ Full walkthrough: [docs/quickstart.md](docs/quickstart.md).
 
 ## Teach your agent
 
-Agents learn SafeClaw from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sc skill install` and `sc upgrade` installs it again. Without `sc`, an agent can add it with `npx skills add getsafeclaw/safeclaw`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sc get`; see [docs/sc-run.md](docs/sc-run.md).
+Agents learn Sprott from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sc skill install` and `sc upgrade` installs it again. Without `sc`, an agent can add it with `npx skills add getsafeclaw/safeclaw`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sc get`; see [docs/sc-run.md](docs/sc-run.md).
 
 ## CLI
 
@@ -129,7 +129,7 @@ Maintenance   sc unlock · lock · sync · logs · doctor · upgrade · proxy ·
 
 **Can't the agent just run `sc get`?** Every `sc get` is passkey-gated; it exists for you at a terminal, not for agents. An agent never needs the raw value: the phantom + `sc run` path uses a credential without revealing it. Patterns and anti-patterns: [docs/sc-run.md](docs/sc-run.md).
 
-**What about traffic I don't route through `sc run`?** Untouched. SafeClaw is not a machine-wide MITM; only commands you deliberately route are brokered, and a phantom sent unrouted is a worthless string.
+**What about traffic I don't route through `sc run`?** Untouched. Sprott is not a machine-wide MITM; only commands you deliberately route are brokered, and a phantom sent unrouted is a worthless string.
 
 **What can a compromised agent do?** Spend credentials only through the proxy, only toward each connection's own hosts, under your policy, with sensitive actions waiting for your passkey. It cannot read the values, and outside the proxy its phantoms are inert.
 
@@ -143,4 +143,4 @@ Maintenance   sc unlock · lock · sync · logs · doctor · upgrade · proxy ·
 
 ## License
 
-[Functional Source License 1.1 (Apache-2.0 future)](LICENSE), **FSL-1.1-ALv2**. Download, run, study, modify, and self-host freely for any purpose except a Competing Use: offering SafeClaw (or a derivative) to others as a commercial substitute. Each release converts to Apache-2.0 two years after it ships. This repo is the open client of a cloud-connected product; the cloud service stays proprietary.
+[Functional Source License 1.1 (Apache-2.0 future)](LICENSE), **FSL-1.1-ALv2**. Download, run, study, modify, and self-host freely for any purpose except a Competing Use: offering Sprott (or a derivative) to others as a commercial substitute. Each release converts to Apache-2.0 two years after it ships. This repo is the open client of a cloud-connected product; the cloud service stays proprietary.

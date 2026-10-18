@@ -51,6 +51,6 @@ request itself, not global daemon state. Your CLI's active vault comes from
 ## The honest edge case
 
 Lose every enrolled passkey and the vault stays sealed forever; nobody,
-including SafeClaw, can decrypt it. That is the price of the cloud being
+including Sprott, can decrypt it. That is the price of the cloud being
 unable to read your keys. Enroll a backup passkey (your vault's Passkeys tab)
 on day one.

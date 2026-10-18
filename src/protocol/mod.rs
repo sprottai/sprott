@@ -1,7 +1,7 @@
 //! SUDP protocol layer (deployment-facing).
 //!
 //! - `operation`: re-exports of [`sudp::Operation`], [`sudp::Act`],
-//!   [`sudp::ActType`], etc., plus SafeClaw helpers that pull
+//!   [`sudp::ActType`], etc., plus Sprott helpers that pull
 //!   deployment-specific payloads out of `act.scope` (Enroll credential,
 //!   Write patch, Export target).
 //! - `grant`: `Grant` (wire form) + `validate_grant` (pre-redemption

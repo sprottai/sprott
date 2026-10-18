@@ -1,6 +1,6 @@
-# SafeClaw Docs
+# Sprott Docs
 
-This documentation explains SafeClaw through concepts, task guides, security
+This documentation explains Sprott through concepts, task guides, security
 pages, and reference pages. Contributor design docs live outside this tree in
 [`design/`](https://github.com/getsafeclaw/safeclaw/tree/main/design).
 
@@ -24,7 +24,7 @@ New here? Read [Overview](overview.md), then do the
 |---|---|
 | [Quickstart](quickstart.md) | Zero to first brokered call in five minutes |
 | [`sc run` and phantoms](sc-run.md) | The patterns, and the `sc get` anti-pattern |
-| [For your agent](for-your-agent.md) | Handing SafeClaw to an agent: skill file, paste-ready prompt |
+| [For your agent](for-your-agent.md) | Handing Sprott to an agent: skill file, paste-ready prompt |
 
 ## Security
 

@@ -194,7 +194,7 @@ mod tests {
     use super::*;
     use rand::{rngs::StdRng, SeedableRng};
 
-    const ORIGIN: &str = "https://app.dev.safeclaw.pro";
+    const ORIGIN: &str = "https://app.dev.sprott.ai";
 
     #[test]
     fn both_sides_agree_and_macs_bind() {
@@ -332,7 +332,7 @@ mod tests {
         };
         let (x, y) = run("12345679", ORIGIN);
         assert_ne!(&x[..], &y[..], "wrong secret");
-        let (x, y) = run("12345678", "https://app.safeclaw.pro");
+        let (x, y) = run("12345678", "https://app.sprott.ai");
         assert_ne!(&x[..], &y[..], "dev and prod never cross");
     }
 

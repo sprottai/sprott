@@ -29,7 +29,7 @@ level = "ask-always"
 
 # ── Mint a durable credential (escapes the broker) ───────────────────────────
 # A new API key (the secret/service-role class is god-mode over the database) is
-# a credential SafeClaw never brokers — minting one via the API end-runs
+# a credential Sprott never brokers — minting one via the API end-runs
 # credential separation. Editing/deleting a specific key (…/api-keys/{id}) is a
 # deeper path and stays on the floor.
 [[rule]]

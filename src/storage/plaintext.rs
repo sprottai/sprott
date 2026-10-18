@@ -358,7 +358,7 @@ pub struct ConnectionRemoval {
 }
 
 /// Plan the removal of connection `id` (record `rec`) against the vault's
-/// connections and native keys. External-store keys are never listed: SafeClaw
+/// connections and native keys. External-store keys are never listed: Sprott
 /// only reads them, so removal never deletes one.
 pub fn connection_removal(
     id: &str,

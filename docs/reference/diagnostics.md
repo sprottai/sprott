@@ -1,6 +1,6 @@
 # Diagnostics: error codes and surfaces
 
-This page lists SafeClaw error codes, response shapes, actions, and known blind spots. SafeClaw reports problems loudly and leaves unrelated upstream errors without a SafeClaw marker.
+This page lists Sprott error codes, response shapes, actions, and known blind spots. Sprott reports problems loudly and leaves unrelated upstream errors without a Sprott marker.
 
 `src/error.rs::ScCode` is the single registry; this table is its rendering and
 changes in the same commit. Codes are snake_case and stable, so never renumber
@@ -11,15 +11,15 @@ or reuse them.
 | Surface | Shape |
 |---|---|
 | Control port :23293 + API face :23294 | RFC 9457 `application/problem+json`: `type` (`https://safeclaw.pro/errors/<code>`), `title`, `status`, `detail` + extensions `code`, `action`, `cause`. Legacy `error`/`message` dual-emitted for one transition window. |
-| Proxy MITM plane :23294 | `text/plain` (deliberately never parseable as the upstream's payload), body first line `SafeClaw: <code>: <message>`, header `x-safeclaw-error: <code>`. Captive bodies (approval / widen) keep their text+JSON-tail format and carry the code header. |
+| Proxy MITM plane :23294 | `text/plain` (deliberately never parseable as the upstream's payload), body first line `Sprott: <code>: <message>`, header `x-safeclaw-error: <code>`. Captive bodies (approval / widen) keep their text+JSON-tail format and carry the code header. |
 | CLI stderr | `<code>: <message>` (`cli/apierr.rs`), same code the wire carried. |
 
 `action` = what the agent does next: `unlock` (have the user unlock), `approve`
 (follow the approve URL in the body), `retry`, `configure` (a knob, named in
 the message), `fix_request`, `none` (explicit refusal, do not work around it).
 `cause` = attribution: `request`/`auth`/`vault`/`policy`/`config`/`internal`,
-plus `environment` and `upstream` which are NOT SafeClaw problems, reported by
-SafeClaw because it is the hop that observed them.
+plus `environment` and `upstream` which are NOT Sprott problems, reported by
+Sprott because it is the hop that observed them.
 
 ## Codes
 
@@ -48,7 +48,7 @@ SafeClaw because it is the hop that observed them.
 | `wk_refused_v2` | 400 | none | request | an approval delivered an unlock secret instead of the vault key and the approver's signature; an approver's identity key never leaves their browser, so the daemon refuses it. The request stays pending; reload the approval page (it needs the current console) |
 | `grant_id_invalid` | 403 | none | auth | the approval's identity signature is missing, does not verify, or names someone other than the owner of the passkey that approved; the request stays pending |
 | `device_not_admitted` | 403 | configure | auth | this device has no valid owner-signed admit over its device and daemon keys, so no approval can be sealed to it. Fix: run `sc setup --name <name>` or `sc login` |
-| `ledger_stale` | 423 | retry | environment | SafeClaw could not pull a verified device list from your account for 7 days; vaults are locked (data stays) until it reconnects |
+| `ledger_stale` | 423 | retry | environment | Sprott could not pull a verified device list from your account for 7 days; vaults are locked (data stays) until it reconnects |
 | `ledger_device_revoked` | 403 | configure | auth | the account owner revoked this device (a verified revoke in the device list; a newer admit of a re-paired device follows its revoke). The daemon latches it. Fix: run `sc setup --name <name>` or `sc login` to pair again |
 | `ledger_head_invalid` | 403 | none | auth | the account's device list does not match its owner-signed head (a forged or truncated list); the daemon keeps its previous view |
 | `broker_body_limit` | 413 | configure | config | body exceeds the inspectable cap; raise `--body-cap` if legitimate |
@@ -84,7 +84,7 @@ console's chips to change in the same release: parked as follow-up.
 
 1. **Not in the path**: the process wasn't routed (no `sc run` / env bundle):
    the phantom reaches the upstream literally. Upstreams reject (401) or
-   silently degrade; either way there is no SafeClaw marker. The phantom
+   silently degrade; either way there is no Sprott marker. The phantom
    string itself (`__sc__*__`) is the greppable brand; the skill's routing
    check covers this.
 2. **Locked before ever unlocking (this boot)**: anchor hosts live in the

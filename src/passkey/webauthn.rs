@@ -20,7 +20,7 @@
 //!     origin, one RP ID): the reported origin when it is on the list, and the
 //!     listed RP ID the authenticator data names.
 //!
-//! SafeClaw currently only verifies `webauthn.get` assertions (registration
+//! Sprott currently only verifies `webauthn.get` assertions (registration
 //! goes through a separate enrollment path); the historical
 //! `AssertionKind::Create` variant was unused and has been removed.
 

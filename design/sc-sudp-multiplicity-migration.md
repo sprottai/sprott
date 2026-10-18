@@ -3,7 +3,7 @@
 sudp `v0.3.0` generalized `Multiplicity` to an execution budget. This records what
 SC adopted (and, more importantly, what it deliberately did NOT) and why.
 
-## Outcome: keep `multiplicity = 1`; reuse stays a SafeClaw cache layer
+## Outcome: keep `multiplicity = 1`; reuse stays a Sprott cache layer
 
 We do NOT model ask-once reuse as a sudp `unbounded` grant. We bumped the dep and
 fixed the wire, nothing more.
@@ -20,7 +20,7 @@ read with **zero sudp executions and zero vault opens**.
 sudp's `multiplicity` is defined as *executions under one redeemed grant*. SC
 performs exactly one. So `multiplicity = 1` is the **truthful** value; declaring
 `unbounded` would overclaim what the sudp op authorizes. The ask-once reuse is a
-SafeClaw residency feature that sits **above** sudp and is orthogonal to
+Sprott residency feature that sits **above** sudp and is orthogonal to
 multiplicity — it is not a sudp budget and should not masquerade as one.
 
 This is consistent with the standing no-hold-`W_c` rule: the very reason SC cannot

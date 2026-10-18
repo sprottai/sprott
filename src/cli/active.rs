@@ -555,7 +555,7 @@ pub fn grant_url(op_id: &str) -> String {
     }
 }
 
-/// `https://api.dev.safeclaw.pro` → `https://dev.safeclaw.pro`. Only strips a
+/// `https://api.dev.sprott.ai` → `https://dev.sprott.ai`. Only strips a
 /// leading `api.` on the host; everything else (scheme, port, path) is kept.
 /// A backend host without an `api.` prefix is returned unchanged (self-host
 /// where frontend == backend).
@@ -610,7 +610,7 @@ fn scheme_host(url: &str) -> Option<String> {
 }
 
 /// The agent's broker-face URL from the env: `$SAFECLAW_BROKER_URL` (the
-/// self-describing name, SafeClaw's broker/API face, not the control port).
+/// self-describing name, Sprott's broker/API face, not the control port).
 /// Empty values are ignored.
 pub fn env_broker_url() -> Option<String> {
     std::env::var("SAFECLAW_BROKER_URL")
@@ -1011,12 +1011,12 @@ mod tests {
     #[test]
     fn derive_frontend_strips_api_label() {
         assert_eq!(
-            derive_frontend_from_backend("https://api.dev.safeclaw.pro"),
-            "https://dev.safeclaw.pro"
+            derive_frontend_from_backend("https://api.dev.sprott.ai"),
+            "https://dev.sprott.ai"
         );
         assert_eq!(
-            derive_frontend_from_backend("https://api.safeclaw.pro/"),
-            "https://safeclaw.pro"
+            derive_frontend_from_backend("https://api.sprott.ai/"),
+            "https://sprott.ai"
         );
         // No api. prefix (self-host) → unchanged.
         assert_eq!(

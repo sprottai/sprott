@@ -18,7 +18,7 @@
 //!   - **absolute-form plain-HTTP** (`GET http://host/… `) → a non-brokered
 //!     UPSTREAM passthrough (the daemon substitutes NO phantom over plain HTTP —
 //!     it refuses one — so there's nothing to authenticate). Forward with NO
-//!     SafeClaw credential; only force `Connection: close` and strip any stray
+//!     Sprott credential; only force `Connection: close` and strip any stray
 //!     hop-by-hop `Proxy-Authorization`. The child's own headers (incl. its
 //!     Authorization to the origin) pass through untouched.
 //!
@@ -54,7 +54,7 @@ pub enum ShimReq {
     Connect { authority: String },
     /// Absolute-form plain-HTTP (`GET http://host/… HTTP/1.1`) — a non-brokered
     /// UPSTREAM passthrough. The daemon substitutes no phantom over plain HTTP, so
-    /// there's nothing to authenticate: the shim forwards with NO SafeClaw
+    /// there's nothing to authenticate: the shim forwards with NO Sprott
     /// credential (only `Connection: close` + stray `Proxy-Authorization` strip).
     /// `authority` = the target `host[:port]` (kept for classification/tests).
     Forward { authority: String },
@@ -144,13 +144,13 @@ pub fn inject_bearer(head: &str, token: &str) -> String {
 }
 
 /// Rewrite an UPSTREAM-bound (absolute-form) plain-HTTP request head for a
-/// non-brokered passthrough: inject NO SafeClaw credential (the daemon
+/// non-brokered passthrough: inject NO Sprott credential (the daemon
 /// substitutes no phantom over plain HTTP, so there's nothing to authenticate).
 /// Strip only a stray hop-by-hop `Proxy-Authorization` (the child's `*_PROXY` has
 /// no creds, so it shouldn't set one; drop it if it did) and force `Connection:
 /// close` so the raw relay can't carry a second, un-reclassified request. The
 /// child's OWN `Authorization` (its credential to the origin) passes through
-/// untouched — it's the child's header, never a SafeClaw secret.
+/// untouched — it's the child's header, never a Sprott secret.
 pub fn forward_head(head: &str) -> String {
     let (req_line, rest) = head.split_once("\r\n").unwrap_or((head, ""));
     let preserved: String = rest
@@ -266,7 +266,7 @@ async fn handle_conn(mut child: TcpStream, cfg: Arc<ShimConfig>) -> std::io::Res
             // absolute-form → the daemon FORWARDS this upstream. A phantom over
             // plain HTTP is refused by the daemon (it can only substitute inside
             // TLS), so this is a non-brokered passthrough with NOTHING to
-            // authenticate: forward with no SafeClaw credential (Connection: close
+            // authenticate: forward with no Sprott credential (Connection: close
             // + stray Proxy-Authorization strip only). The child's own headers,
             // including any Authorization to the origin, pass through untouched.
             let mut daemon = TcpStream::connect(&cfg.daemon_authority).await?;
@@ -356,13 +356,13 @@ mod tests {
 
     #[test]
     fn forward_carries_no_safeclaw_credential_and_preserves_child_auth() {
-        // A plain-HTTP passthrough must inject NO SafeClaw credential (the daemon
+        // A plain-HTTP passthrough must inject NO Sprott credential (the daemon
         // brokers nothing over plain HTTP). The child's OWN Authorization to the
         // origin passes through; only a stray Proxy-Authorization is stripped and
         // Connection is forced to close.
         let head = "GET http://api.example.com/v1 HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer child-own-token\r\nProxy-Authorization: Basic stray\r\nConnection: keep-alive\r\nAccept: */*\r\n\r\n";
         let out = forward_head(head);
-        // No SafeClaw credential injected anywhere.
+        // No Sprott credential injected anywhere.
         assert!(!out.contains("Basic "), "no injected Basic credential");
         assert!(!out.contains("stray"), "stray Proxy-Authorization stripped");
         assert!(!out.contains("keep-alive"));

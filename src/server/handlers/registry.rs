@@ -1,6 +1,6 @@
 //! Service discovery — two endpoints, one shared catalog, TWO arrays.
 //!
-//! - `GET /registry` — static service catalog. What SafeClaw *supports*,
+//! - `GET /registry` — static service catalog. What Sprott *supports*,
 //!   vault-agnostic. Drives /try landing, docs, public browse. No vault
 //!   state, and `connections` is empty. Also produced offline (no server) via
 //!   `sc registry` / [`render_catalog`] for CI.
@@ -106,7 +106,7 @@ impl RegistryQuery {
     }
 }
 
-/// A catalog SERVICE row — what SafeClaw supports. Carries NO `connected` /
+/// A catalog SERVICE row — what Sprott supports. Carries NO `connected` /
 /// `phantoms` (a phantom names a CONNECTION, not a service; connection state
 /// lives on the `connections` array).
 #[derive(Debug, Serialize)]
@@ -244,7 +244,7 @@ pub struct RegistryPolicyRule {
 #[derive(Debug, Serialize)]
 pub struct RegistryResponse {
     pub version: u32,
-    /// The browse catalog — what SafeClaw supports.
+    /// The browse catalog — what Sprott supports.
     pub services: Vec<RegistryService>,
     /// Established connections (1:1 with `aux.connections`, derived
     /// `connected`/`phantoms`). Empty on the static catalog + when locked.

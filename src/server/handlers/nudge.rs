@@ -162,7 +162,7 @@ mod tests {
         }
         for bad in [
             "evil.example:23293",
-            "safeclaw.pro",
+            "sprott.ai",
             "127.0.0.1.evil.example",
         ] {
             assert!(!host_is_loopback(&headers_with_host(bad)), "{bad}");

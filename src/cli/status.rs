@@ -248,7 +248,7 @@ fn ledger_text(standing: Option<&str>, checked_at: Option<u64>, now: u64) -> Str
         Some("admitted") => format!("admitted{}", checked.unwrap_or_default()),
         Some("not_admitted") => "not admitted to your account: run `sc login`".to_string(),
         Some("account_missing") => crate::error::DEVICE_ACCOUNT_MISSING_MSG.to_string(),
-        Some("stale") => "locked: SafeClaw could not reach your account for 7 days".to_string(),
+        Some("stale") => "locked: Sprott could not reach your account for 7 days".to_string(),
         Some("revoked") => "removed from your account: run `sc login` to pair it again".to_string(),
         _ => "unknown (daemon did not report its account standing)".to_string(),
     }
@@ -392,7 +392,7 @@ pub async fn run(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `https://dev.safeclaw.pro/foo` → `dev.safeclaw.pro`. Scheme and any path are
+/// `https://dev.sprott.ai/foo` → `dev.sprott.ai`. Scheme and any path are
 /// dropped; a bare host (no scheme) is returned unchanged.
 fn origin_host(origin: &str) -> &str {
     origin
@@ -549,7 +549,7 @@ mod env_label_tests {
         );
         assert_eq!(
             ledger_text(Some("stale"), None, 0),
-            "locked: SafeClaw could not reach your account for 7 days"
+            "locked: Sprott could not reach your account for 7 days"
         );
         assert!(ledger_text(Some("not_admitted"), None, 0).contains("`sc login`"));
         assert_eq!(

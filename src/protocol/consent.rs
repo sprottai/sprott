@@ -326,11 +326,11 @@ mod tests {
         assert_eq!(v["action_zh"], json!("安装第三方服务"));
         assert_eq!(
             v["explain"],
-            json!("SafeClaw does not review third-party services. Connections that use one send credentials to the hosts it lists.")
+            json!("Sprott does not review third-party services. Connections that use one send credentials to the hosts it lists.")
         );
         assert_eq!(
             v["explain_zh"],
-            json!("SafeClaw 不审查第三方服务。使用它的连接会把凭证发往它列出的主机。")
+            json!("Sprott 不审查第三方服务。使用它的连接会把凭证发往它列出的主机。")
         );
         // The table round-trips with `detail` (a client parsing it back).
         let back: ActConsent = serde_json::from_value(v.clone()).unwrap();

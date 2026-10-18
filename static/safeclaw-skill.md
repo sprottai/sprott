@@ -1,6 +1,6 @@
-# SafeClaw skill (moved)
+# Sprott skill (moved)
 
-The SafeClaw agent skill now lives at
+The Sprott agent skill now lives at
 https://raw.githubusercontent.com/getsafeclaw/safeclaw/main/skills/safeclaw/SKILL.md
-Read that file instead. To set up SafeClaw, run
-`curl -fsSL https://safeclaw.pro/install.sh | sh` and follow what it prints.
+Read that file instead. To set up Sprott, run
+`curl -fsSL https://sprott.ai/install.sh | sh` and follow what it prints.

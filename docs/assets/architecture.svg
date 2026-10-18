@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 720" width="1040" height="720" role="img">
-  <title>How a brokered request flows through SafeClaw: the agent holds a phantom, the local broker swaps in the real value at egress, the vault stays sealed by your passkey, the cloud syncs only an encrypted blob and relays approvals.</title>
+  <title>How a brokered request flows through Sprott: the agent holds a phantom, the local broker swaps in the real value at egress, the vault stays sealed by your passkey, the cloud syncs only an encrypted blob and relays approvals.</title>
   <style>
     text { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
     .cap  { font-size: 11px; letter-spacing: .16em; fill: #8f7a52; font-weight: 600; }
@@ -32,7 +32,7 @@
   <rect x="0.5" y="0.5" width="1039" height="719" rx="16" fill="#0c0c0e" stroke="#26262b"/>
 
   <!-- header -->
-  <text class="cap" x="44" y="48">SAFECLAW · ONE BROKERED REQUEST, END TO END</text>
+  <text class="cap" x="44" y="48">SPROTT · ONE BROKERED REQUEST, END TO END</text>
   <line x1="782" y1="40" x2="810" y2="40" stroke="#c9a96e" stroke-width="2.5"/>
   <text class="lb" x="818" y="44">where the real value travels</text>
   <line x1="782" y1="62" x2="810" y2="62" stroke="#6b6b74" stroke-width="2"/>
@@ -76,7 +76,7 @@
 
   <!-- cloud -->
   <rect x="352" y="600" width="308" height="76" rx="12" fill="#141417" stroke="#2c2c33"/>
-  <text class="bt" x="368" y="628">SafeClaw cloud</text>
+  <text class="bt" x="368" y="628">Sprott cloud</text>
   <text class="bd" x="368" y="650">syncs the sealed vault, relays approvals</text>
   <text x="368" y="667" font-size="12" fill="#c9a96e">it cannot decrypt your vault</text>
 

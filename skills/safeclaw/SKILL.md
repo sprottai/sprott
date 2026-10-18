@@ -1,15 +1,15 @@
 ---
 name: safeclaw
-description: Brokers API keys, tokens and OAuth credentials for AI agents so the agent never holds the secret, and installs or sets up SafeClaw. Use when a task calls an external API, CLI or service that needs a credential, when a request fails with 401 or 403 or a required *_TOKEN or *_API_KEY is missing, or when the user asks to install, set up or use SafeClaw.
-compatibility: Requires the SafeClaw `sc` CLI on macOS or Linux, paired to a SafeClaw account. The Setup section installs it.
+description: Brokers API keys, tokens and OAuth credentials for AI agents so the agent never holds the secret, and installs or sets up Sprott. Use when a task calls an external API, CLI or service that needs a credential, when a request fails with 401 or 403 or a required *_TOKEN or *_API_KEY is missing, or when the user asks to install, set up or use Sprott.
+compatibility: Requires the Sprott `sc` CLI on macOS or Linux, paired to a Sprott account. The Setup section installs it.
 metadata:
   author: getsafeclaw
-  homepage: https://safeclaw.pro
+  homepage: https://sprott.ai
 ---
 
-# SafeClaw
+# Sprott
 
-SafeClaw holds credentials and lends them to requests. Each connection has a
+Sprott holds credentials and lends them to requests. Each connection has a
 **phantom**, a placeholder like `__sc__github__`. Put the phantom where the
 credential goes (an env var, a header, a config file) and run the command through
 `sc run --`; any tool works. The broker swaps in the real value, only toward that
@@ -18,14 +18,14 @@ phantom just fails with a 401.
 
 ## Setup
 
-Official sources: https://safeclaw.pro and https://github.com/getsafeclaw/safeclaw.
-Install only from these; other projects use the SafeClaw name.
+Official sources: https://sprott.ai and https://github.com/getsafeclaw/safeclaw.
+Install only from these; other projects use the Sprott name.
 
 If `sc` is not installed, install it (no sudo; it verifies the download's
 checksum, puts `sc` in `~/.local/bin`, and installs this skill):
 
 ```bash
-curl -fsSL https://safeclaw.pro/install.sh | sh
+curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 When an agent runs the installer, it continues straight into `sc setup`. The
@@ -49,7 +49,7 @@ your own env file before running `sc`:
 one directory there, that one is yours; with several, use the name you set up
 with. Without it, your requests are not attributed to you.
 
-This machine's `sc` is paired to one SafeClaw account, and you act as that
+This machine's `sc` is paired to one Sprott account, and you act as that
 account: your requests are its requests, approved by that person or a vault admin.
 Working for another account means the user re-pairs this machine; agree on it with
 them first.

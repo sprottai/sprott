@@ -42,7 +42,7 @@ pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
     // NOT bare `version` (= CARGO_PKG_VERSION): rc builds must self-report
     // their release tag here too, same as `sc status` / the custom prints.
     version = crate::build_version(),
-    about = "SafeClaw: passkey-gated credential broker"
+    about = "Sprott: passkey-gated credential broker"
 )]
 pub struct Cli {
     /// Target vault for this invocation (any subcommand, any position): an id, a
@@ -66,12 +66,12 @@ pub enum Command {
     /// Set up this machine and one agent without prompting. Re-run the command
     /// after completing each browser approval until it reports done.
     Setup(SetupArgs),
-    /// Install or remove the SafeClaw agent skill.
+    /// Install or remove the Sprott agent skill.
     Skill(SkillArgs),
-    /// Print SafeClaw's status: the daemon (running? version) and the active
+    /// Print Sprott's status: the daemon (running? version) and the active
     /// vault (which one, locked/unlocked, key count).
     Status(StatusArgs),
-    /// Get SafeClaw running and ready: install + start the daemon if needed,
+    /// Get Sprott running and ready: install + start the daemon if needed,
     /// then unlock the vault (one passkey tap). Idempotent — the everyday
     /// "make sure it's up" command (the `tailscale up` idiom; the skill's
     /// lazy-start). This is the single setup entrypoint after `sc login`.
@@ -151,7 +151,7 @@ pub enum Command {
     /// verify its sha256, and replace the running binary in place. No-op when
     /// already current. This is also how the baked cloud domain changes ship.
     Upgrade(UpgradeArgs),
-    /// Pair this host to your SafeClaw account: prints a short code and an
+    /// Pair this host to your Sprott account: prints a short code and an
     /// approval link; you approve in the browser, then this host gets its
     /// cloud-side daemon credential. Writes `~/.safeclaw/device-key` (0600). Run once per host (re-run to repair/re-pair).
     /// `sc login` then brings the daemon up and unlocks for you; `sc up` is the
@@ -177,7 +177,7 @@ pub enum Command {
     Rm(RmArgs),
     /// Run a command with the resident credential proxy pasted into its
     /// environment — the everyday, zero-human way an agent routes one command's
-    /// traffic through SafeClaw. `sc run -- <cmd…>` execs the child with the
+    /// traffic through Sprott. `sc run -- <cmd…>` execs the child with the
     /// proxy + CA env bundle merged in; `sc run --export-env` prints the same
     /// bundle as shell `export` lines for `eval "$(sc run --export-env)"`. No
     /// plaintext secret ever enters the child's env — the agent writes the
@@ -572,7 +572,7 @@ pub enum AgentSubcommand {
     Add(AgentAddArgs),
     /// List this account's agents (name, key prefix, last-used).
     Ls,
-    /// Remove an agent: prints the SafeClaw console page where the owner signs
+    /// Remove an agent: prints the Sprott console page where the owner signs
     /// the removal. Every device refuses the agent at its next ledger pull.
     Rm(AgentRmArgs),
 }
@@ -629,22 +629,22 @@ pub struct SkillArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SkillSubcommand {
-    /// Install or update the SafeClaw skill for agents on this machine.
+    /// Install or update the Sprott skill for agents on this machine.
     Install(SkillInstallArgs),
-    /// Remove the skill files previously written by SafeClaw.
+    /// Remove the skill files previously written by Sprott.
     Remove(SkillRemoveArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct SkillInstallArgs {
-    /// Replace a copy that was modified after SafeClaw installed it.
+    /// Replace a copy that was modified after Sprott installed it.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct SkillRemoveArgs {
-    /// Remove a copy that was modified after SafeClaw installed it.
+    /// Remove a copy that was modified after Sprott installed it.
     #[arg(long)]
     pub force: bool,
 }
@@ -670,7 +670,7 @@ pub enum PasskeySubcommand {
     /// credential id, device name, transports, timestamps). No vault
     /// unlock or passkey gesture required.
     Ls(CommonArgs),
-    /// Add a passkey: prints the SafeClaw console page where passkeys are
+    /// Add a passkey: prints the Sprott console page where passkeys are
     /// enrolled (in the browser, where the identity key lives).
     Add(CommonArgs),
     /// Remove an enrolled passkey by credential id. NOT YET IMPLEMENTED.
@@ -710,7 +710,7 @@ pub enum VaultSubcommand {
     /// Remove a vault from the local known list (does NOT touch the
     /// daemon, for that use `sc vault rm`). Pass URL or index.
     Forget(VaultForgetArgs),
-    /// Create a new vault: prints the SafeClaw console page where vaults are
+    /// Create a new vault: prints the Sprott console page where vaults are
     /// created. The new vault syncs to this machine on its own.
     Create(VaultCreateArgs),
     /// Irreversibly delete a vault's daemon-side state. Passkey-gated
@@ -893,7 +893,7 @@ pub struct ServeArgs {
     #[arg(long, env = "SAFECLAW_ADMIN_KEY")]
     pub admin_key: Option<String>,
 
-    /// Cloud op-relay base URL (e.g. `https://api.dev.safeclaw.pro`). When set,
+    /// Cloud op-relay base URL (e.g. `https://api.dev.sprott.ai`). When set,
     /// the daemon registers each pending op with the relay and polls for the
     /// browser-deposited (HPKE-sealed) grant — this is what enables web
     /// approval for a zero-inbound localhost daemon. When unset, the daemon is
@@ -1086,7 +1086,7 @@ pub struct Config {
 impl Config {
     pub fn from_serve_args(args: ServeArgs) -> Self {
         // WebAuthn origin/rpId. When the daemon is cloud-paired, the vault's
-        // passkeys were enrolled on the cloud FRONTEND (e.g. dev.safeclaw.pro)
+        // passkeys were enrolled on the cloud FRONTEND (e.g. dev.sprott.ai)
         // and every web approval happens there — so the assertions the daemon
         // must verify carry the frontend origin/rpId, NOT localhost. Validate
         // against the frontend origin for a paired daemon; localhost for a

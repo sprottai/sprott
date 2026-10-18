@@ -1,4 +1,4 @@
-//! SafeClaw cryptographic primitives.
+//! Sprott cryptographic primitives.
 
 pub mod aead;
 pub mod batch;

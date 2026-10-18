@@ -18,7 +18,7 @@ connection, `gh` installed. Edit the tape's `Sleep`s to match real latency,
 re-run until it reads well, then swap the README comment for:
 
 ```markdown
-<p align="center"><img src="demo/demo.gif" alt="SafeClaw demo" width="800" /></p>
+<p align="center"><img src="demo/demo.gif" alt="Sprott demo" width="800" /></p>
 ```
 
 ## asciinema (freehand)

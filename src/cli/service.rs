@@ -13,10 +13,10 @@
 //! Why user-level (not system-level)?
 //! - No sudo required — the daemon runs as the same user that called `sc start`.
 //! - Vault state lives under `$HOME/.safeclaw/`, owned by the same user.
-//! - Encapsulates "this user's SafeClaw daemon" cleanly. Multi-user hosts
+//! - Encapsulates "this user's Sprott daemon" cleanly. Multi-user hosts
 //!   work too, each user gets their own daemon.
 //!
-//! Operators running SafeClaw as a system service (root-owned, the dev VM
+//! Operators running Sprott as a system service (root-owned, the dev VM
 //! shape) should write their own `/etc/systemd/system/safeclaw.service`
 //! and not touch these commands.
 
@@ -208,7 +208,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     let unit = format!(
         "{UNIT_MARKER}\n\
          [Unit]\n\
-         Description=SafeClaw daemon (user)\n\
+         Description=Sprott daemon (user)\n\
          After=network.target\n\
          \n\
          [Service]\n\
@@ -269,7 +269,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     }
     eprintln!("  broker:   requires an agent key (synced from your account); mint one with `sc agent add` or the dashboard's \"Connect a new agent\"");
     eprintln!();
-    eprintln!("  next: `sc login` to connect this machine to your SafeClaw account");
+    eprintln!("  next: `sc login` to connect this machine to your Sprott account");
     eprintln!("        `sc log -f` to tail, `sc down` to stop, `sc restart` to reload");
     Ok(())
 }
@@ -387,7 +387,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     }
     eprintln!("  logs:     {}", log_str);
     eprintln!();
-    eprintln!("  next: `sc login` to connect this machine to your SafeClaw account");
+    eprintln!("  next: `sc login` to connect this machine to your Sprott account");
     eprintln!("        `sc log -f` to tail, `sc down` to stop, `sc restart` to reload");
     Ok(())
 }

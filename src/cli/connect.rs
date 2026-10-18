@@ -371,7 +371,7 @@ pub async fn run_rm(args: ConnectionRmArgs) -> Result<(), String> {
     }
     for key in strs("kept_untracked") {
         eprintln!(
-            "  kept: {} (this connection was added before SafeClaw recorded which secrets a connection writes, so the key may predate it; `sc secret rm {}` deletes it)",
+            "  kept: {} (this connection was added before Sprott recorded which secrets a connection writes, so the key may predate it; `sc secret rm {}` deletes it)",
             key, key
         );
     }

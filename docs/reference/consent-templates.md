@@ -1,6 +1,6 @@
 # Consent templates: the ONE grammar for approval copy
 
-This page defines the reviewed consent templates used by SafeClaw approval surfaces.
+This page defines the reviewed consent templates used by Sprott approval surfaces.
 
 Two authorship domains, one grammar, one renderer contract:
 

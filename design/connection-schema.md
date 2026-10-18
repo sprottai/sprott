@@ -20,10 +20,10 @@
 > v1.0.20/.21 (§8). Landing = **delete the vault, recreate, re-test.** No
 > back-compat, no dual-read.
 >
-> **Vocabulary.** At the SafeClaw vault layer the sealed body has three pools:
+> **Vocabulary.** At the Sprott vault layer the sealed body has three pools:
 > **`secrets`**, **`passkeys`**, **`aux`**. (At the lower `sudp` protocol layer
 > these are still the abstract field names `targets` / `peers` / `aux` —
-> unchanged; this doc speaks the SafeClaw domain names.)
+> unchanged; this doc speaks the Sprott domain names.)
 
 ---
 

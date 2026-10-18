@@ -1,14 +1,14 @@
-# SafeClaw Protocol — SUDP Concrete Profile
+# Sprott Protocol — SUDP Concrete Profile
 
 > **Doc state (2026-05-23)**: §4.0 + §4.1 endpoint table 和 §4.7 vault selection 已同步到 v1 design。§4.3 (`/challenge`)、§4.4 (`/grant`)、§4.5 (broker)、§4.6 + §4.6.1 (`safeclaw-vault` virtual service)、§6.2 (`/state/*`)、§8 sequences 仍引用 legacy endpoint 名，**待统一**。冲突时以 §4.0/§4.1 为准。
 >
 > **2026-05-23 update**: §4.1 endpoint table 补上 `GET /menu`（service catalog，含 `sub` field）；`POST /v/{vid}/use/{service}` 与 `POST /v/{vid}/use/{service}/{rest}` 两种 form（catch-all service 走前者）。`/menu` 把 service.toml 的 `name + sub` 暴露给前端，approve UI 用它显示 "Inbox (demo target)" 而不是 raw id。
 >
-> **2026-05-27 update**: §4.1 注释明确 `/op/{id}/approve` vs `/op/{id}/reject` 的 layer split — approve 走 SUDP grant（签名），reject 是 SafeClaw 部署层 state transition（无签名）。SUDP 协议本身只定义 grant；reject 是 SafeClaw 的 UX/audit 决策。配套：daemon 不直接对外，frontend → pro-backend → daemon（Supabase JWT 验 console 流量；api_key 验 agent 流量；daemon 信任 gateway）。custodian 公开域名将退役为 internal-only（Wave 3.3，pending firewall + Railway 迁移）。前端 `/approve/[id]` 页面同步改名 `/op/[id]`，跟 API 一致。
+> **2026-05-27 update**: §4.1 注释明确 `/op/{id}/approve` vs `/op/{id}/reject` 的 layer split — approve 走 SUDP grant（签名），reject 是 Sprott 部署层 state transition（无签名）。SUDP 协议本身只定义 grant；reject 是 Sprott 的 UX/audit 决策。配套：daemon 不直接对外，frontend → pro-backend → daemon（Supabase JWT 验 console 流量；api_key 验 agent 流量；daemon 信任 gateway）。custodian 公开域名将退役为 internal-only（Wave 3.3，pending firewall + Railway 迁移）。前端 `/approve/[id]` 页面同步改名 `/op/[id]`，跟 API 一致。
 >
 > **2026-05-27 update**: 公开根路径去掉 `/c/` 前缀，`/c/health|menu|pubkey` 变成 `/health` `/menu` `/pubkey`（zero-remap principle，SaaS proxy 直接透传）。
 >
-> 本文是 SafeClaw daemon 实现的 cryptographic protocol 规约。它是 **SUDP paper** 的一个 **concrete profile**：固定算法选择、wire format、endpoint 映射、domain-separation labels 等。
+> 本文是 Sprott daemon 实现的 cryptographic protocol 规约。它是 **SUDP paper** 的一个 **concrete profile**：固定算法选择、wire format、endpoint 映射、domain-separation labels 等。
 >
 > **不重复 SUDP paper 的内容**（key hierarchy 推导、phase 形式化、安全证明等），仅在需要锚定时 cross-reference。
 >
@@ -19,9 +19,9 @@
 
 ---
 
-## 1. SUDP Roles → SafeClaw 实例化
+## 1. SUDP Roles → Sprott 实例化
 
-| SUDP role | SafeClaw 实例 |
+| SUDP role | Sprott 实例 |
 |---|---|
 | **U** Authorizer | 用户本人，通过 WebAuthn passkey + browser |
 | **R** Requester | LLM agent，credential traffic 走 resident proxy（phantom），需 approval 时 proxy 代建 op |
@@ -194,9 +194,9 @@ op；旧的 `/use`/`/stream` R-side sugar 已**移除**。control/API plane（�
 
 **URL 分三组**：vault-scoped (`/v/{vid}/...`)、op-flat (`/op/{op_id}/...`)、custodian-level root paths（`/health`, `/menu`, `/pubkey`）。Vault selection 永远走 URL path，不走 header；selection (URL) 与 authentication (Authorization header) 解耦。Custodian 不感知 user—`{vid}` 是 vault 标识符，principal→vault 的映射是部署层的事。
 
-**Vault evolution guarantee.** SafeClaw 当前部署 `{vid}` = Supabase user UUID（1:1 user-to-vault）；将来扩展 multi-vault-per-user 时 URL shape 不变，只需在部署层加 principal→vaults lookup。
+**Vault evolution guarantee.** Sprott 当前部署 `{vid}` = Supabase user UUID（1:1 user-to-vault）；将来扩展 multi-vault-per-user 时 URL shape 不变，只需在部署层加 principal→vaults lookup。
 
-**Phase II.3 三动作 vocabulary.** U **authorizes** G（设备本地签）→ carrier **submits** G（网络传输；SafeClaw 用 Topology A，即 U-direct）→ T **redeems** G（验签 + execute）。Paper Phase II.3 形式上的 "Redemption" 严格指 T 端动作；submission 是 deployment 层动作，无独立 paper 动词。
+**Phase II.3 三动作 vocabulary.** U **authorizes** G（设备本地签）→ carrier **submits** G（网络传输；Sprott 用 Topology A，即 U-direct）→ T **redeems** G（验签 + execute）。Paper Phase II.3 形式上的 "Redemption" 严格指 T 端动作；submission 是 deployment 层动作，无独立 paper 动词。
 
 ### 4.1 Endpoint table
 
@@ -226,7 +226,7 @@ GET   /v/{vid}/registry              per-vault live view (catalog + connected st
 
 GET   /op/{op_id}                    R: 轮询状态 / 结果 (unified poll + details)
 POST  /op/{op_id}/approve            U: submit G → redeem → result                       [HPKE: MUST]
-POST  /op/{op_id}/reject             U: 拒绝 (SafeClaw 部署层 state transition, no sig)
+POST  /op/{op_id}/reject             U: 拒绝 (Sprott 部署层 state transition, no sig)
 
 ─── Custodian-level (无 vault 上下文) ────────────────────────────────────────
 
@@ -255,7 +255,7 @@ Redemption 阶段统一 `POST /op/{op_id}/approve`。
 
 **Authentication.** 上面所有 endpoint 的 auth 由 `Authorization` header 承载（部署层任选：Supabase session / API key / mTLS / …）；selection 在 URL，authentication 在 header，正交。Custodian-level root endpoints（`/health` / `/menu` / `/pubkey`）无 vault 上下文，公开访问无 auth。
 
-**Approve vs Reject — layer split.** `POST /op/{op_id}/approve` 是 **SUDP-layer crypto action**：body 是 `sudp::Grant`，签名覆盖 op canonical bytes（详 §4.4 / SUDP §II.3）。`POST /op/{op_id}/reject` 是 **SafeClaw deployment-layer state transition**：无签名，无 grant body，只把 pending op 标记为 rejected 并写 audit。SUDP 协议本身**不定义 reject** — 类比 WebAuthn 只定义 `create()` / `get()`，"user 拒绝"是 RP application 层的事。SafeClaw 选择保留 explicit reject endpoint 而非"等 TTL 过期"，仅出于 audit 精度（区分 user-denied vs no-response）。Gating：SaaS 在 pro-backend 验 Supabase JWT vault-ownership；OSS daemon 在 localhost-only 拓扑下网络层 gate。Daemon 自身**不**对 `/reject` 做 caller auth — 信任 pro-backend gateway。Wave 3.3（custodian internal-only）之前 daemon 公开可达，攻击者可绕 pro-backend 直打 daemon `/reject`；该 DoS 窗口由 op_id UUID 不可枚举 + pending 状态机短窗口 mitigation，等 internal-only 部署落地后彻底关闭。
+**Approve vs Reject — layer split.** `POST /op/{op_id}/approve` 是 **SUDP-layer crypto action**：body 是 `sudp::Grant`，签名覆盖 op canonical bytes（详 §4.4 / SUDP §II.3）。`POST /op/{op_id}/reject` 是 **Sprott deployment-layer state transition**：无签名，无 grant body，只把 pending op 标记为 rejected 并写 audit。SUDP 协议本身**不定义 reject** — 类比 WebAuthn 只定义 `create()` / `get()`，"user 拒绝"是 RP application 层的事。Sprott 选择保留 explicit reject endpoint 而非"等 TTL 过期"，仅出于 audit 精度（区分 user-denied vs no-response）。Gating：SaaS 在 pro-backend 验 Supabase JWT vault-ownership；OSS daemon 在 localhost-only 拓扑下网络层 gate。Daemon 自身**不**对 `/reject` 做 caller auth — 信任 pro-backend gateway。Wave 3.3（custodian internal-only）之前 daemon 公开可达，攻击者可绕 pro-backend 直打 daemon `/reject`；该 DoS 窗口由 op_id UUID 不可枚举 + pending 状态机短窗口 mitigation，等 internal-only 部署落地后彻底关闭。
 
 ### 4.2 Outer envelope (HPKE)
 
@@ -440,7 +440,7 @@ s := XChaCha20-Poly1305_Decrypt(k_d, nonce, ct, AAD = DS_deliver-ad ‖ H(o))
 - 这是真 E2E 加密的 export delivery，**不依赖 TLS** 提供 confidentiality
 - 详细论证见 SUDP paper §09-security-analysis.tex Proposition non-disclosure
 
-### 4.5.1 Reveal (SafeClaw 扩展，明文返回)
+### 4.5.1 Reveal (Sprott 扩展，明文返回)
 
 T 收到 `type=reveal` op 验证通过后:
 ```
@@ -455,7 +455,7 @@ Response: 200 OK, body = { value: <s as plaintext string> }
 
 **适用场景**：
 - transparent HTTP proxy UX 下 R 通过 `safeclaw-vault` 虚拟服务取 secret（详 §4.6）
-- R 没有 ECDH 客户端能力（任何不 import SafeClaw lib 的标准 HTTP client）
+- R 没有 ECDH 客户端能力（任何不 import Sprott lib 的标准 HTTP client）
 - toy / game demo（无真凭据，安全主张退化可接受）
 
 **不适用**：跨 trust boundary 投递严格 secret（用 export）；migration 跨设备的 self-import（用 export with U's own pk）。
@@ -619,7 +619,7 @@ Sketch:
     sc_sk.jwk                    # daemon 静态 X25519 secret key
 ```
 
-**多租户部署**（safeclaw.pro SaaS）:
+**多租户部署**（sprott.ai SaaS）:
 
 ```
 <STATE_DIR>/                     # 实际部署：/var/lib/safeclaw/state/ (per systemd
@@ -792,7 +792,7 @@ User 可在 vault `services.<name>.memory_ttl` 显式覆盖。
 | `Custom("vault-lock")` | 锁定：清空 secrets_cache + 进入 Locked。Grant required —— lock 本身是 daemon state mutation，SUDP 不变量"U-attested state changes only" 同样适用（否则任何持 session token 的 attacker 可以 DOS-lock）。 |
 | `Enroll` | First-time setup：建 vault 后 **auto-unlock**（W_c 已在 grant 里，inline bootstrap，省一次 ceremony）。 |
 
-**Custom 变体的 paper 定位**：SUDP 协议层只承诺 6 个 core acts (Use/Export/Write/Rotate/Enroll/Revoke) 的语义+安全证明；`Custom(name)` 是 deployment 扩展槽，享受 grant machinery 但 dispatch 自定义。SafeClaw 用 `vault-unlock` / `vault-lock` 表达 lifecycle 而非污染 SUDP 表面。
+**Custom 变体的 paper 定位**：SUDP 协议层只承诺 6 个 core acts (Use/Export/Write/Rotate/Enroll/Revoke) 的语义+安全证明；`Custom(name)` 是 deployment 扩展槽，享受 grant machinery 但 dispatch 自定义。Sprott 用 `vault-unlock` / `vault-lock` 表达 lifecycle 而非污染 SUDP 表面。
 
 **Daemon-side auto-lock timer = 不引入。** 它会等价于把所有 `allow` 政策变成 "ask every N minutes"，违背 `allow` 语义（"once unlocked, no further friction during session"）。Lock 永远是 user-initiated，daemon 仅在进程重启时实质重置（vault_states 不持久化，重启 = 全部 Locked）。
 
@@ -833,7 +833,7 @@ Policy(conn_id, o):
 ```
 
 一条 `level` 为空的 rule（畸形）无法决策 → 跳过，落到 floor。**deny 从不做出厂默认**——
-SafeClaw 是 gate 非 block；recipe/用户显式把某条 rule 设成 `deny` 才会拒。基线 floor 从请求
+Sprott 是 gate 非 block；recipe/用户显式把某条 rule 设成 `deny` 才会拒。基线 floor 从请求
 方法派生（`is_write_method`：写→`write`，否则→`read`）。
 
 **Restrictiveness 全序**（deny-override 用）：`deny > ask-always > ask > allow`.

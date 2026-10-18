@@ -1,13 +1,13 @@
 # Design principles
 
-This page lists the rules that guide SafeClaw's design and can be checked against observable behavior.
+This page lists the rules that guide Sprott's design and can be checked against observable behavior.
 
 **1. Use is not possession.** The agent gets the *use* of a credential,
 never the credential. Phantoms in, API responses out; the value appears only
 inside the proxy, at egress, on your machine.
 
 **2. One egress, and only one.** Everything brokered flows through a single
-local choke point. And only that: SafeClaw never intercepts traffic you
+local choke point. And only that: Sprott never intercepts traffic you
 didn't route. The phantom is the only trigger; a request without one is
 forwarded untouched.
 
@@ -33,7 +33,7 @@ session-wide approve-all token exists, so none can be stolen or replayed.
 machine, while unlocked. Disk holds only sealed data; the cloud syncs blobs
 it cannot read; `sc lock` ends even the one copy.
 
-**8. Gate, don't block.** `deny` is never a factory default. SafeClaw exists
+**8. Gate, don't block.** `deny` is never a factory default. Sprott exists
 to let agents do real work; the value is a human at the choke point that
 matters, not a wall in front of everything.
 
@@ -41,8 +41,8 @@ matters, not a wall in front of everything.
 your behalf. Rules state objective facts (what an action is, read or write);
 levels state *your* decision. Third-party vibes are not a security input.
 
-**10. Fail loudly.** Every refusal carries a stable `SafeClaw: <code>` line
+**10. Fail loudly.** Every refusal carries a stable `Sprott: <code>` line
 and a documented fix ([DIAGNOSTICS.md](reference/diagnostics.md)). No swallowed
 errors, no mystery timeouts, no fake successes. A system you can't debug is
-a system you'll route around, and routing around SafeClaw is the one failure
+a system you'll route around, and routing around Sprott is the one failure
 we can't accept.

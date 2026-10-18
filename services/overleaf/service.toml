@@ -6,7 +6,7 @@ tags = ["app"]
 
 # Overleaf's Git integration. Clone/push over https://git.overleaf.com with HTTP
 # basic auth: username "git", a Git authentication token as the password.
-# SafeClaw's git-credential helper emits the phantom as the password and the
+# Sprott's git-credential helper emits the phantom as the password and the
 # broker substitutes at egress.
 hosts = ["git.overleaf.com"]
 secrets = ["OVERLEAF_GIT_TOKEN"]

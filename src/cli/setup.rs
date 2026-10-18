@@ -88,7 +88,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
             if let Err(e) = crate::cli::service::ensure_running_with_fallback().await {
                 emit_error(
                     json_output,
-                    &format!("The SafeClaw daemon could not be started: {}", e),
+                    &format!("The Sprott daemon could not be started: {}", e),
                     &base_command(&context),
                 );
                 return Err(1);
@@ -119,7 +119,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
             Err(e) => {
                 emit_error(
                     json_output,
-                    &format!("The SafeClaw skill could not be installed: {}", e),
+                    &format!("The Sprott skill could not be installed: {}", e),
                     "sc skill install",
                 );
                 return Err(1);
@@ -129,7 +129,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
         let mut notes = Vec::new();
         if skill.modified {
             notes.push(
-                "The existing SafeClaw skill was modified, so it was left unchanged.".to_string(),
+                "The existing Sprott skill was modified, so it was left unchanged.".to_string(),
             );
         }
         notes.extend(skill.notes.clone());
@@ -152,7 +152,7 @@ async fn preconditions(
 ) -> Result<Context, (String, String, i32)> {
     let cfg = crate::cli::active::load().map_err(|e| {
         (
-            format!("SafeClaw configuration could not be read: {}", e),
+            format!("Sprott configuration could not be read: {}", e),
             format!(
                 "Fix ~/.safeclaw/config.toml, then re-run: {}",
                 setup_command(&name, profile.as_deref())
@@ -194,7 +194,7 @@ async fn preconditions(
 
     let home = dirs::home_dir().ok_or_else(|| {
         (
-            "SafeClaw could not locate the home directory.".to_string(),
+            "Sprott could not locate the home directory.".to_string(),
             format!(
                 "Re-run outside the sandbox with network access: {}",
                 setup_command(&name, profile.as_deref())
@@ -212,7 +212,7 @@ async fn preconditions(
         .and_then(|_| human_action::ensure_private_dir(&setup_dir))
     {
         return Err((
-            format!("SafeClaw's setup directory is not usable: {}", e),
+            format!("Sprott's setup directory is not usable: {}", e),
             retry,
             1,
         ));
@@ -438,8 +438,8 @@ async fn spawn_and_report(
     }
 }
 
-/// Is the machine's paired backend (`https://api.dev.safeclaw.pro`, as the server
-/// returned it) the environment a `--profile` names (`https://dev.safeclaw.pro`)?
+/// Is the machine's paired backend (`https://api.dev.sprott.ai`, as the server
+/// returned it) the environment a `--profile` names (`https://dev.sprott.ai`)?
 /// Both roots of a root pair are one environment: compared by the console
 /// they link to (`https://app.<new root>`); any other host exactly.
 fn same_environment(paired_backend: &str, profile_url: &str) -> bool {
@@ -578,7 +578,7 @@ async fn pair_missing_and_persist(name: &str, profile: Option<&str>) -> Result<(
         crate::cli::active::console_origin_for_backend(&cloud)
     } else {
         crate::cli::active::console_origin()
-            .ok_or("this machine isn't paired to SafeClaw yet. Run sc login first")?
+            .ok_or("this machine isn't paired to Sprott yet. Run sc login first")?
     };
     let pinned = if need_device {
         None
@@ -961,7 +961,7 @@ fn emit_done(
             messages.push(message.clone());
         }
         if messages.is_empty() {
-            messages.push("SafeClaw setup is complete.".to_string());
+            messages.push("Sprott setup is complete.".to_string());
         }
         let mut object = Map::new();
         object.insert("status".into(), json!("done"));
@@ -1077,10 +1077,10 @@ mod setup_tests {
 
     #[test]
     fn same_environment_matches_the_paired_backend_to_its_profile() {
-        assert!(same_environment("https://api.dev.safeclaw.pro", "https://dev.safeclaw.pro"));
-        assert!(same_environment("https://api.safeclaw.pro/", "https://safeclaw.pro"));
-        assert!(!same_environment("https://api.safeclaw.pro", "https://dev.safeclaw.pro"));
-        assert!(!same_environment("https://api.dev.safeclaw.pro", "https://safeclaw.pro"));
+        assert!(same_environment("https://api.dev.sprott.ai", "https://dev.sprott.ai"));
+        assert!(same_environment("https://api.sprott.ai/", "https://sprott.ai"));
+        assert!(!same_environment("https://api.sprott.ai", "https://dev.sprott.ai"));
+        assert!(!same_environment("https://api.dev.sprott.ai", "https://sprott.ai"));
         // A machine paired before the move to the new roots: its legacy backend
         // is the same environment as the profile's new root, and only that one.
         let prod = "https://sprott.ai";

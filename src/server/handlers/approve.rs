@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 /// `GET /op/{op_id}` — JSON poll: status + cached value + render(o).
 ///
 /// The agent (and the CLI's browser-callback flow) polls this for the op's
-/// state. There is no HTML branch: the human approves on safeclaw.pro (the
+/// state. There is no HTML branch: the human approves on sprott.ai (the
 /// op-relay carries the sealed grant back to the daemon), so the daemon serves
 /// no approval page of its own (2026-06-23 zero-inbound pivot).
 pub async fn get_op(
@@ -646,7 +646,7 @@ fn require_vault_key_delivery(grant: &Grant, pv: Option<&PerItemVault>) -> Resul
         DeliveryForm::Plain | DeliveryForm::SealedSecret => {
             let shared = pv.is_some_and(|pv| pv.keyset.uik.is_some());
             Err(AppError::WkRefused(format!(
-                "this approval delivered an unlock secret{}; SafeClaw takes only the vault key \
+                "this approval delivered an unlock secret{}; Sprott takes only the vault key \
                  and the approver's signature. Reload the approval page and approve again",
                 if shared { " on a shared vault" } else { "" }
             )))
@@ -1708,13 +1708,13 @@ pub async fn approve_op(
                     )?;
                 let base = crate::storage::sealed_vault::ViewBase::of(&view)?;
                 if !view.native_secrets.contains_key(&key) {
-                    // One flat namespace, two authorities: SafeClaw OWNS
+                    // One flat namespace, two authorities: Sprott OWNS
                     // native items but only READS external stores — so an
                     // external-hosted key gets a precise refusal, not a
                     // misleading "not found".
                     if view.resolve_value_async(&key).await?.is_some() {
                         return Err(AppError::BadRequest(format!(
-                            "key '{}' is hosted by an external store. SafeClaw reads it pass-through and cannot delete it; remove it in the provider's console",
+                            "key '{}' is hosted by an external store. Sprott reads it pass-through and cannot delete it; remove it in the provider's console",
                             key
                         )));
                     }
@@ -2607,14 +2607,14 @@ pub async fn reject_op(
 /// never delivers: the console creates the vault and enrolls passkeys in the
 /// browser, where the identity key already lives.
 pub(crate) const ENROLL_RETIRED: &str = "creating a vault and adding a passkey happen in the \
-     SafeClaw console now: open it in your browser (`sc vault create` prints the link)";
+     Sprott console now: open it in your browser (`sc vault create` prints the link)";
 
 /// The refusal for a whole-blob `ActType::Write`. No current client sends one
 /// (console writes are per-item; the CLI writes through grant-approved
 /// mutations), and applying a base-less full replacement would revert or drop
 /// items another device changed since.
 pub(crate) const WHOLE_BLOB_WRITE_RETIRED: &str = "whole-vault write ops are no longer supported: \
-     this client is out of date. Upgrade the SafeClaw console/CLI (`sc upgrade`) and retry.";
+     this client is out of date. Upgrade the Sprott console/CLI (`sc upgrade`) and retry.";
 
 /// The role KEYs cached for a service's connections: the declared `secrets`
 /// plus any oauth `[auth].exposes` roles (derived at connect, stored UPPERCASED —

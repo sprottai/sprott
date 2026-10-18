@@ -97,7 +97,7 @@ pub async fn add_and_persist(name: &str) -> Result<AddedAgent, String> {
     let pinned = crate::cli::active::account_uik_pub()
         .ok_or("this machine's pairing predates verified pairing. Run sc login first")?;
     let origin = crate::cli::active::console_origin()
-        .ok_or("this machine isn't paired to SafeClaw yet. Run sc login first")?;
+        .ok_or("this machine isn't paired to Sprott yet. Run sc login first")?;
     let client = client()?;
     let paired = crate::cli::pair_flow::pair(
         &client,
@@ -154,7 +154,7 @@ async fn add_cli(args: AgentAddArgs) -> Result<(), String> {
         args.name.clone()
     };
     eprintln!(
-        "\nAgent '{}' authorized. Its SafeClaw env (two non-secret lines: the broker URL \
+        "\nAgent '{}' authorized. Its Sprott env (two non-secret lines: the broker URL \
          and its identity-file path) went to stdout. Append them to the env file your \
          framework loads. It can reach any vault you turn it on for in that vault's \
          Agent access page. Works on any paired device; revoke: `sc agent rm {}`.",
@@ -246,7 +246,7 @@ async fn rm(args: AgentRmArgs) -> Result<(), String> {
     let url = crate::cli::vault::console_page("/account/access")?;
     if remote_id.is_some() {
         eprintln!(
-            "Remove the agent '{}' in the SafeClaw console (it asks for your passkey):",
+            "Remove the agent '{}' in the Sprott console (it asks for your passkey):",
             args.name
         );
         eprintln!("  {}", url);

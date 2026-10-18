@@ -193,19 +193,19 @@ async fn handle_callback(
         tracing::info!(vault = %pending.vault_id, conn = %pending.conn_id, "oauth loopback: connect completed via auto-catch");
         done_page(
             "Connected",
-            "SafeClaw finished the connection. You can close this window.",
+            "Sprott finished the connection. You can close this window.",
         )
     } else if report.failed.iter().any(|(c, _)| *c == pending.conn_id) {
         done_page(
             "Connection failed",
-            "The authorization could not be completed. Return to SafeClaw and try connecting again.",
+            "The authorization could not be completed. Return to Sprott and try connecting again.",
         )
     } else {
         // Locked vault, transient provider error, or the entry was already
         // completed. The console keeps waiting / offers the paste fallback.
         done_page(
             "Almost there",
-            "Return to SafeClaw. If the connection doesn't appear shortly, try connecting again.",
+            "Return to Sprott. If the connection doesn't appear shortly, try connecting again.",
         )
     };
     (StatusCode::OK, Html(page))

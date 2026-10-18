@@ -49,7 +49,7 @@ pub async fn run(_args: SyncArgs) -> Result<(), String> {
         Ok(())
     } else {
         // The daemon's sync error crosses a process boundary as a string; if it
-        // reads as a backend-reachability failure (e.g. "reach api.safeclaw.pro:
+        // reads as a backend-reachability failure (e.g. "reach api.sprott.ai:
         // …"), append the conditional proxy hint — objectively, without claiming
         // a proxy is missing.
         let raw = body

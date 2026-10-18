@@ -1,4 +1,4 @@
-//! Install the version-matched SafeClaw skill embedded in this binary.
+//! Install the version-matched Sprott skill embedded in this binary.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ pub fn run(sub: SkillSubcommand) -> Result<(), String> {
         SkillSubcommand::Remove(SkillRemoveArgs { force }) => {
             let removed = remove(force)?;
             if removed.is_empty() {
-                println!("SafeClaw skill is not installed.");
+                println!("Sprott skill is not installed.");
             } else {
                 for path in removed {
                     println!("Removed: {}", path.display());
@@ -119,7 +119,7 @@ fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
 }
 
 /// Ensure Claude sees the shared skill. Returns whether the symlink is known to
-/// have been created by SafeClaw and can therefore be removed later.
+/// have been created by Sprott and can therefore be removed later.
 fn ensure_claude_link(
     home: &Path,
     skill_dir: &Path,
@@ -149,7 +149,7 @@ fn ensure_claude_link(
         }
         Ok(_) => {
             report.notes.push(format!(
-                "Left the existing path at {} unchanged because it is not SafeClaw's symlink.",
+                "Left the existing path at {} unchanged because it is not Sprott's symlink.",
                 link.display()
             ));
             Ok(false)
@@ -203,7 +203,7 @@ fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
         );
         if hash != manifest.sha256 && !force {
             return Err(format!(
-                "{} was modified after SafeClaw installed it; re-run `sc skill remove --force` to remove it",
+                "{} was modified after Sprott installed it; re-run `sc skill remove --force` to remove it",
                 skill_path.display()
             ));
         }
@@ -317,6 +317,6 @@ mod tests {
         fs::create_dir_all(&conflict).unwrap();
         let report = install_at(conflicted_home.path(), false).unwrap();
         assert!(conflict.is_dir(), "an existing real directory is left alone");
-        assert!(report.notes.iter().any(|note| note.contains("not SafeClaw's symlink")));
+        assert!(report.notes.iter().any(|note| note.contains("not Sprott's symlink")));
     }
 }

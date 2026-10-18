@@ -1,6 +1,6 @@
 # Passkey support
 
-This page lists the passkey and browser combinations that can encrypt a SafeClaw vault. It also explains what to do when a setup does not support the WebAuthn **PRF extension**.
+This page lists the passkey and browser combinations that can encrypt a Sprott vault. It also explains what to do when a setup does not support the WebAuthn **PRF extension**.
 
 > PRF is how the browser reaches the hardware-held secret that encrypts your
 > vault. This is **not** a browser-version problem: modern browsers support PRF.
@@ -65,7 +65,7 @@ built-in authenticator with PRF: use a provider (1Password) or a hardware key.
 | How you verify | PRF | Notes |
 |---|:--:|---|
 | This device (built-in / platform) | ✅ | The normal path; fully supported wherever the provider above is ✅ |
-| Cross-device QR (hybrid) | ⚠️ | PRF over the QR/hybrid transport is still being standardized. iOS 18.0–18.3 dropped it; fixed in 18.4+. Prefer approving on the device running SafeClaw. |
+| Cross-device QR (hybrid) | ⚠️ | PRF over the QR/hybrid transport is still being standardized. iOS 18.0–18.3 dropped it; fixed in 18.4+. Prefer approving on the device running Sprott. |
 
 ## Troubleshooting
 
@@ -73,6 +73,6 @@ built-in authenticator with PRF: use a provider (1Password) or a hardware key.
 |---|---|---|
 | "This passkey can't produce the vault's encryption key on this device" (creating or unlocking) | The passkey's store has no PRF: e.g. iCloud Keychain on macOS before 15.4, a local "Chrome profile" passkey, or Windows Hello before 25H2. Your browser is fine. | Use a passkey from a provider that carries PRF: **1Password** (any recent OS, including macOS 14), a synced Google Password Manager passkey, or a hardware security key. On macOS, upgrading to 15.4+ enables the built-in iCloud path. On Windows 11, update to 25H2. |
 | "Your browser does not support the required passkey extensions" | The browser itself lacks WebAuthn PRF. Rare, and means a genuinely old browser. | Update to a current Chrome, Safari, or Firefox. |
-| Fails only when you scan a QR to approve from another device | PRF didn't survive the cross-device (hybrid) transport. | Approve on the device running SafeClaw, or enroll that device's own passkey, then retry. |
+| Fails only when you scan a QR to approve from another device | PRF didn't survive the cross-device (hybrid) transport. | Approve on the device running Sprott, or enroll that device's own passkey, then retry. |
 
 Related: [Security model](../security-model.md) · [Diagnostics](diagnostics.md)

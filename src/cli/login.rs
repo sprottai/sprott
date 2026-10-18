@@ -1,4 +1,4 @@
-//! `sc login` — pair this machine to a SafeClaw account.
+//! `sc login` — pair this machine to a Sprott account.
 //!
 //! Pairing is the PAKE short-code ceremony (grant-v3 contract C2,
 //! `cli::pair_flow`): `sc` prints a code and a link it builds itself from the
@@ -158,7 +158,7 @@ pub(crate) fn prepare_device() -> Result<PreparedDevice, String> {
 
 pub async fn run(args: LoginArgs) -> Result<(), String> {
     pair_and_persist(args, true).await?;
-    eprintln!("Starting SafeClaw…");
+    eprintln!("Starting Sprott…");
     if let Err(e) = bring_up(true).await {
         if let Some(e) = e.strip_prefix("auto-start: ") {
             eprintln!("  couldn't auto-start the daemon ({e}); run sc up to finish.");

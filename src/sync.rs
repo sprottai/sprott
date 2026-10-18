@@ -664,7 +664,7 @@ pub(crate) fn refresh_after_item_pull(state: &Arc<AppState>, vault: &str) {
 /// agent reaches any of them by vid; `sc vault use` is only the CLI default.
 fn synced_vault_ids(cfg: &crate::cli::active::CliConfig) -> Vec<String> {
     // A personal build (open source) syncs only PERSONAL vaults: a SHARED (team)
-    // vault is handled by the official SafeClaw build, so it is left out of this
+    // vault is handled by the official Sprott build, so it is left out of this
     // device's synced set here (never pulled, watched, or audit-shipped). The
     // official build serves team, so `build_serves_shared()` is true there and
     // nothing is filtered. Classification is the server-authoritative catalog
@@ -698,7 +698,7 @@ fn synced_vault_ids(cfg: &crate::cli::active::CliConfig) -> Vec<String> {
 }
 
 /// A personal build (open source) leaves SHARED (team) vaults to the official
-/// SafeClaw build: it never syncs their material. `true` iff this build does NOT
+/// Sprott build: it never syncs their material. `true` iff this build does NOT
 /// serve team AND `vid` is shared per the server-authoritative catalog `kind`
 /// (unknown kind is NOT shared, so a personal vault is never dropped). This is the
 /// single guard the pull primitives share, so every adopt path (main loop,
@@ -1192,7 +1192,7 @@ fn apply_verified_envelope(state: &Arc<AppState>, vault: &str, body: &serde_json
                 vault = %vault,
                 format,
                 supported = SUPPORTED_VAULT_FORMAT,
-                "cloud sync: vault uses a newer data format than this SafeClaw reads; run `sc upgrade`"
+                "cloud sync: vault uses a newer data format than this Sprott reads; run `sc upgrade`"
             );
         }
     } else if let Some(shared) = parse_shared_from_body(body) {
@@ -3549,7 +3549,7 @@ struct DirtyRow {
     /// The digest of the body our change was made from, when known
     /// ([`pv_store::StoredItem::base`]).
     base: Option<String>,
-    /// Written by SafeClaw's automatic upgrade ([`pv_store::StoredItem::upgrade`]).
+    /// Written by Sprott's automatic upgrade ([`pv_store::StoredItem::upgrade`]).
     upgrade: bool,
     /// The keyset generation it was sealed under ([`pv_store::StoredItem::generation`]).
     generation: Option<u64>,
@@ -4133,7 +4133,7 @@ fn set_aside_fixes(
     Some(fixes)
 }
 
-/// How a set-aside change of `record` is reported: one SafeClaw's automatic
+/// How a set-aside change of `record` is reported: one Sprott's automatic
 /// upgrade wrote (`upgrade`) as the upgrade pausing and retrying, any other
 /// as the person's change set aside.
 fn set_aside_note(record: String, upgrade: bool) -> crate::state::SyncNote {
@@ -5067,7 +5067,7 @@ pub async fn push_items_best_effort(state: &Arc<AppState>, vault_id: &str) {
         endpoint_missing,
     } = tally;
     // A push of a row that landed settles an earlier conflict on it; a row set
-    // aside now is one for the user to re-run, or (written by SafeClaw's
+    // aside now is one for the user to re-run, or (written by Sprott's
     // automatic upgrade) one the upgrade retries.
     for f in &fixes {
         if let LocalFix::Synced { id, .. } = f {
@@ -7045,14 +7045,14 @@ mod peritem_tests {
         assert_eq!(timeout(&pv), None);
     }
 
-    /// A change SafeClaw's automatic upgrade wrote that is set aside after a
+    /// A change Sprott's automatic upgrade wrote that is set aside after a
     /// 409 is said as the upgrade pausing and retrying, never as the
     /// person's change set aside; a person's change is said as theirs.
     #[test]
     fn a_set_aside_upgrade_write_is_said_as_the_upgrade_pausing() {
         let upgrade = set_aside_note("policy".into(), true).sentence().unwrap();
         assert!(
-            upgrade.contains("SafeClaw's automatic upgrade of this vault paused")
+            upgrade.contains("Sprott's automatic upgrade of this vault paused")
                 && upgrade.contains("retries")
                 && upgrade.contains("policy")
                 && !upgrade.contains("your change"),

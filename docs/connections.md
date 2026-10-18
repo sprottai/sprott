@@ -35,7 +35,7 @@ Adding a service is a TOML file, not a plugin: `sc service add ./folder` or
 
 ## Ways to connect
 
-- **OAuth services**: connect from the console; SafeClaw runs the flow and
+- **OAuth services**: connect from the console; Sprott runs the flow and
   manages token refresh. The agent's phantom stays stable across refreshes.
 - **Paste a key in the console**: encrypted in your browser before upload.
 - **At the terminal**: `sc set HF_TOKEN --host huggingface.co` prompts for
@@ -63,12 +63,12 @@ Adding a service is a TOML file, not a plugin: `sc service add ./folder` or
   `sc connection rm <id>` deletes the secrets that connection wrote, unless
   another connection uses them. A secret it was bound to with
   `--from-secret` stays in the vault, and so does every secret of a
-  connection added before SafeClaw recorded which secrets a connection
+  connection added before Sprott recorded which secrets a connection
   writes; the command lists each kept key and why.
 - **Any other HTTPS API**: a custom connection with your own host anchor.
   The catalog is a convenience, not a boundary.
 - **External stores**: keep values in your own secret manager (e.g. GCP
-  Secret Manager); SafeClaw fetches at use, and the value still never
+  Secret Manager); Sprott fetches at use, and the value still never
   reaches the agent.
 
 ## Multiple accounts
