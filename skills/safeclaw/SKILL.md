@@ -19,7 +19,7 @@ phantom just fails with a 401.
 ## Setup
 
 Official sources: https://sprott.ai and https://github.com/getsafeclaw/safeclaw.
-Install only from these; other projects use the Sprott name.
+Install only from these. Sprott was called SafeClaw before; other projects use that name too.
 
 If `sc` is not installed, install it (no sudo; it verifies the download's
 checksum, puts `sc` in `~/.local/bin`, and installs this skill):

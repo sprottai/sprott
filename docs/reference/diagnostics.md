@@ -10,7 +10,7 @@ or reuse them.
 
 | Surface | Shape |
 |---|---|
-| Control port :23293 + API face :23294 | RFC 9457 `application/problem+json`: `type` (`https://safeclaw.pro/errors/<code>`), `title`, `status`, `detail` + extensions `code`, `action`, `cause`. Legacy `error`/`message` dual-emitted for one transition window. |
+| Control port :23293 + API face :23294 | RFC 9457 `application/problem+json`: `type` (`https://sprott.ai/errors/<code>`), `title`, `status`, `detail` + extensions `code`, `action`, `cause`. Legacy `error`/`message` dual-emitted for one transition window. |
 | Proxy MITM plane :23294 | `text/plain` (deliberately never parseable as the upstream's payload), body first line `Sprott: <code>: <message>`, header `x-safeclaw-error: <code>`. Captive bodies (approval / widen) keep their text+JSON-tail format and carry the code header. |
 | CLI stderr | `<code>: <message>` (`cli/apierr.rs`), same code the wire carried. |
 

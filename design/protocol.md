@@ -462,7 +462,7 @@ Response: 200 OK, body = { value: <s as plaintext string> }
 
 ### 4.6 Proxy port (separate) — ⚠️ REMOVED (2026-06-29)
 
-> **此节(含 §4.6.1)描述的设计已移除。** 2026-06-23 pivot 后 daemon **单端口**(`:23294`)——独立 proxy port `:23295` 已删;broker 现为 `ANY /v/{vid}/use/<svc>/<rest>`(REST,§4.1),审批为 `POST /op/{op_id}/approve`,审批 UI 在 safeclaw.pro(daemon 零公网入站)。下文的 `:23295`、`safeclaw-vault` 虚拟服务、`/approve`、`/grant` 均为 legacy 名 —— **以 §4.0/§4.1 + 代码为准**。
+> **此节(含 §4.6.1)描述的设计已移除。** 2026-06-23 pivot 后 daemon **单端口**(`:23294`)——独立 proxy port `:23295` 已删;broker 现为 `ANY /v/{vid}/use/<svc>/<rest>`(REST,§4.1),审批为 `POST /op/{op_id}/approve`,审批 UI 在 sprott.ai(daemon 零公网入站)。下文的 `:23295`、`safeclaw-vault` 虚拟服务、`/approve`、`/grant` 均为 legacy 名 —— **以 §4.0/§4.1 + 代码为准**。
 
 Agent (R) 通过 `:23295/<service>/...` 发请求。Daemon 的处理流程（详 `src/core/router.rs::proxy_handler`）：
 
