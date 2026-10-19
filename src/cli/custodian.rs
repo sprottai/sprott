@@ -46,7 +46,7 @@ pub fn registry(json: bool) -> Result<(), String> {
 async fn fetch_print(_args: CommonArgs, path: &str) -> Result<(), String> {
     let daemon = resolve_daemon_url()?;
     let url = format!("{}{}", daemon.trim_end_matches('/'), path);
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("client init: {}", e))?;

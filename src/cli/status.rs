@@ -60,7 +60,7 @@ pub async fn probe_local_daemon(control_root: &str) -> LocalDaemon {
     // the port a beat before /health answers, and a proxy-leaked or slow shot must
     // not erase the "running" verdict the TCP connect already proved.
     let health_url = format!("{}/health", control_root.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(std::time::Duration::from_millis(700))
         .build()
         .ok();
@@ -140,7 +140,7 @@ pub async fn fetch_status(custodian: &str, vault: &str) -> VaultStatus {
         state,
         held: Vec::new(),
     };
-    let client = match reqwest::Client::builder()
+    let client = match crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
     {

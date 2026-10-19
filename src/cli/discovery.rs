@@ -29,7 +29,7 @@ pub struct ConnRow {
 /// Fetch + project the vault's usable connections. `daemon` is the control-plane
 /// root (`http://host:CONTROL_PORT`); `vault` the vault id.
 pub async fn connections(daemon: &str, vault: &str) -> Result<Vec<ConnRow>, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("http client: {}", e))?;

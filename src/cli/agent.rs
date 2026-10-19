@@ -36,7 +36,7 @@ fn cloud_and_key() -> Result<(String, String), String> {
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client init: {}", e))

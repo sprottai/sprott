@@ -606,7 +606,7 @@ async fn pair_missing_and_persist(name: &str, profile: Option<&str>) -> Result<(
         None
     };
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;

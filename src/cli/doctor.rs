@@ -160,7 +160,7 @@ pub async fn run(json: bool) -> Result<(), String> {
     };
 
     // Custodian health
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("client init: {}", e))?;

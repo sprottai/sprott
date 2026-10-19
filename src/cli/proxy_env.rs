@@ -225,7 +225,7 @@ fn with_loopback(current: &str) -> String {
 /// `active::control_root` — env-first host)? `sc run`'s liveness gate — the
 /// proxy shares the daemon process, so control up ⇒ proxy up.
 pub async fn control_plane_up(control_root: &str) -> bool {
-    let client = match reqwest::Client::builder()
+    let client = match crate::util::http_builder()
         .timeout(Duration::from_millis(500))
         .build()
     {

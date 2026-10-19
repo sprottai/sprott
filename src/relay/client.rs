@@ -570,7 +570,7 @@ impl ApplyFailure {
 }
 
 async fn apply_grant(state: Arc<AppState>, op_id: &str, grant: Value) -> Result<(), ApplyFailure> {
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| ApplyFailure::transport(format!("loopback client init: {}", e)))?;
@@ -627,7 +627,7 @@ fn refusal_keeps_op_pending(code: Option<&str>) -> bool {
 /// so `sc op wait` and the console never dress it up as "user rejected".
 async fn apply_reject(state: Arc<AppState>, op_id: &str, reason: Option<&str>) {
     let url = format!("http://127.0.0.1:{}/op/{}/reject", state.config.port, op_id);
-    if let Ok(client) = reqwest::Client::builder()
+    if let Ok(client) = crate::util::http_builder()
         .timeout(Duration::from_secs(10))
         .build()
     {

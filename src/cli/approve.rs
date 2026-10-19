@@ -251,7 +251,7 @@ pub async fn approve_op(
 
 /// Request header carrying an Export's waiter secret (mirror of the daemon's
 /// `approve::WAITER_HEADER`).
-const WAITER_HEADER: &str = "x-safeclaw-waiter";
+const WAITER_HEADER: &str = "x-sprott-waiter";
 /// Local-arm keep-alive cadence; well under the daemon's 60 s backstop.
 const WAITER_HEARTBEAT: Duration = Duration::from_secs(5);
 
@@ -291,7 +291,7 @@ async fn shutdown_signal() {
 /// Requester withdrawal (`POST /op/{id}/cancel`): best-effort, short timeout.
 /// Returns true when the daemon withdrew the op. Never a user rejection.
 async fn cancel_op(custodian: &str, op_id: &str, waiter: Option<&str>) -> bool {
-    let Ok(client) = reqwest::Client::builder()
+    let Ok(client) = crate::util::http_builder()
         .timeout(Duration::from_secs(5))
         .build()
     else {

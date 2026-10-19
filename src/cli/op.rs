@@ -99,7 +99,7 @@ pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
     // The command that minted the op already printed its link.
     eprintln!("Waiting for approval in the browser.");
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client: {}", e))?;

@@ -299,7 +299,7 @@ fn problem(code: ScCode, detail: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/problem+json")
-        .header("x-safeclaw-error", code.as_str())
+        .header("x-sprott-error", code.as_str())
         .body(Body::from(body))
         .unwrap_or_else(|_| plain_500())
 }
@@ -420,7 +420,7 @@ mod tests {
         };
         let code = |r: &Response<Body>| {
             r.headers()
-                .get("x-safeclaw-error")
+                .get("x-sprott-error")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string)
         };

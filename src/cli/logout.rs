@@ -133,7 +133,7 @@ async fn revoke_device_cloud(cfg: &CliConfig) -> Result<Option<String>, String> 
     let cloud = cloud.trim_end_matches('/');
     let key = crate::sync::device_key().ok_or("no device-key to revoke")?;
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;

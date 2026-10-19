@@ -321,7 +321,7 @@ pub async fn fetch_passkeys_json(custodian: &str, vault: &str) -> Result<Vec<Val
 }
 
 pub fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client: {}", e))

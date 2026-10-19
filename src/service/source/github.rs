@@ -477,10 +477,10 @@ impl GitHubHttp {
     }
 
     fn get(&self, url: &str, accept: &str) -> reqwest::RequestBuilder {
-        self.client.get(url).header("accept", accept).header(
-            "user-agent",
-            concat!("safeclaw/", env!("CARGO_PKG_VERSION")),
-        )
+        self.client
+            .get(url)
+            .header("accept", accept)
+            .header("user-agent", crate::names::USER_AGENT)
     }
 }
 
@@ -716,7 +716,7 @@ mod tests {
     /// A reader at `base` whose every read must be answered within `within`.
     fn reader(base: &str, within: Duration) -> GitHubHttp {
         GitHubHttp {
-            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            client: crate::util::http_builder().no_proxy().build().unwrap(),
             api: base.into(),
             codeload: base.into(),
             deadline: None,
@@ -804,7 +804,7 @@ mod tests {
     /// A reader of `https://api.github.com` through the proxy at `proxy`.
     fn via_proxy(proxy: &str) -> GitHubHttp {
         GitHubHttp {
-            client: reqwest::Client::builder()
+            client: crate::util::http_builder()
                 .proxy(reqwest::Proxy::all(proxy).unwrap())
                 .build()
                 .unwrap(),

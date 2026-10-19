@@ -199,7 +199,7 @@ pub async fn pair_and_persist(args: LoginArgs, allow_account_switch: bool) -> Re
     let device_name = device_name(args.device_name.clone());
 
     // Dedicated 10s timeout per request (each pairing call is one round-trip).
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;

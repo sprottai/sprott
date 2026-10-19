@@ -256,7 +256,7 @@ async fn report_ambient_proxy(control_root: &str) {
     }
     let proxy = crate::cli::egress_proxy::ambient();
     let url = format!("{}/proxy/ambient", control_root.trim_end_matches('/'));
-    let Ok(client) = reqwest::Client::builder()
+    let Ok(client) = crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     else {

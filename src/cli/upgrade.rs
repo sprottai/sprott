@@ -184,7 +184,6 @@ async fn resolve_base(client: &reqwest::Client, pre: bool) -> Result<(String, St
     let url = format!("https://api.github.com/repos/{}/releases?per_page=100", REPO);
     let resp = client
         .get(&url)
-        .header("User-Agent", "safeclaw-upgrade")
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -316,7 +315,7 @@ mod tests {
 
 pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     let asset = asset_name()?;
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;

@@ -1128,9 +1128,9 @@ impl BrokerHandler {
                 let mut b = Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-safeclaw-error", ScCode::ApprovalNeeded.as_str())
-                    .header("x-safeclaw-approve-url", approve_url.as_str())
-                    .header("x-safeclaw-op-id", op_id.as_str())
+                    .header("x-sprott-error", ScCode::ApprovalNeeded.as_str())
+                    .header("x-sprott-approve-url", approve_url.as_str())
+                    .header("x-sprott-op-id", op_id.as_str())
                     .header(header::LOCATION, format!("/op/{}", op_id));
                 let interval = crate::approval::store::POLL_INTERVAL_HINT_SECS;
                 b = b.header(header::RETRY_AFTER, interval.to_string());
@@ -1216,9 +1216,9 @@ impl BrokerHandler {
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-safeclaw-approve-url", approve_url.as_str())
-                    .header("x-safeclaw-op-id", op_id.as_str())
-                    .header("x-safeclaw-error", ScCode::HostNotAnchored.as_str())
+                    .header("x-sprott-approve-url", approve_url.as_str())
+                    .header("x-sprott-op-id", op_id.as_str())
+                    .header("x-sprott-error", ScCode::HostNotAnchored.as_str())
                     .body(Body::from(body))
                     .unwrap_or_else(|_| plain(StatusCode::FORBIDDEN, "host not anchored"))
                     .into();
@@ -1605,7 +1605,7 @@ fn egress_error_response(err: hudsucker::hyper_util::client::legacy::Error) -> R
     err_response(code, &msg)
 }
 
-/// The `(x-safeclaw-error code, body)` for a forward-hop failure. Pure so the
+/// The `(x-sprott-error code, body)` for a forward-hop failure. Pure so the
 /// branching (connect vs not, proxy configured vs not) is testable without a
 /// `hyper_util` error, which has no public constructor. Never echoes the proxy
 /// URL — it can carry userinfo — pointing at `sc proxy show` instead.
@@ -1654,7 +1654,7 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 
 /// A plain-text 4xx/5xx for the MITM plane. Status comes from the registry
 /// (`ScCode::row`, the same row every surface uses); the machine token rides
-/// `x-safeclaw-error` AND leads the body (`Sprott: <code>: <msg>`), so the
+/// `x-sprott-error` AND leads the body (`Sprott: <code>: <msg>`), so the
 /// error is attributable even when a tool surfaces only one of the two.
 /// text/plain is deliberate — a Sprott refusal must never parse as the
 /// upstream service's payload.
@@ -1663,7 +1663,7 @@ fn err_response(code: ScCode, msg: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header("x-safeclaw-error", code.as_str())
+        .header("x-sprott-error", code.as_str())
         .body(Body::from(format!(
             "Sprott: {}: {}\n",
             code.as_str(),
@@ -1683,7 +1683,7 @@ fn err_response(code: ScCode, msg: &str) -> Response<Body> {
 fn proxy_auth_challenge() -> Response<Body> {
     Response::builder()
         .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
-        .header(header::PROXY_AUTHENTICATE, "Basic realm=\"safeclaw\"")
+        .header(header::PROXY_AUTHENTICATE, "Basic realm=\"sprott\"")
         .header(header::CONTENT_LENGTH, "0")
         .body(Body::empty())
         .unwrap_or_else(|_| {
@@ -1766,7 +1766,7 @@ mod tests {
         let resp = body_over_cap(50_000_000, 32 * 1024 * 1024);
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(
-            resp.headers().get("x-safeclaw-error").unwrap(),
+            resp.headers().get("x-sprott-error").unwrap(),
             "broker_body_limit"
         );
         // Chunked variant (length unknown while buffering) still explains.
@@ -1971,7 +1971,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
         assert_eq!(
             res.headers().get(header::PROXY_AUTHENTICATE).unwrap(),
-            "Basic realm=\"safeclaw\"",
+            "Basic realm=\"sprott\"",
         );
     }
 

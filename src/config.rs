@@ -398,7 +398,7 @@ pub enum OpSubcommand {
 #[derive(Debug, Args)]
 pub struct OpWaitArgs {
     /// Op id from a pending-approval response (its `op_id` JSON field /
-    /// `x-safeclaw-op-id` header).
+    /// `x-sprott-op-id` header).
     pub op_id: String,
     /// Max seconds to wait before giving up (the op's own expiry usually
     /// ends the wait first).

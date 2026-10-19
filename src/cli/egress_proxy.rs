@@ -225,7 +225,7 @@ pub fn apply_effective(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 /// `sc proxy set` reach them without a daemon restart — see the module header.
 pub fn client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
     apply_effective(
-        reqwest::Client::builder()
+        crate::util::http_builder()
             .timeout(timeout)
             .default_headers(version_headers()),
     )
@@ -238,7 +238,7 @@ pub fn client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> 
 fn version_headers() -> reqwest::header::HeaderMap {
     let mut h = reqwest::header::HeaderMap::new();
     if let Ok(v) = reqwest::header::HeaderValue::from_str(env!("CARGO_PKG_VERSION")) {
-        h.insert("x-safeclaw-version", v);
+        h.insert("x-sprott-version", v);
     }
     h
 }
@@ -252,7 +252,7 @@ fn version_headers() -> reqwest::header::HeaderMap {
 /// (sync_stream's 45s no-bytes watchdog).
 pub fn client_streaming(connect: std::time::Duration) -> reqwest::Result<reqwest::Client> {
     apply_effective(
-        reqwest::Client::builder()
+        crate::util::http_builder()
             .connect_timeout(connect)
             .default_headers(version_headers()),
     )

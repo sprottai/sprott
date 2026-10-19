@@ -1406,7 +1406,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let signer = DeviceRequestSigner::new(dik, dev.clone());
-        let client = reqwest::Client::new();
+        let client = crate::util::http_builder().build().unwrap();
         let l = fetch_ledger(&client, &format!("http://{}", addr), &o.user_id(), &signer)
             .await
             .unwrap();

@@ -47,7 +47,7 @@ pub async fn run(_args: CommonArgs) -> Result<(), String> {
         custodian.trim_end_matches('/'),
         urlencoding::encode(&vault)
     );
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|e| format!("client init: {}", e))?;
