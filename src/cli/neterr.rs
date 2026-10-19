@@ -9,7 +9,7 @@
 
 /// The one conditional proxy hint, appended to a reachability failure.
 pub const PROXY_HINT: &str =
-    "if this machine needs a proxy for outbound HTTPS, set one with `sc proxy set <url>`";
+    "if this machine needs a proxy for outbound HTTPS, set one with `sprott proxy set <url>`";
 
 /// A reqwest error that is a *reachability* failure (couldn't connect, timed
 /// out), as opposed to a logical/HTTP error where a proxy hint would misdirect.
@@ -32,7 +32,8 @@ pub fn reach_failed(target: &str, err: &reqwest::Error) -> String {
 /// the typed `reqwest::Error`): append the proxy hint iff the message looks like
 /// a reachability failure and doesn't already carry it.
 pub fn with_proxy_hint(msg: &str) -> String {
-    if msg.contains("sc proxy set") || !looks_unreachable(msg) {
+    // A daemon older than 1.5 names the knob `sc proxy set`.
+    if msg.contains("sprott proxy set") || msg.contains("sc proxy set") || !looks_unreachable(msg) {
         return msg.to_string();
     }
     format!("{msg}; {PROXY_HINT}.")
@@ -61,12 +62,14 @@ mod tests {
     fn with_proxy_hint_only_on_reachability_and_not_twice() {
         // Reach failure → hint appended.
         let m = with_proxy_hint("reach https://api.sprott.ai: connection refused");
-        assert!(m.contains("sc proxy set"));
+        assert!(m.contains("sprott proxy set"));
         // Already carries the knob → left alone (no double hint).
-        assert_eq!(
-            with_proxy_hint("couldn't reach x: timed out — sc proxy set <url>"),
-            "couldn't reach x: timed out — sc proxy set <url>"
-        );
+        for carried in [
+            "couldn't reach x: timed out; sprott proxy set <url>",
+            "couldn't reach x: timed out; sc proxy set <url>",
+        ] {
+            assert_eq!(with_proxy_hint(carried), carried);
+        }
         // A logical/non-network error → untouched, NOT told to set a proxy.
         assert_eq!(with_proxy_hint("vault not found"), "vault not found");
     }

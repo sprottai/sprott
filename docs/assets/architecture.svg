@@ -46,14 +46,14 @@
   <rect x="44" y="160" width="220" height="186" rx="12" fill="#141417" stroke="#2c2c33"/>
   <text class="bt" x="60" y="190">Your agent</text>
   <text class="mono code" x="60" y="222">GITHUB_TOKEN=__sc__github__</text>
-  <text class="mono code" x="60" y="241">sc run -- gh pr list</text>
+  <text class="mono code" x="60" y="241">sprott run -- gh pr list</text>
   <text class="bd" x="60" y="284">knows the phantom,</text>
   <text class="bd" x="60" y="302">never the value</text>
 
   <!-- broker -->
   <rect x="380" y="160" width="252" height="186" rx="12" fill="#141417" stroke="#2c2c33"/>
   <text class="bt" x="396" y="190">The broker</text>
-  <text class="mono" x="396" y="209" font-size="10.5" fill="#8f7a52">sc run · the one egress point</text>
+  <text class="mono" x="396" y="209" font-size="10.5" fill="#8f7a52">sprott run · the one egress point</text>
   <text class="ck" x="396" y="246">phantom → connection github</text>
   <text class="ck" x="396" y="272">destination ∈ github's hosts?</text>
   <text class="ck" x="396" y="298">policy: allow/ask/ask-always/deny</text>

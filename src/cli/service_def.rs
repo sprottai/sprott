@@ -105,7 +105,7 @@ async fn read(
         SourceSpec::Name(n) => {
             return Err(vec![if reg.get(n).is_some() {
                 format!(
-                    "'{}' is already built in; connect it with `sc connection add <id> --service {}`",
+                    "'{}' is already built in; connect it with `sprott connection add <id> --service {}`",
                     safe(n),
                     safe(n)
                 )
@@ -178,7 +178,7 @@ struct Listed {
 }
 
 /// What `sc service ls` says of a locked vault.
-const LOCKED: &str = "the vault is locked; run `sc unlock` first";
+const LOCKED: &str = "the vault is locked; run `sprott unlock` first";
 
 /// The vault's definitions.
 async fn listing(custodian: &str, vault: &str) -> Result<Vec<Listed>, String> {
@@ -279,7 +279,7 @@ pub async fn run_add(args: ServiceAddArgs) -> Result<(), String> {
         .any(|l| l.source.as_ref().is_some_and(|s| s.identity() == identity))
     {
         return Err(format!(
-            "{} is already added; run `sc service update {}`",
+            "{} is already added; run `sprott service update {}`",
             safe(&identity),
             safe(&identity)
         ));
@@ -340,7 +340,7 @@ fn update_targets(
         locals.dedup();
         for l in locals {
             eprintln!(
-                "note: {} is a local folder; update it with `sc service update <path>`",
+                "note: {} is a local folder; update it with `sprott service update <path>`",
                 safe(&l)
             );
         }
@@ -360,7 +360,7 @@ fn update_targets(
             let identity = gh.identity();
             if !present(&identity) {
                 return Err(format!(
-                    "{} is not added; run `sc service add {}`",
+                    "{} is not added; run `sprott service add {}`",
                     safe(&identity),
                     safe(target)
                 ));
@@ -375,7 +375,7 @@ fn update_targets(
             let identity = ServiceSource::Local { name }.identity();
             if !present(&identity) {
                 return Err(format!(
-                    "{} is not added; run `sc service add {}`",
+                    "{} is not added; run `sprott service add {}`",
                     safe(&identity),
                     safe(target)
                 ));
@@ -395,7 +395,7 @@ fn update_targets(
                 )),
                 Some(ServiceSource::Local { name }) => {
                     Err(format!(
-                        "'{}' comes from the local folder {}; pass its path: `sc service update ./path/to/{}`",
+                        "'{}' comes from the local folder {}; pass its path: `sprott service update ./path/to/{}`",
                         safe(&id),
                         safe(name),
                         safe(name)
@@ -565,7 +565,7 @@ pub async fn run_ls(args: ServiceLsArgs, json: bool) -> Result<(), String> {
     }
     let held = held_notes(&custodian, &vault).await;
     if rows.is_empty() {
-        println!("no service definitions in this vault; add one with `sc service add <source>`");
+        println!("no service definitions in this vault; add one with `sprott service add <source>`");
         print_held(&held);
         return Ok(());
     }
@@ -829,7 +829,7 @@ mod tests {
         let e = update_targets(&update_args(Some("m1"), false), &stored)
             .err()
             .unwrap();
-        assert!(e.contains("sc service update ./path/to/mine"), "{e}");
+        assert!(e.contains("sprott service update ./path/to/mine"), "{e}");
         let e = update_targets(&update_args(Some("old"), false), &stored)
             .err()
             .unwrap();

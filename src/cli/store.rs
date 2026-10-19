@@ -57,7 +57,7 @@ async fn ls(custodian: &str, vault: &str, json: bool) -> Result<(), String> {
         .await
         .map_err(|e| format!("reach custodian: {}", e))?;
     if resp.status().as_u16() == 409 {
-        return Err("vault locked. Run `safeclaw unlock` first".into());
+        return Err("vault locked. Run `sprott unlock` first".into());
     }
     if !resp.status().is_success() {
         return Err(format!(

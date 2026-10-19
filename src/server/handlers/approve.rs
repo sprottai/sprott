@@ -2607,14 +2607,14 @@ pub async fn reject_op(
 /// never delivers: the console creates the vault and enrolls passkeys in the
 /// browser, where the identity key already lives.
 pub(crate) const ENROLL_RETIRED: &str = "creating a vault and adding a passkey happen in the \
-     Sprott console now: open it in your browser (`sc vault create` prints the link)";
+     Sprott console now: open it in your browser (`sprott vault create` prints the link)";
 
 /// The refusal for a whole-blob `ActType::Write`. No current client sends one
 /// (console writes are per-item; the CLI writes through grant-approved
 /// mutations), and applying a base-less full replacement would revert or drop
 /// items another device changed since.
 pub(crate) const WHOLE_BLOB_WRITE_RETIRED: &str = "whole-vault write ops are no longer supported: \
-     this client is out of date. Upgrade the Sprott console/CLI (`sc upgrade`) and retry.";
+     this client is out of date. Upgrade the Sprott console/CLI (`sprott upgrade`) and retry.";
 
 /// The role KEYs cached for a service's connections: the declared `secrets`
 /// plus any oauth `[auth].exposes` roles (derived at connect, stored UPPERCASED —

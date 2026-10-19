@@ -1,6 +1,6 @@
 # Platform support
 
-This page lists the operating systems and CPU architectures supported by the `sc` binary and daemon. Passkey and browser support is covered separately in [Passkey support](passkey-support.md).
+This page lists the operating systems and CPU architectures supported by the `sprott` binary and daemon. Passkey and browser support is covered separately in [Passkey support](passkey-support.md).
 
 **Legend:** ✅ available · 🚧 in progress · ❌ not supported
 
@@ -20,9 +20,10 @@ This page lists the operating systems and CPU architectures supported by the `sc
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
-Puts the `sc` binary in `~/.local/bin` (override with `$SAFECLAW_BIN_DIR`),
+Puts the `sprott` command in `~/.local/bin` (override with `$SAFECLAW_BIN_DIR`),
+with `sc` and `safeclaw` as the same command,
 verifies the download's SHA256, installs the agent skill, and prints
-`sc setup --name <name>` as the next step. No sudo, no system changes, no
+`sprott setup --name <name>` as the next step. No sudo, no system changes, no
 telemetry. Linux binaries are statically linked (musl), so there is no glibc or
 runtime-dependency requirement.
 
@@ -33,7 +34,7 @@ release also carries a sigstore build-provenance attestation. To verify a
 binary yourself:
 
 ```bash
-gh attestation verify ~/.local/bin/sc --repo getsafeclaw/safeclaw
+gh attestation verify ~/.local/bin/sprott --repo sprottai/sprott
 ```
 
 ## macOS
@@ -43,15 +44,15 @@ without a Gatekeeper prompt; a binary downloaded through a browser would be
 quarantined and blocked as "unidentified developer" instead. Verify provenance
 with the attestation command above if you obtained it another way.
 
-`sc up` installs a launchd LaunchAgent (`pro.safeclaw.daemon`) that starts the
-daemon at login and restarts it on crash; `sc down` removes it. Logs at
+`sprott up` installs a launchd LaunchAgent (`pro.safeclaw.daemon`) that starts the
+daemon at login and restarts it on crash; `sprott down` removes it. Logs at
 `~/.safeclaw/daemon.log`.
 
 ## Linux
 
-A single static binary, no runtime dependencies. `sc up` installs a per-user
+A single static binary, no runtime dependencies. `sprott up` installs a per-user
 systemd unit (`~/.config/systemd/user/safeclaw.service`, `systemctl --user`)
-that starts the daemon and restarts it on failure; `sc log` reads its journal.
+that starts the daemon and restarts it on failure; `sprott log` reads its journal.
 Running it as a system-wide service is possible by hand-writing your own unit.
 
 ## Windows
@@ -60,13 +61,13 @@ Native Windows support is not available in the standard install channel. The
 installer does not provide a Windows build, and an unsigned `.exe` would
 trigger SmartScreen.
 
-On Windows the binary is named `safeclaw.exe`, not `sc.exe`, because `sc` is
-Windows' own Service Control Manager and would shadow ours.
+On Windows the binary is `sprott.exe` with no `sc.exe` alias: `sc` is Windows'
+own Service Control Manager and would shadow ours.
 
 ## Runtime
 
-The daemon (`sc serve`, started by `sc up`) listens on `127.0.0.1:23293`
-(control) and `127.0.0.1:23294` (the proxy `sc run` routes agent traffic
+The daemon (`sprott serve`, started by `sprott up`) listens on `127.0.0.1:23293`
+(control) and `127.0.0.1:23294` (the proxy `sprott run` routes agent traffic
 through). Both are localhost-only and overridable via `$SAFECLAW_PORT`. Unlock
 uses your platform passkey, see [Passkey support](passkey-support.md).
 

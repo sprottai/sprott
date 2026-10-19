@@ -82,7 +82,7 @@ pub async fn run(args: LogoutArgs) -> Result<(), String> {
     eprintln!("  Your agent's SAFECLAW_* env (BROKER_URL / AGENT_IDENTITY) may");
     eprintln!("  still be persisted in its .env. It's stale now; remove it. Agents stay");
     eprintln!("  valid account-wide (logout revokes only this DEVICE). Revoke unused ones");
-    eprintln!("  with `sc agent rm`. Re-pair with `sc login`.");
+    eprintln!("  with `sprott agent rm`. Re-pair with `sprott login`.");
     Ok(())
 }
 

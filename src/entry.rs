@@ -1,5 +1,5 @@
 //! The daemon/CLI entrypoint, factored out of `main.rs` so BOTH binaries can
-//! reuse it: the open-source `safeclaw`/`sc` bins call [`run_cli`] with
+//! reuse it: the open-source `sprott`/`sc`/`safeclaw` bins call [`run_cli`] with
 //! [`crate::team_hooks::NoopHooks`], and the closed `safeclaw-ee` overlay's bin
 //! calls it with its real hooks. `hooks` only reaches the daemon (`run_daemon` →
 //! `AppState::with_team_hooks`); every other verb is identical across builds.
@@ -21,6 +21,8 @@ use crate::team_hooks::TeamHooks;
 /// Parse argv and run the requested command. `hooks` is injected into the daemon
 /// (`serve`) path only; all other verbs ignore it.
 pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error::Error>> {
+    // A pre-1.5 install upgraded in place has only `sc`; add `sprott` beside it.
+    cli::command_name::ensure_canonical_beside();
     // Loopback is never proxied: pin localhost into NO_PROXY before any HTTP
     // client is built, so a corporate HTTPS_PROXY (or the one `sc run` injects)
     // can't trap our calls to the local daemon. reqwest honours env proxies by
@@ -61,7 +63,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         },
         Command::Skill(args) => {
             cli::skill::run(args.sub).map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw skill: {}", e);
+                eprintln!("sprott skill: {}", e);
                 e.into()
             })
         }
@@ -72,7 +74,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::status::run(json)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw status: {}", e);
+                    eprintln!("sprott status: {}", e);
                     e.into()
                 })
         }
@@ -87,14 +89,14 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         Command::Restart => cli::up::restart()
             .await
             .map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw restart: {}", e);
+                eprintln!("sprott restart: {}", e);
                 e.into()
             }),
         Command::Sync(args) => {
             cli::sync::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw sync: {}", e);
+                    eprintln!("sprott sync: {}", e);
                     e.into()
                 })
         }
@@ -109,7 +111,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::up::run()
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw up: {}", e);
+                    eprintln!("sprott up: {}", e);
                     e.into()
                 })
         }
@@ -118,14 +120,14 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         Command::Ls(args) => cli::ls::run(args)
             .await
             .map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw ls: {}", e);
+                eprintln!("sprott ls: {}", e);
                 e.into()
             }),
         Command::Get(args) => {
             cli::secret::run_get(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw get: {}", e);
+                    eprintln!("sprott get: {}", e);
                     e.into()
                 })
         }
@@ -133,7 +135,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::doctor::run(json)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw doctor: {}", e);
+                    eprintln!("sprott doctor: {}", e);
                     e.into()
                 })
         }
@@ -141,13 +143,13 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::vault::run(args.sub, json)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw vault: {}", e);
+                    eprintln!("sprott vault: {}", e);
                     e.into()
                 })
         }
         Command::Config(args) => {
             cli::config::run(args.sub).map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw config: {}", e);
+                eprintln!("sprott config: {}", e);
                 e.into()
             })
         }
@@ -155,7 +157,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::proxy::run(args.sub)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw proxy: {}", e);
+                    eprintln!("sprott proxy: {}", e);
                     e.into()
                 })
         }
@@ -163,7 +165,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::store::run(args.sub, json)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw store: {}", e);
+                    eprintln!("sprott store: {}", e);
                     e.into()
                 })
         }
@@ -171,7 +173,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::passkey::run(args.sub, json)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw passkey: {}", e);
+                    eprintln!("sprott passkey: {}", e);
                     e.into()
                 })
         }
@@ -179,12 +181,12 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::agent::run(args.sub, json)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw agent: {}", e);
+                    eprintln!("sprott agent: {}", e);
                     e.into()
                 })
         }
         Command::Env => cli::env::run().map_err(|e| -> Box<dyn std::error::Error> {
-            eprintln!("safeclaw env: {}", e);
+            eprintln!("sprott env: {}", e);
             e.into()
         }),
         Command::GitCredential(args) => {
@@ -193,7 +195,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::git_credential::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw git-credential: {}", e);
+                    eprintln!("sprott git-credential: {}", e);
                     e.into()
                 })
         }
@@ -201,7 +203,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::run::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw run: {}", e);
+                    eprintln!("sprott run: {}", e);
                     e.into()
                 })
         }
@@ -210,7 +212,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::connect::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw connect: {}", e);
+                    eprintln!("sprott connect: {}", e);
                     e.into()
                 })
         }
@@ -224,7 +226,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 ConnectionSubcommand::RmHost(a) => cli::connect::run_rm_host(a).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw connection: {}", e);
+                eprintln!("sprott connection: {}", e);
                 e.into()
             })
         }
@@ -232,7 +234,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::upgrade::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw upgrade: {}", e);
+                    eprintln!("sprott upgrade: {}", e);
                     e.into()
                 })
         }
@@ -240,7 +242,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::login::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw login: {}", e);
+                    eprintln!("sprott login: {}", e);
                     e.into()
                 })
         }
@@ -248,7 +250,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::logout::run(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw logout: {}", e);
+                    eprintln!("sprott logout: {}", e);
                     e.into()
                 })
         }
@@ -259,7 +261,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 DeviceSubcommand::Logout(a) => cli::logout::run(a).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw device: {}", e);
+                eprintln!("sprott device: {}", e);
                 e.into()
             })
         }
@@ -272,7 +274,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 SecretSubcommand::Ls(a) => cli::ls::run(a).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw secret: {}", e);
+                eprintln!("sprott secret: {}", e);
                 e.into()
             })
         }
@@ -280,7 +282,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::secret::run_set(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw set: {}", e);
+                    eprintln!("sprott set: {}", e);
                     e.into()
                 })
         }
@@ -288,7 +290,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             cli::secret::run_rm(args)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("safeclaw rm: {}", e);
+                    eprintln!("sprott rm: {}", e);
                     e.into()
                 })
         }
@@ -302,7 +304,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 ServiceSubcommand::Rm(a) => cli::service_def::run_rm(a).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw service: {}", e);
+                eprintln!("sprott service: {}", e);
                 e.into()
             })
         }
@@ -312,12 +314,12 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 OpSubcommand::Wait(a) => cli::op::run_wait(a, json).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("safeclaw op: {}", e);
+                eprintln!("sprott op: {}", e);
                 e.into()
             })
         }
         Command::Version => {
-            println!("safeclaw {}", crate::build_version());
+            println!("sprott {}", crate::build_version());
             Ok(())
         }
     }
@@ -326,7 +328,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
 /// Shared error adapter for the daemon-lifecycle verbs (down/restart/logs/…):
 /// print to stderr and box the error for the caller's return.
 fn daemon_err(e: String) -> Box<dyn std::error::Error> {
-    eprintln!("safeclaw: {}", e);
+    eprintln!("sprott: {}", e);
     e.into()
 }
 

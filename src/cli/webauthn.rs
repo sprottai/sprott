@@ -308,7 +308,7 @@ pub async fn fetch_passkeys_json(custodian: &str, vault: &str) -> Result<Vec<Val
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !vault_exists {
-        return Err("this device holds no such vault. Run `sc vault ls`".into());
+        return Err("this device holds no such vault. Run `sprott vault ls`".into());
     }
     let passkeys = body["passkeys"]
         .as_array()
@@ -424,7 +424,7 @@ fn print_ssh_tunnel_hint(custodian: &str, cb_port: Option<u16>) {
             eprintln!("       ssh -N {tunnel_flags} {user}@<your-host>");
             eprintln!();
             eprintln!("  2. On this server, set the matching port (persists):");
-            eprintln!("       safeclaw config set cb-port {cb}");
+            eprintln!("       sprott config set cb-port {cb}");
             eprintln!();
             eprintln!("Then re-run the command. (Continuing now with a random port; the URL");
             eprintln!("below probably won't open through SSH unless you've already tunneled.)");

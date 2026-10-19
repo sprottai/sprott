@@ -531,7 +531,7 @@ pub(crate) fn status_problem(status: u16, what: &str) -> FetchError {
 fn no_response(e: &reqwest::Error, what: &str) -> FetchError {
     match proxy_refusal(e) {
         Some(why) => FetchError::Answered(format!(
-            "the proxy between this device and GitHub refused the connection for {} ({}); check the proxy (`sc proxy`)",
+            "the proxy between this device and GitHub refused the connection for {} ({}); check the proxy (`sprott proxy`)",
             what, why
         )),
         None => FetchError::Unreachable(format!("cannot reach GitHub: {}", e)),

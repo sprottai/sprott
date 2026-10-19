@@ -1,5 +1,5 @@
 //! Thin binary wrapper. The entire CLI + daemon lives in
-//! [`safeclaw::entry::run_cli`] so the open-source `safeclaw`/`sc` bins and the
+//! [`safeclaw::entry::run_cli`] so the open-source `sprott`/`sc`/`safeclaw` bins and the
 //! closed `safeclaw-ee` overlay's bin share it verbatim, differing ONLY in which
 //! [`safeclaw::team_hooks::TeamHooks`] implementation they inject. The open
 //! build wires `NoopHooks` (no team policy whatsoever); the official binary's
@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     // Every command in `entry::run_cli` already prints its own friendly
-    // "safeclaw <cmd>: <msg>" line on failure (per-arm `eprintln!` / `daemon_err`).
+    // "sprott <cmd>: <msg>" line on failure (per-arm `eprintln!` / `daemon_err`).
     // Returning the error from `main` would make Rust ALSO print its default
     // `Error: "<msg>"` (Debug, quoted) — a confusing double. Consume the error
     // here and just set a non-zero exit code.

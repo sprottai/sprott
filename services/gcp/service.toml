@@ -3,7 +3,7 @@ Google Cloud APIs are REST over per-service hosts (compute.googleapis.com,
 storage.googleapis.com, run.googleapis.com, …). The phantom resolves to a minted
 OAuth access token — put it in the bearer header; the proxy substitutes it at
 egress, the token never enters the agent:
-  sc run -- curl \\
+  sprott run -- curl \\
     "https://compute.googleapis.com/compute/v1/projects/PROJECT/zones" \\
     -H "Authorization: Bearer __sc__gcp__"
 Scope is cloud-platform (full GCP). Multi-account: switch the phantom value

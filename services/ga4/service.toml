@@ -4,7 +4,7 @@ API v1beta — create properties, data streams, key events, custom dimensions) a
 analyticsdata.googleapis.com (Data API v1beta — read-only reporting). The phantom
 resolves to a minted OAuth access token; put it in the bearer header, the proxy
 substitutes it at egress, the token never enters the agent:
-  sc run -- curl \\
+  sprott run -- curl \\
     "https://analyticsadmin.googleapis.com/v1beta/accounts" \\
     -H "Authorization: Bearer __sc__ga4__"
 """

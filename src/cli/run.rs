@@ -22,7 +22,7 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     // that exactly one is present.
     if !args.export_env && args.cmd.is_empty() {
         return Err(
-            "nothing to run: `sc run -- <cmd>` to run a command, or `sc run --export-env`".into(),
+            "nothing to run: `sprott run -- <cmd>` to run a command, or `sprott run --export-env`".into(),
         );
     }
 
@@ -216,7 +216,7 @@ fn agent_has_key() -> bool {
 async fn preflight(ca: &Path, control_root: &str) -> Result<(), String> {
     if !ca.exists() {
         return Err(format!(
-            "Sprott CA not found at {}. The daemon generates it on first start. Run `sc up`, then retry.",
+            "Sprott CA not found at {}. The daemon generates it on first start. Run `sprott up`, then retry.",
             ca.display()
         ));
     }
@@ -236,12 +236,12 @@ async fn preflight(ca: &Path, control_root: &str) -> Result<(), String> {
     {
         return Err(format!(
             "Sprott daemon isn't answering at {control_root}. It's most likely \
-             just not running: start it with `sc up`, then retry. (If instead you \
+             just not running: start it with `sprott up`, then retry. (If instead you \
              moved the daemon to another host, your agent env's {name} is stale; \
-             unset it or re-run `sc agent add`.)"
+             unset it or re-run `sprott agent add`.)"
         ));
     }
-    Err("Sprott daemon isn't running. Bring it up with `sc up`, then retry.".into())
+    Err("Sprott daemon isn't running. Bring it up with `sprott up`, then retry.".into())
 }
 
 /// Tell the LOCAL daemon our live shell egress proxy (`POST /proxy/ambient`) so

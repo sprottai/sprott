@@ -1,7 +1,7 @@
 # Service TOML reference (v4)
 
 This page explains how to write a Sprott service definition. Design rationale lives in
-[credential-broker.md](https://github.com/getsafeclaw/safeclaw/blob/main/design/credential-broker.md); this page is the authoring
+[credential-broker.md](https://github.com/sprottai/sprott/blob/main/design/credential-broker.md); this page is the authoring
 reference only.
 
 A service is a folder `services/{id}/`: flat, so the filesystem itself
@@ -15,7 +15,7 @@ services/github/
 
 Format: TOML (authored by humans/agents; CI publishes `registry.json`).
 
-## Adding services to a vault: `sc service`
+## Adding services to a vault: `sprott service`
 
 Services outside the built-in catalog live in your vault, added from a
 **source**. A source is a folder in the catalog's layout:
@@ -33,18 +33,18 @@ names the service registry, which is not open yet.
 
 | Command | Does |
 |---|---|
-| `sc service add <source> [--id <id>] [--ref <ref>]` | Reads the source, checks every definition, stores them with one passkey approval. |
-| `sc service update <id\|source> [--all] [--check] [-y] [--ref <ref>]` | Re-reads a source and stores what changed, with one passkey approval. |
-| `sc service ls [id]` | Lists the vault's definitions by source, with the pinned commit and loaded / skipped (with the reason). |
-| `sc service rm <id\|source>` | Removes one service, or every service of a source. |
-| `sc service validate <source> [--ref <ref>]` | Runs the same checks as `add`, without a vault. For authors and CI. |
+| `sprott service add <source> [--id <id>] [--ref <ref>]` | Reads the source, checks every definition, stores them with one passkey approval. |
+| `sprott service update <id\|source> [--all] [--check] [-y] [--ref <ref>]` | Re-reads a source and stores what changed, with one passkey approval. |
+| `sprott service ls [id]` | Lists the vault's definitions by source, with the pinned commit and loaded / skipped (with the reason). |
+| `sprott service rm <id\|source>` | Removes one service, or every service of a source. |
+| `sprott service validate <source> [--ref <ref>]` | Runs the same checks as `add`, without a vault. For authors and CI. |
 
 How it works:
 
 - **Third-party.** A service added from a source is installed: Sprott does
   not review it. A vault loads installed services only while its owner turns
   them on (console: Settings → Services); while off, `add` and `update` are
-  refused, `sc service ls` shows them skipped, and connections that use them
+  refused, `sprott service ls` shows them skipped, and connections that use them
   fail.
 - **Pinned.** A GitHub source is resolved to a full commit (`--ref` takes a
   branch or tag; default: the default branch) and stored with it and the ref.
@@ -82,7 +82,7 @@ How it works:
   longer approval window, a request variable an approval no longer binds,
   PKCE turned off). `--check` only shows; `-y`
   skips the terminal question, never the passkey. A local source is re-read
-  only from the path you pass: `sc service update ./my-api`. Services the
+  only from the path you pass: `sprott service update ./my-api`. Services the
   source no longer has are removed.
 - **Storage.** Each definition is its own record in the vault, like a
   connection: any member can add, update or remove one, after approving the
@@ -92,10 +92,10 @@ How it works:
   console by an owner.
 - **Sync.** If a definition was changed in two places at once, both versions
   are kept, like a connection: the second is the record `<id> (conflict
-  copy)`, which `sc service ls` lists as skipped and which is never used;
+  copy)`, which `sprott service ls` lists as skipped and which is never used;
   keep the one you want in the console. A pulled change this device does not
   apply (a setting not signed by an owner, or one that waits for unlock) is
-  listed by `sc status` and `sc service ls` with why.
+  listed by `sprott status` and `sprott service ls` with why.
 - **Removal.** Connections that use a removed service are kept and listed;
   they stop working until a definition is added again.
 - `ls` reads the unlocked vault: no network, no passkey.
@@ -172,7 +172,7 @@ shape only, the vocabulary is open).
 Where a HUMAN mints/manages this service's secret (e.g.
 `https://crates.io/settings/tokens`). Purely auxiliary and display-only: the
 console renders it as an "Open … → API tokens" helper link and
-`sc connection add --service` prints it ("Get a token: …"). Nothing ever
+`sprott connection add --service` prints it ("Get a token: …"). Nothing ever
 fetches a secret from it, and it never participates in routing or policy.
 Must be `http(s)` when present: it is rendered as a link, so the validator
 rejects non-web schemes.
@@ -249,7 +249,7 @@ Put the phantom where the pair goes:
   service validates the username (e.g. Bitbucket, case-sensitive), type the
   real username there.
 - docker: `docker login -u <user> -p __sc__dockerhub__`.
-- `sc git-credential` (optional helper): emits `("x", <phantom of the host
+- `sprott git-credential` (optional helper): emits `("x", <phantom of the host
   connection's sole injectable secret>)`; declines if none or several.
 
 ## Which shape needs what

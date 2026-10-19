@@ -1,4 +1,10 @@
-/// The version string every user-facing surface prints (`sc version`,
+/// The GitHub `owner/repo` that publishes the release assets `sprott upgrade`
+/// downloads and hosts the skill the daemon's `/skill.md` points at. The one
+/// place to change when the repo moves (install.sh and the release workflow
+/// carry their own copy).
+pub const GITHUB_REPO: &str = "sprottai/sprott";
+
+/// The version string every user-facing surface prints (`sprott version`,
 /// `/health`, doctor, upgrade). Release CI stamps the git tag into the build
 /// via `.build-tag` (see build.rs), so pre-release binaries self-report
 /// "0.9.48-rc.6" instead of the bare Cargo version — Cargo.toml stays bare by

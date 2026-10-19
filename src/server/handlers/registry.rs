@@ -732,7 +732,7 @@ refresh_token = "REFRESH_TOKEN"
     fn render_setup_is_plain_passthrough() {
         let toml = r#"
 setup = """
-Put the phantom in the URL: sc run -- git clone https://x:__sc__github__@github.com/o/r
+Put the phantom in the URL: sprott run -- git clone https://x:__sc__github__@github.com/o/r
 """
 
 [service]
@@ -743,7 +743,7 @@ secrets = ["GITHUB_TOKEN"]
 "#;
         let def: ServiceDef = crate::service::gate::admit_toml(toml).unwrap();
         let s = render_setup(&def).expect("setup passthrough");
-        assert!(s.contains("sc run --"), "{}", s);
+        assert!(s.contains("sprott run --"), "{}", s);
 
         let no_setup: ServiceDef = crate::service::gate::admit_toml(
             "[service]\nid=\"x\"\nname=\"X\"\nhosts=[\"x.com\"]\n",

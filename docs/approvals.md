@@ -85,5 +85,5 @@ see, the more each one means.
 ## For agents
 
 An approval-gated command fails with the approval link in its output. The
-agent surfaces the link, backgrounds `sc op wait <op_id>` (exit 0 means
+agent surfaces the link, backgrounds `sprott op wait <op_id>` (exit 0 means
 approved), and re-runs the same command. You tap; nobody types "done".

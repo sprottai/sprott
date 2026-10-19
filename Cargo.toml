@@ -1,6 +1,6 @@
 [package]
 name = "safeclaw"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
 # Functional Source License 1.1 (Apache-2.0 future). FSL is not an SPDX id,
@@ -8,17 +8,22 @@ description = "Sprott daemon — multi-vault passkey-gated credential vault for 
 # (offering a substitute commercial product/service); converts to Apache-2.0
 # two years after each release. See LICENSE.
 license-file = "LICENSE"
-repository = "https://github.com/getsafeclaw/safeclaw"
+repository = "https://github.com/sprottai/sprott"
 
-# Two bin targets share the same main.rs:
-#   `safeclaw` — canonical name (discoverable via brew/cargo install)
-#   `sc`       — short alias for daily use (cf. `op`, `gh`, `bw`)
+# Three bin targets share the same main.rs:
+#   `sprott`   - the command name everything prints
+#   `sc`       - alias (installs before 1.5 have only this name)
+#   `safeclaw` - alias (the release asset is the safeclaw-ee overlay's bin of this name)
 [[bin]]
-name = "safeclaw"
+name = "sprott"
 path = "src/main.rs"
 
 [[bin]]
 name = "sc"
+path = "src/main.rs"
+
+[[bin]]
+name = "safeclaw"
 path = "src/main.rs"
 
 [dependencies]

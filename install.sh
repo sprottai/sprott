@@ -1,20 +1,21 @@
 #!/bin/sh
-# Sprott CLI installer: github.com/getsafeclaw/safeclaw (open source).
+# Sprott CLI installer: github.com/sprottai/sprott (open source).
 #
 # What it does, in order (read it before you run it):
-#   * Downloads the prebuilt `sc` binary for this platform from the project's
-#     GitHub Releases (the latest release, or SAFECLAW_VERSION).
+#   * Downloads the prebuilt `sprott` binary for this platform from the
+#     project's GitHub Releases (the latest release, or SAFECLAW_VERSION).
 #   * Verifies it against the release's SHA256SUMS and refuses to install on any
 #     mismatch or missing checksum.
-#   * Installs it to ~/.local/bin (or SAFECLAW_BIN_DIR). No sudo, no shell
-#     config changes, no telemetry.
-#   * Installs the Sprott agent skill with `sc skill install` (skip with
+#   * Installs it to ~/.local/bin (or SAFECLAW_BIN_DIR) as `sprott`, with `sc`
+#     and `safeclaw` as the same command. No sudo, no shell config changes, no
+#     telemetry.
+#   * Installs the Sprott agent skill with `sprott skill install` (skip with
 #     --no-skill or SAFECLAW_NO_SKILL=1).
-#   * When an AI agent runs it, continues with `sc setup`; skip this with
+#   * When an AI agent runs it, continues with `sprott setup`; skip this with
 #     SAFECLAW_NO_SETUP=1. Otherwise, prints one next step.
 set -eu
 
-REPO="getsafeclaw/safeclaw"
+REPO="sprottai/sprott"
 if [ -n "${SAFECLAW_VERSION:-}" ]; then
   BASE="https://github.com/${REPO}/releases/download/${SAFECLAW_VERSION}"
   RELEASE="${SAFECLAW_VERSION}"
@@ -76,18 +77,26 @@ fi
 echo "Checksum OK."
 
 chmod +x "${DOWNLOAD}"
+# The file keeps the name `sc` that every earlier install and `sc upgrade`
+# used; `sprott` (the command everything prints) and `safeclaw` link to it, so
+# an upgrade through any name replaces the one file. An existing `safeclaw` is
+# left alone.
 mv "${DOWNLOAD}" "${DEST}/sc"
 trap - EXIT HUP INT TERM
+ln -sf sc "${DEST}/sprott"
+if [ ! -e "${DEST}/safeclaw" ] && [ ! -L "${DEST}/safeclaw" ]; then
+  ln -s sc "${DEST}/safeclaw"
+fi
 
 if [ "${NO_SKILL}" != "1" ]; then
-  if "${DEST}/sc" skill --help >/dev/null 2>&1; then
-    if ! "${DEST}/sc" skill install; then
+  if "${DEST}/sprott" skill --help >/dev/null 2>&1; then
+    if ! "${DEST}/sprott" skill install; then
       echo "Warning: Sprott was installed, but the agent skill could not be installed." >&2
     fi
   fi
 fi
 
-echo "Installed: ${DEST}/sc"
+echo "Installed: ${DEST}/sprott"
 case ":${PATH}:" in
   *":${DEST}:"*) ;;
   *) echo "Add it to PATH: export PATH=\"${DEST}:\$PATH\"" ;;
@@ -98,8 +107,8 @@ else
   PROFILE_ARG=""
 fi
 if [ "${SAFECLAW_NO_SETUP:-0}" != "1" ] &&
-  "${DEST}/sc" setup --detect-agent >/dev/null 2>&1; then
+  "${DEST}/sprott" setup --detect-agent >/dev/null 2>&1; then
   echo "Setting up Sprott for this agent:"
-  exec "${DEST}/sc" setup${PROFILE_ARG}
+  exec "${DEST}/sprott" setup${PROFILE_ARG}
 fi
-echo "Next: sc setup --name <a name for this agent>${PROFILE_ARG}"
+echo "Next: sprott setup --name <a name for this agent>${PROFILE_ARG}"

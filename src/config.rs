@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Control plane port (`0x5AFD`) — the axum Router (op / approve / ceremonies /
-/// events). The `sc` CLI's target; the agent's own traffic never touches it (the
+/// events). The `sprott` CLI's target; the agent's own traffic never touches it (the
 /// agent holds only `$SAFECLAW_BROKER_URL`, the proxy port's API face).
 /// Sits just below the proxy's `0x5AFE`: both are below the OS ephemeral floor
 /// and IANA-unregistered, so nothing should grab them by chance. Moved off the
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 pub const CONTROL_PORT: u16 = 23293;
 
 /// Credential-proxy plane port (`0x5AFE`) — the phantom-only local HTTPS MITM the
-/// agent's tool traffic is routed through by `sc run`'s env bundle.
+/// agent's tool traffic is routed through by `sprott run`'s env bundle.
 pub const PROXY_PORT: u16 = 23294;
 
 /// Default cap on a brokered request's body (bytes) — the unified boundary:
@@ -23,22 +23,25 @@ pub const PROXY_PORT: u16 = 23294;
 /// user-adjustable knob (`--body-cap` / `SAFECLAW_BODY_CAP`).
 pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
 
-/// Top-level CLI shape. `safeclaw` (short alias `sc`) is one binary
+/// Top-level CLI shape. `sprott` (aliases `sc` and `safeclaw`) is one binary
 /// with two roles:
 ///
-///   - **Daemon + vault lifecycle** (Linux user-systemd): `sc up` (install +
-///     start + unlock), `sc down`, `sc restart`, `sc unlock` / `sc lock` (the
-///     active vault), `sc log`, and `sc serve` to run it in the foreground
+///   - **Daemon + vault lifecycle** (Linux user-systemd): `sprott up` (install +
+///     start + unlock), `sprott down`, `sprott restart`, `sprott unlock` / `sprott lock` (the
+///     active vault), `sprott log`, and `sprott serve` to run it in the foreground
 ///     (Docker / dev / non-Linux).
 ///   - **Vault ops** are short-lived CLI commands talking to the daemon
-///     over HTTP: `sc status`, `sc vault ...` (alias `sc v`, manage the set of
-///     vaults), `sc ls / get / set / rm`, `sc passkey` (alias `sc p`),
-///     `sc store`, `sc doctor`, …
+///     over HTTP: `sprott status`, `sprott vault ...` (alias `sprott v`, manage the set of
+///     vaults), `sprott ls / get / set / rm`, `sprott passkey` (alias `sprott p`),
+///     `sprott store`, `sprott doctor`, …
 ///
-/// Bare `safeclaw` (no subcommand) prints help.
+/// Bare `sprott` (no subcommand) prints help.
 #[derive(Debug, Parser)]
 #[command(
-    name = "safeclaw",
+    // Usage and errors name `sprott` however the binary was invoked (`sc` and
+    // `safeclaw` are aliases of the same binary).
+    name = "sprott",
+    bin_name = "sprott",
     // NOT bare `version` (= CARGO_PKG_VERSION): rc builds must self-report
     // their release tag here too, same as `sc status` / the custom prints.
     version = crate::build_version(),
@@ -46,7 +49,7 @@ pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
 )]
 pub struct Cli {
     /// Target vault for this invocation (any subcommand, any position): an id, a
-    /// unique id prefix, or the exact name (`sc vault ls`; quote a name with
+    /// unique id prefix, or the exact name (`sprott vault ls`; quote a name with
     /// spaces). An ambiguous name or prefix errors with the candidates. Overrides
     /// the shell's `$SAFECLAW_VAULT_ID` pin and the device default (top of the
     /// resolution chain, design/vault-addressing.md).
@@ -74,21 +77,21 @@ pub enum Command {
     /// Get Sprott running and ready: install + start the daemon if needed,
     /// then unlock the vault (one passkey tap). Idempotent — the everyday
     /// "make sure it's up" command (the `tailscale up` idiom; the skill's
-    /// lazy-start). This is the single setup entrypoint after `sc login`.
+    /// lazy-start). This is the single setup entrypoint after `sprott login`.
     Up,
     /// Stop the local daemon (user-level systemd unit).
     Down,
     /// Restart the local daemon, then re-unlock the vault (one passkey tap).
     /// A bounce wipes the in-memory keys, so `restart` converges back to the
-    /// same running+unlocked state as `sc up` — never leaves you silently locked.
+    /// same running+unlocked state as `sprott up` — never leaves you silently locked.
     Restart,
     /// Pull the latest vault state from the cloud now and finish any pending
     /// connect (e.g. a Gmail "Connect" sealed from the web that hasn't completed
     /// yet). Normally automatic via the background watcher; use this to force it.
     Sync(SyncArgs),
     /// Bring the active vault Locked → Unlocked (one passkey tap). Normally
-    /// `sc up` does this for you; use this to unlock explicitly. A vault-level
-    /// lifecycle op — sits next to `sc up`, not under `sc vault` (which manages
+    /// `sprott up` does this for you; use this to unlock explicitly. A vault-level
+    /// lifecycle op — sits next to `sprott up`, not under `sprott vault` (which manages
     /// the *set* of vaults). Pass `--vault` to target a non-active vault.
     Unlock(UnlockArgs),
     /// Drop the active vault's in-memory secrets cache and flip it back to
@@ -99,8 +102,8 @@ pub enum Command {
     Log(LogArgs),
     /// ADVANCED / self-host: run the daemon in the FOREGROUND (this process),
     /// for Docker / a hand-written systemd unit / non-systemd hosts. On a normal
-    /// Linux box you never call this — `sc up` installs a background service
-    /// whose entry-point IS `sc serve`. Config via SAFECLAW_* env + flags;
+    /// Linux box you never call this — `sprott up` installs a background service
+    /// whose entry-point IS `sprott serve`. Config via SAFECLAW_* env + flags;
     /// Ctrl-C to stop.
     Serve(ServeArgs),
     /// HPKE outer-envelope public key (diagnostic).
@@ -109,12 +112,12 @@ pub enum Command {
     /// Public service catalog. Renders the compiled-in services offline (no
     /// running daemon), the exact shape `GET /registry` serves. `--json` for CI.
     Registry(RegistryArgs),
-    /// Alias for `sc secret ls`.
+    /// Alias for `sprott secret ls`.
     Ls(CommonArgs),
-    /// Alias for `sc secret get`.
+    /// Alias for `sprott secret get`.
     Get(GetArgs),
     /// Per-vault lifecycle ops. Today: `vault rm` to nuke a vault's
-    /// daemon-side state (irreversible, passkey-gated). Short: `sc v`.
+    /// daemon-side state (irreversible, passkey-gated). Short: `sprott v`.
     #[command(alias = "v")]
     Vault(VaultArgs),
     /// Read/write persistent CLI preferences in `~/.safeclaw/config.toml`.
@@ -130,22 +133,22 @@ pub enum Command {
     Proxy(ProxyArgs),
     /// Manage the active vault's enrolled passkeys. `ls` is read-only;
     /// `add` / `rm` / `rename` need crypto ceremonies and are deferred
-    /// to a later session. Short: `sc p`.
+    /// to a later session. Short: `sprott p`.
     #[command(alias = "p")]
     Passkey(PasskeyArgs),
     /// Manage this account's agents (agent ≡ api-key). `add` mints a key
-    /// (works on any paired device), `ls` lists them, `rm` revokes. Short: `sc a`.
+    /// (works on any paired device), `ls` lists them, `rm` revokes. Short: `sprott a`.
     #[command(alias = "a")]
     Agent(AgentArgs),
-    /// The DEVICE axis of the account plane: `sc device login/logout` are the
-    /// canonical spellings of top-level `sc login`/`sc logout` (kept as
-    /// shortcuts). Symmetric with `sc agent *` — both are account-level,
+    /// The DEVICE axis of the account plane: `sprott device login/logout` are the
+    /// canonical spellings of top-level `sprott login`/`sprott logout` (kept as
+    /// shortcuts). Symmetric with `sprott agent *` — both are account-level,
     /// device-key authed, cloud-backed.
     Device(DeviceArgs),
-    /// Print `export` lines for the HUMAN's shell (`eval "$(sc env)"`):
+    /// Print `export` lines for the HUMAN's shell (`eval "$(sprott env)"`):
     /// SAFECLAW_BROKER_URL projected from this device's config — never a key,
-    /// never a vault pin (vault follows `sc vault use`; per-call override is
-    /// `--vault`). An AGENT's env (incl. its key) is minted by `sc agent add`.
+    /// never a vault pin (vault follows `sprott vault use`; per-call override is
+    /// `--vault`). An AGENT's env (incl. its key) is minted by `sprott agent add`.
     Env,
     /// Self-update: download the latest release binary for this platform,
     /// verify its sha256, and replace the running binary in place. No-op when
@@ -154,10 +157,10 @@ pub enum Command {
     /// Pair this host to your Sprott account: prints a short code and an
     /// approval link; you approve in the browser, then this host gets its
     /// cloud-side daemon credential. Writes `~/.safeclaw/device-key` (0600). Run once per host (re-run to repair/re-pair).
-    /// `sc login` then brings the daemon up and unlocks for you; `sc up` is the
+    /// `sprott login` then brings the daemon up and unlocks for you; `sprott up` is the
     /// everyday "make sure it's running" afterwards.
     Login(LoginArgs),
-    /// Unpair this host: the inverse of `sc login`. Stops the daemon, clears the
+    /// Unpair this host: the inverse of `sprott login`. Stops the daemon, clears the
     /// local pairing (active vault, cloud backend, known vaults), removes the
     /// `~/.safeclaw/device-key`, and revokes that device-key cloud-side (its
     /// plaintext is gone locally, so the server row is dead weight otherwise).
@@ -169,32 +172,32 @@ pub enum Command {
     /// CLI (they rewrite vault.dat).
     Store(StoreArgs),
     /// Secrets in the active vault. Subcommands: set / get / rm / ls.
-    /// Top-level shortcuts `sc set/get/rm/ls` are aliases for these.
+    /// Top-level shortcuts `sprott set/get/rm/ls` are aliases for these.
     Secret(SecretArgs),
-    /// Alias for `sc secret set`.
+    /// Alias for `sprott secret set`.
     Set(SetArgs),
-    /// Alias for `sc secret rm`.
+    /// Alias for `sprott secret rm`.
     Rm(RmArgs),
     /// Run a command with the resident credential proxy pasted into its
     /// environment — the everyday, zero-human way an agent routes one command's
-    /// traffic through Sprott. `sc run -- <cmd…>` execs the child with the
-    /// proxy + CA env bundle merged in; `sc run --export-env` prints the same
-    /// bundle as shell `export` lines for `eval "$(sc run --export-env)"`. No
+    /// traffic through Sprott. `sprott run -- <cmd…>` execs the child with the
+    /// proxy + CA env bundle merged in; `sprott run --export-env` prints the same
+    /// bundle as shell `export` lines for `eval "$(sprott run --export-env)"`. No
     /// plaintext secret ever enters the child's env — the agent writes the
     /// phantom (`__sc__<conn>__`) itself; the proxy substitutes at egress.
     Run(RunArgs),
     /// Manage the connections in the active vault (add / ls / rm). A connection
     /// is a secret (or several) bound to an egress host anchor; the agent reaches
     /// it via the phantom `__sc__<id>__`. The CLI twin of the console's
-    /// "Connections". Short: `sc conn`.
+    /// "Connections". Short: `sprott conn`.
     #[command(alias = "conn")]
     Connection(ConnectionArgs),
-    /// Back-compat alias for `sc connection add`. The canonical spelling is
-    /// `sc connection add <id>` (a noun-namespace, matching `sc secret`/`vault`/
-    /// `agent`); kept hidden so existing `sc connect …` calls keep working.
+    /// Back-compat alias for `sprott connection add`. The canonical spelling is
+    /// `sprott connection add <id>` (a noun-namespace, matching `sprott secret`/`vault`/
+    /// `agent`); kept hidden so existing `sprott connect …` calls keep working.
     #[command(hide = true)]
     Connect(ConnectArgs),
-    /// Print the safeclaw binary version.
+    /// Print the Sprott binary version.
     Version,
     /// Health + reachability checks: daemon connectivity, active
     /// profile, API key presence. Read-only; no vault state mutation.
@@ -204,7 +207,7 @@ pub enum Command {
     /// rm), and `validate` to run the same checks offline.
     Service(ServiceArgs),
     /// git credential helper — **invoked by git, not users**. Registered
-    /// per-process by `sc run` (`GIT_CONFIG_KEY_*=credential.helper`,
+    /// per-process by `sprott run` (`GIT_CONFIG_KEY_*=credential.helper`,
     /// `GIT_CONFIG_VALUE_*=!sc git-credential`; no gitconfig writes). On `get` it
     /// finds the connection anchored to git's request host and, when that
     /// connection has exactly one injectable secret, emits `username=x` +
@@ -214,26 +217,26 @@ pub enum Command {
     /// the only thing it ever prints.
     #[command(name = "git-credential", hide = true)]
     GitCredential(GitCredentialArgs),
-    /// Approval ops. `sc op wait <op_id>` blocks until the op resolves; its
-    /// exit code is the outcome (`sc op wait --help`).
+    /// Approval ops. `sprott op wait <op_id>` blocks until the op resolves; its
+    /// exit code is the outcome (`sprott op wait --help`).
     Op(OpArgs),
 }
 
-/// `sc run` — paste the resident proxy + CA env bundle onto a child (or the
+/// `sprott run` — paste the resident proxy + CA env bundle onto a child (or the
 /// current shell) so its HTTPS traffic is brokered and phantoms substitute.
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// Print the env bundle as POSIX `export` lines instead of running a
-    /// command — for `eval "$(sc run --export-env)"` to cover the whole shell.
+    /// command — for `eval "$(sprott run --export-env)"` to cover the whole shell.
     #[arg(long, conflicts_with = "cmd")]
     pub export_env: bool,
     /// The command to run, after `--`. Everything past `--` is the child's
-    /// argv, passed through verbatim (`sc run -- git clone https://…`).
+    /// argv, passed through verbatim (`sprott run -- git clone https://…`).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cmd: Vec<String>,
 }
 
-/// `sc connection add` (alias `sc connect`) — create a connection (secret(s) +
+/// `sprott connection add` (alias `sprott connect`) — create a connection (secret(s) +
 /// host anchor) in one unlock+write cycle.
 #[derive(Debug, Args)]
 pub struct ConnectArgs {
@@ -243,7 +246,7 @@ pub struct ConnectArgs {
     /// be prompted (with the rest of the wizard); required off a terminal.
     #[arg(value_name = "ID")]
     pub name: Option<String>,
-    /// Back this connection with a catalog SERVICE: its id from `sc registry`
+    /// Back this connection with a catalog SERVICE: its id from `sprott registry`
     /// (e.g. `github`), which supplies the hosts + declared secret slots. `--host`
     /// then only PINS an exact FQDN inside one of the service's `*.suffix`
     /// wildcards. Omit for a raw connection (you anchor your own `--host` and
@@ -297,7 +300,7 @@ pub enum ConnectionSubcommand {
     /// secret already in the vault (`--from-secret SLOT=KEY`). An agent may run
     /// this to propose a connection; it takes effect only after the vault
     /// owner approves it with a passkey, on a card that lists every bound key
-    /// and every destination host. On a terminal, `sc connection add` with no
+    /// and every destination host. On a terminal, `sprott connection add` with no
     /// args runs a short wizard (id → optional service → host(s) → secret(s));
     /// off a terminal, pass the `<id>` and the flags.
     Add(ConnectArgs),
@@ -325,11 +328,11 @@ pub enum ConnectionSubcommand {
 #[derive(Debug, Args)]
 pub struct ConnectionLsArgs {}
 
-/// Args for `sc connection add-host` / `rm-host` — one passkey-approved host
+/// Args for `sprott connection add-host` / `rm-host` — one passkey-approved host
 /// edit on an existing connection's anchor.
 #[derive(Debug, Args)]
 pub struct ConnectionHostArgs {
-    /// The connection to edit (see `sc connection ls`). Free text is slugified
+    /// The connection to edit (see `sprott connection ls`). Free text is slugified
     /// the same way `add` mints the id.
     #[arg(value_name = "ID")]
     pub id: String,
@@ -348,7 +351,7 @@ pub struct ConnectionHostArgs {
 
 #[derive(Debug, Args)]
 pub struct ConnectionRmArgs {
-    /// The connection id to remove (see `sc connection ls`). Free text is
+    /// The connection id to remove (see `sprott connection ls`). Free text is
     /// slugified the same way `add` mints it.
     #[arg(value_name = "ID")]
     pub id: String,
@@ -455,7 +458,7 @@ pub enum ServiceSubcommand {
     Add(ServiceAddArgs),
     /// Update definitions from their source. A GitHub source proposes the
     /// repository's default branch head (or `--ref`); a local source is re-read
-    /// only when you pass its path again (`sc service update ./path`). Shows
+    /// only when you pass its path again (`sprott service update ./path`). Shows
     /// what changes, highlighting new hosts and loosened or removed rules,
     /// then asks for the passkey approval (always required).
     Update(ServiceUpdateArgs),
@@ -555,7 +558,7 @@ pub struct PasskeyArgs {
     pub sub: PasskeySubcommand,
 }
 
-/// `sc agent` — manage this account's agent api-keys (agent ≡ api-key).
+/// `sprott agent` — manage this account's agent api-keys (agent ≡ api-key).
 #[derive(Debug, Args)]
 pub struct AgentArgs {
     #[command(subcommand)]
@@ -587,11 +590,11 @@ pub struct AgentAddArgs {
 
 #[derive(Debug, Args)]
 pub struct AgentRmArgs {
-    /// Agent name (see `sc agent ls`).
+    /// Agent name (see `sprott agent ls`).
     pub name: String,
 }
 
-/// `sc setup` is an agent-driven, re-runnable state machine. `name` stays
+/// `sprott setup` is an agent-driven, re-runnable state machine. `name` stays
 /// optional at clap's boundary so the command can return its structured usage
 /// error instead of clap writing a different shape to stderr.
 #[derive(Debug, Args)]
@@ -649,7 +652,7 @@ pub struct SkillRemoveArgs {
     pub force: bool,
 }
 
-/// `sc device` — the device axis of the account plane.
+/// `sprott device` — the device axis of the account plane.
 #[derive(Debug, Args)]
 pub struct DeviceArgs {
     #[command(subcommand)]
@@ -658,9 +661,9 @@ pub struct DeviceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DeviceSubcommand {
-    /// Pair this host to your vault (same as top-level `sc login`).
+    /// Pair this host to your vault (same as top-level `sprott login`).
     Login(LoginArgs),
-    /// Unpair this host (same as top-level `sc logout`).
+    /// Unpair this host (same as top-level `sprott logout`).
     Logout(LogoutArgs),
 }
 
@@ -698,17 +701,17 @@ pub struct VaultLsArgs {}
 #[derive(Debug, Subcommand)]
 pub enum VaultSubcommand {
     /// Show current vault: URL, state (locked/unlocked/not-enrolled),
-    /// passkey count, secret count. Top-level alias: `sc status`.
+    /// passkey count, secret count. Top-level alias: `sprott status`.
     Status(StatusArgs),
     /// List vaults this CLI has used (from local config) + mark the
     /// device default with `*`. `--json` for scripts/agents.
     Ls(VaultLsArgs),
     /// Switch the active vault. Pass an id, a unique id prefix, or the exact name
-    /// (quote if it has spaces); also an `sc vault ls` index, a vault URL, --local
+    /// (quote if it has spaces); also a `sprott vault ls` index, a vault URL, --local
     /// for the localhost default, or nothing for an interactive prompt.
     Use(VaultUseArgs),
     /// Remove a vault from the local known list (does NOT touch the
-    /// daemon, for that use `sc vault rm`). Pass URL or index.
+    /// daemon, for that use `sprott vault rm`). Pass URL or index.
     Forget(VaultForgetArgs),
     /// Create a new vault: prints the Sprott console page where vaults are
     /// created. The new vault syncs to this machine on its own.
@@ -716,12 +719,12 @@ pub enum VaultSubcommand {
     /// Irreversibly delete a vault's daemon-side state. Passkey-gated
     /// via the standard `/op/{op_id}` browser-callback ceremony.
     Rm(VaultDeleteArgs),
-    /// Back-compat alias for top-level `sc unlock`. Lock/unlock are vault-level
-    /// lifecycle ops (they sit next to `sc up`), so the canonical spelling is
-    /// top-level; this is kept hidden so existing `sc vault unlock` calls work.
+    /// Back-compat alias for top-level `sprott unlock`. Lock/unlock are vault-level
+    /// lifecycle ops (they sit next to `sprott up`), so the canonical spelling is
+    /// top-level; this is kept hidden so existing `sprott vault unlock` calls work.
     #[command(hide = true)]
     Unlock(UnlockArgs),
-    /// Back-compat alias for top-level `sc lock`. See `Unlock` above.
+    /// Back-compat alias for top-level `sprott lock`. See `Unlock` above.
     #[command(hide = true)]
     Lock(UnlockArgs),
 }
@@ -729,7 +732,7 @@ pub enum VaultSubcommand {
 #[derive(Debug, Args)]
 pub struct VaultUseArgs {
     /// Either a vault URL (`<daemon>/v/<vault_id>`) or a numeric index
-    /// from `sc vault ls`. If omitted and `--local` is also omitted, an
+    /// from `sprott vault ls`. If omitted and `--local` is also omitted, an
     /// interactive prompt lists known vaults.
     pub url_or_idx: Option<String>,
     /// Shortcut for the localhost control-plane vault (`/v/default`).
@@ -740,7 +743,7 @@ pub struct VaultUseArgs {
 #[derive(Debug, Args)]
 pub struct VaultForgetArgs {
     /// A vault URL (`<daemon>/v/<vault_id>`) or numeric index from
-    /// `sc vault ls`. If omitted, an interactive prompt lists known vaults.
+    /// `sprott vault ls`. If omitted, an interactive prompt lists known vaults.
     pub url_or_idx: Option<String>,
 }
 
@@ -792,8 +795,8 @@ pub struct ProxyArgs {
 pub enum ProxySubcommand {
     /// Set the device's upstream EGRESS proxy — the HTTP proxy the daemon uses to
     /// reach the internet (OAuth exchanges, the resident proxy's forward hop,
-    /// `sc upgrade`). Persists it and bounces the daemon so it takes effect (one
-    /// passkey tap to re-unlock). e.g. `sc proxy set http://127.0.0.1:7778`.
+    /// `sprott upgrade`). Persists it and bounces the daemon so it takes effect (one
+    /// passkey tap to re-unlock). e.g. `sprott proxy set http://127.0.0.1:7778`.
     Set { url: String },
     /// Print the configured egress proxy (and any shell `HTTPS_PROXY` that would
     /// override it). Exit nonzero when nothing is configured.
@@ -810,7 +813,7 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigSubcommand {
-    /// Set a persistent CLI preference, e.g. `sc config set cb-port 23394`.
+    /// Set a persistent CLI preference, e.g. `sprott config set cb-port 23394`.
     /// Known keys: cb-port.
     Set { key: String, value: String },
     /// Print the value of one preference. Exit code is nonzero when unset.
@@ -846,7 +849,7 @@ pub struct ServeArgs {
     #[arg(long, env = "SAFECLAW_STATE_DIR")]
     pub state_dir: Option<PathBuf>,
 
-    /// The control plane port (`CONTROL_PORT`). The `sc` CLI, op-approval
+    /// The control plane port (`CONTROL_PORT`). The `sprott` CLI, op-approval
     /// polling, ceremonies, `/events`, and any reverse proxy talk to the
     /// daemon here; the agent's own traffic uses only the proxy port
     /// (`$SAFECLAW_BROKER_URL`).
@@ -855,7 +858,7 @@ pub struct ServeArgs {
 
     /// The credential-proxy plane port (`PROXY_PORT`). The resident local HTTPS
     /// MITM the agent's tool traffic is routed through; addressed only by the
-    /// env bundle `sc run` pastes, never by number in agent-facing config.
+    /// env bundle `sprott run` pastes, never by number in agent-facing config.
     #[arg(long, env = "SAFECLAW_PROXY_PORT", default_value_t = PROXY_PORT)]
     pub proxy_port: u16,
 
@@ -909,7 +912,7 @@ pub struct ServeArgs {
     pub body_cap: u64,
 }
 
-/// `sc status` takes no flags — the daemon (control root) comes from
+/// `sprott status` takes no flags — the daemon (control root) comes from
 /// `~/.safeclaw/config.toml`; the active vault is `--vault` else
 /// `$SAFECLAW_VAULT_ID` (env pin) else the config default (§5).
 #[derive(Debug, Args)]
@@ -933,17 +936,17 @@ pub struct UnlockArgs {
     pub timeout: u64,
 }
 
-/// Args for `sc upgrade`.
+/// Args for `sprott upgrade`.
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
     /// Re-download and reinstall even when the running binary already matches
-    /// the latest release (otherwise `sc upgrade` is a no-op when current).
+    /// the latest release (otherwise `sprott upgrade` is a no-op when current).
     #[arg(long)]
     pub force: bool,
     /// Force the PRE-RELEASE channel: install the newest release even if it's a
     /// `vX.Y.Z-rc.N` pre-release. Normally the channel is DERIVED from the cloud
     /// this host is paired to (a `dev.*` login tracks pre-releases, prod tracks
-    /// stable), so a dogfood box needs no flag; plain `sc upgrade` already
+    /// stable), so a dogfood box needs no flag; plain `sprott upgrade` already
     /// tracks rc. This override is for the rare case of pulling an rc while
     /// paired to prod. Mutually exclusive with `--stable`.
     #[arg(long, conflicts_with = "stable")]
@@ -956,7 +959,7 @@ pub struct UpgradeArgs {
     pub stable: bool,
 }
 
-/// Args for `sc login`.
+/// Args for `sprott login`.
 #[derive(Debug, Args)]
 pub struct LoginArgs {
     /// Friendly label shown for this host in the dashboard's device list.
@@ -971,7 +974,7 @@ pub struct LoginArgs {
     #[arg(long)]
     pub profile: Option<String>,
     /// Test-only: allow a plaintext `http://` custodian URL. Without this,
-    /// `sc login` refuses non-HTTPS URLs (a malicious skill prompt could
+    /// `sprott login` refuses non-HTTPS URLs (a malicious skill prompt could
     /// otherwise smuggle in an attacker's device-key by suggesting an
     /// `http://` custodian).
     /// `http://localhost:*` and `http://127.0.0.1:*` are exempt, that's the
@@ -980,7 +983,7 @@ pub struct LoginArgs {
     pub insecure: bool,
 }
 
-/// Args for `sc logout`.
+/// Args for `sprott logout`.
 #[derive(Debug, Args)]
 pub struct LogoutArgs {
     /// Keep this host's device-key registered on the server (don't revoke it
@@ -1002,7 +1005,7 @@ pub struct CommonArgs {}
 #[derive(Debug, Args)]
 pub struct GetArgs {
     /// Secret key to reveal, from any store (native or external), matched
-    /// case-SENSITIVELY (`sc get OPENAI_API_KEY`; external keys verbatim).
+    /// case-SENSITIVELY (`sprott get OPENAI_API_KEY`; external keys verbatim).
     pub key: String,
 
     #[arg(long)]
@@ -1018,9 +1021,9 @@ pub struct GetArgs {
 
 #[derive(Debug, Args)]
 pub struct SetArgs {
-    /// Native-secrets key name to write (`safeclaw write OPENAI_API_KEY sk-...`).
+    /// Native-secrets key name to write (`sprott set OPENAI_API_KEY sk-...`).
     pub key: String,
-    /// The secret value. When omitted on a TTY, `sc set` prompts for it hidden
+    /// The secret value. When omitted on a TTY, `sprott set` prompts for it hidden
     /// (keeps it out of shell history / `ps`). Required as an argument when
     /// stdin isn't a terminal.
     pub value: Option<String>,
@@ -1032,7 +1035,7 @@ pub struct SetArgs {
     #[arg(long)]
     pub host: Vec<String>,
     /// Store the secret WITHOUT a host anchor — human-only, invisible to the
-    /// agent surface (`sc secret get` reveals it via the passkey ceremony).
+    /// agent surface (`sprott secret get` reveals it via the passkey ceremony).
     #[arg(long, conflicts_with = "host")]
     pub no_broker: bool,
     #[arg(long)]
@@ -1127,7 +1130,7 @@ impl Config {
 /// `$SAFECLAW_STATE_DIR` else `~/.safeclaw/state` (single `~/.safeclaw` tree so
 /// the whole footprint is one dir to chmod/back up; cwd-relative `./state` only
 /// if the home dir is somehow unknown). Short-lived CLI verbs that need the
-/// resident CA path (`sc run`, `sc status`) share this so they never drift from
+/// resident CA path (`sprott run`, `sprott status`) share this so they never drift from
 /// where the daemon actually wrote `ca.pem`.
 pub fn default_state_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("SAFECLAW_STATE_DIR") {

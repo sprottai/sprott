@@ -246,10 +246,10 @@ fn ledger_text(standing: Option<&str>, checked_at: Option<u64>, now: u64) -> Str
         .map(|at| format!(" (checked {} ago)", age_text(now.saturating_sub(at))));
     match standing {
         Some("admitted") => format!("admitted{}", checked.unwrap_or_default()),
-        Some("not_admitted") => "not admitted to your account: run `sc login`".to_string(),
+        Some("not_admitted") => "not admitted to your account: run `sprott login`".to_string(),
         Some("account_missing") => crate::error::DEVICE_ACCOUNT_MISSING_MSG.to_string(),
         Some("stale") => "locked: Sprott could not reach your account for 7 days".to_string(),
-        Some("revoked") => "removed from your account: run `sc login` to pair it again".to_string(),
+        Some("revoked") => "removed from your account: run `sprott login` to pair it again".to_string(),
         _ => "unknown (daemon did not report its account standing)".to_string(),
     }
 }
@@ -320,16 +320,16 @@ pub async fn run(json: bool) -> Result<(), String> {
             println!("  vaults:  {}", n);
         }
     } else {
-        println!("  state:   not running. Bring it up with `sc up`");
+        println!("  state:   not running. Bring it up with `sprott up`");
     }
     println!("  control: {}", control);
-    println!("  broker:  {} (agent face; wired by `sc run`)", broker);
+    println!("  broker:  {} (agent face; wired by `sprott run`)", broker);
     // A shell carrying a stale `$SAFECLAW_BROKER_URL` snapshot (old `sc agent
     // add`, daemon since moved) is the port-mismatch case status exists to make
     // legible: the resolution above self-heals, so show the divergence.
     if let Some(env_url) = crate::cli::active::env_broker_url() {
         if env_url.trim_end_matches('/') != broker {
-            println!("  note:    this shell's $SAFECLAW_BROKER_URL ({}) is stale; `sc run` uses the broker face above", env_url);
+            println!("  note:    this shell's $SAFECLAW_BROKER_URL ({}) is stale; `sprott run` uses the broker face above", env_url);
         }
     }
     println!();
@@ -346,7 +346,7 @@ pub async fn run(json: bool) -> Result<(), String> {
             println!("  cloud: {} ({})", host, env_label(host));
             println!("  device: {}", ledger_line(&d));
         }
-        None => println!("  state: not logged in. Run `sc login`"),
+        None => println!("  state: not logged in. Run `sprott login`"),
     }
     println!();
 
@@ -364,13 +364,13 @@ pub async fn run(json: bool) -> Result<(), String> {
                     "  note:  vault {} was deleted on the web; this device's pairing to it is gone",
                     dead
                 );
-                println!("  hint:  run `sc vault ls` to pick another, or `sc login` to pair again");
+                println!("  hint:  run `sprott vault ls` to pick another, or `sprott login` to pair again");
             } else if d.vault_count == Some(0) {
-                println!("  hint:  no vaults yet. Seal one on the web, then `sc login`");
+                println!("  hint:  no vaults yet. Seal one on the web, then `sprott login`");
             } else if crate::cli::active::known_vaults().is_empty() {
-                println!("  hint:  pick one with `sc vault use`, or `sc vault create`");
+                println!("  hint:  pick one with `sprott vault use`, or `sprott vault create`");
             } else {
-                println!("  hint:  pick one with `sc vault use` (`sc vault ls` to list)");
+                println!("  hint:  pick one with `sprott vault use` (`sprott vault ls` to list)");
             }
         }
     }
@@ -493,16 +493,16 @@ pub fn print_status(s: &VaultStatus) {
     match &s.state {
         VaultState::Unreachable => {
             if s.url.contains("//localhost") || s.url.contains("//127.0.0.1") {
-                println!("  state:    unreachable. Bring the daemon up with `sc up`");
+                println!("  state:    unreachable. Bring the daemon up with `sprott up`");
             } else {
                 println!("  state:    unreachable (is the daemon running?)");
             }
         }
         VaultState::NotFound => {
-            println!("  state:    not found (run `sc vault create`, or pick a different URL with `sc vault use`)");
+            println!("  state:    not found (run `sprott vault create`, or pick a different URL with `sprott vault use`)");
         }
         VaultState::Locked { passkeys } => {
-            println!("  state:    locked (run `sc unlock`)");
+            println!("  state:    locked (run `sprott unlock`)");
             println!("  passkeys: {}", passkeys);
         }
         VaultState::Unlocked { passkeys, secrets } => {
@@ -551,7 +551,7 @@ mod env_label_tests {
             ledger_text(Some("stale"), None, 0),
             "locked: Sprott could not reach your account for 7 days"
         );
-        assert!(ledger_text(Some("not_admitted"), None, 0).contains("`sc login`"));
+        assert!(ledger_text(Some("not_admitted"), None, 0).contains("`sprott login`"));
         assert_eq!(
             ledger_text(Some("account_missing"), Some(10), 20),
             crate::error::DEVICE_ACCOUNT_MISSING_MSG

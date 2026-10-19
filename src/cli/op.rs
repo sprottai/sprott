@@ -71,7 +71,7 @@ fn verdict(status: &str) -> Verdict {
 
 fn not_answering(root: &str, op_id: &str) -> String {
     format!(
-        "daemon not answering at {}. The approval survives; once it is back, re-run: sc op wait {}",
+        "daemon not answering at {}. The approval survives; once it is back, re-run: sprott op wait {}",
         root, op_id
     )
 }
@@ -196,7 +196,7 @@ pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "Timed out after {}s. If it is still pending, re-attach with: sc op wait {}",
+                "Timed out after {}s. If it is still pending, re-attach with: sprott op wait {}",
                 args.timeout, args.op_id
             );
             std::process::exit(4);

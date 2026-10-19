@@ -412,7 +412,7 @@ impl BrokerHandler {
             None => {
                 return err_response(
                     ScCode::NoVault,
-                    "no vault bound. Route credential traffic with `sc run`",
+                    "no vault bound. Route credential traffic with `sprott run`",
                 )
                 .into()
             }
@@ -427,7 +427,7 @@ impl BrokerHandler {
         if self.state.is_vault_upgrade_required(&vault_id) {
             return err_response(
                 ScCode::UpgradeRequired,
-                "Sprott needs an update to use this vault. Run `sc upgrade`",
+                "Sprott needs an update to use this vault. Run `sprott upgrade`",
             )
             .into();
         }
@@ -793,7 +793,7 @@ impl BrokerHandler {
                         ScCode::RefreshForbidden,
                         "a refresh token never leaves the vault. This connection injects a \
                      minted access token; use its default phantom. To reveal the stored \
-                     secret, run `sc secret get` (needs a passkey)",
+                     secret, run `sprott secret get` (needs a passkey)",
                     )
                     .into();
                 }
@@ -863,7 +863,7 @@ impl BrokerHandler {
                 ScCode::PhantomUnresolved,
                 "a Sprott phantom in this request could not be resolved, so the request was \
                  blocked before the placeholder could reach upstream. Check the connection/role \
-                 name (`sc registry`), or run `sc unlock` if the vault is locked",
+                 name (`sprott registry`), or run `sprott unlock` if the vault is locked",
             )
             .into();
         }
@@ -1621,10 +1621,10 @@ fn egress_error_parts(is_connect: bool, cause: &str, has_proxy: bool) -> (ScCode
     }
     let hint = if has_proxy {
         "Egress goes through your configured proxy. Make sure it's up and can reach \
-         that host (`sc proxy show`), or change it with `sc proxy set <url>` / `sc proxy clear`."
+         that host (`sprott proxy show`), or change it with `sprott proxy set <url>` / `sprott proxy clear`."
     } else {
         "No egress proxy is set. If this machine reaches the internet only through a \
-         proxy, run `sc proxy set <url>`."
+         proxy, run `sprott proxy set <url>`."
     };
     (
         ScCode::EgressUnreachable,
@@ -1889,7 +1889,7 @@ mod tests {
         assert_eq!(code, ScCode::EgressUnreachable);
         assert!(msg.contains(cause));
         assert!(msg.contains("not a credential problem"));
-        assert!(msg.contains("sc proxy set"));
+        assert!(msg.contains("sprott proxy set"));
         assert!(msg.contains("No egress proxy is set"));
 
         // Connect failure WITH a proxy configured: point at the proxy, never
@@ -1897,14 +1897,14 @@ mod tests {
         let (code, msg) = egress_error_parts(true, cause, true);
         assert_eq!(code, ScCode::EgressUnreachable);
         assert!(msg.contains("configured proxy"));
-        assert!(msg.contains("sc proxy show"));
-        assert!(msg.contains("sc proxy clear"));
+        assert!(msg.contains("sprott proxy show"));
+        assert!(msg.contains("sprott proxy clear"));
 
         // NOT a connect failure (e.g. upstream sent a bad response): no proxy
         // hint that would misdirect, distinct token.
         let (code, msg) = egress_error_parts(false, "invalid HTTP response", false);
         assert_eq!(code, ScCode::UpstreamError);
-        assert!(!msg.contains("sc proxy set"));
+        assert!(!msg.contains("sprott proxy set"));
         assert!(msg.contains("not a credential problem"));
     }
 

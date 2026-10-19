@@ -1,4 +1,4 @@
-//! `sc upgrade` — built-in self-update.
+//! `sprott upgrade` — built-in self-update.
 //!
 //! Mirrors `install.sh`: downloads the prebuilt binary for this platform from
 //! the project's LATEST GitHub Release, verifies its sha256 against the
@@ -28,12 +28,17 @@ use std::time::Duration;
 use crate::cli::active::frontend_origin;
 use crate::config::UpgradeArgs;
 
-const REPO: &str = "getsafeclaw/safeclaw";
+use crate::GITHUB_REPO as REPO;
+
 /// Stable channel: GitHub's `latest` pointer, which by definition skips
 /// pre-releases and drafts — the asset base every ordinary `sc upgrade` uses.
-const LATEST_BASE: &str = "https://github.com/getsafeclaw/safeclaw/releases/latest/download";
+fn latest_base() -> String {
+    format!("https://github.com/{}/releases/latest/download", REPO)
+}
 
 /// Map the build target to the release asset name (matches install.sh + CI).
+/// The names keep the `safeclaw-` prefix: every installed `sc upgrade`, back to
+/// the first release, downloads exactly these.
 fn asset_name() -> Result<&'static str, String> {
     Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "safeclaw-linux-x86_64",
@@ -172,7 +177,7 @@ fn newest_tag(body: &serde_json::Value) -> Option<String> {
 /// pre-releases ([`newest_tag`]) and its `releases/download/<tag>` assets.
 async fn resolve_base(client: &reqwest::Client, pre: bool) -> Result<(String, String), String> {
     if !pre {
-        return Ok((LATEST_BASE.to_string(), "latest stable".to_string()));
+        return Ok((latest_base(), "latest stable".to_string()));
     }
     // GitHub requires a User-Agent; unauthenticated, the API includes
     // pre-releases but not drafts (CI never drafts).
@@ -246,6 +251,25 @@ mod tests {
         assert!(v("v1.1.0-rc.1") < v("v1.1.0-rc.1.1"));
         assert!(Version::parse("v1.1").is_none());
         assert_eq!(newest_tag(&serde_json::json!([])), None);
+    }
+
+    /// Every installed `sc upgrade` looks for these exact asset names, so
+    /// install.sh and the release workflow must keep publishing them.
+    #[test]
+    fn asset_names_match_install_sh_and_the_release_workflow() {
+        let install = include_str!("../../install.sh");
+        let workflow = include_str!("../../.github/workflows/release.yml");
+        for asset in [
+            "safeclaw-linux-x86_64",
+            "safeclaw-linux-aarch64",
+            "safeclaw-macos-x86_64",
+            "safeclaw-macos-aarch64",
+        ] {
+            assert!(install.contains(&format!("ASSET=\"{asset}\"")), "{asset}");
+            assert!(workflow.contains(&format!("artifact: {asset}")), "{asset}");
+        }
+        assert!(workflow.contains("sha256sum safeclaw-* > SHA256SUMS"));
+        assert!(asset_name().unwrap().starts_with("safeclaw-"));
     }
 
     #[test]
@@ -350,12 +374,16 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         ));
     }
 
-    // 4. No-op when the verified download equals the running binary.
+    // 4. No-op when the verified download equals the running binary. Follow
+    //    symlinks to the real file: `sc` and `safeclaw` may be links to
+    //    `sprott`, and macOS reports the invoked (link) path, so replacing that
+    //    path would turn one alias into a separate copy and leave the rest old.
     let current = std::env::current_exe().map_err(|e| format!("locate current binary: {}", e))?;
+    let current = std::fs::canonicalize(&current).unwrap_or(current);
     let current_hash = std::fs::read(&current).ok().map(|b| sha256_hex(&b));
     if current_hash.as_deref() == Some(actual.as_str()) && !args.force {
         eprintln!(
-            "Already up to date — safeclaw {} ({}).",
+            "Already up to date: sprott {} ({}).",
             crate::build_version(),
             &actual[..12]
         );
@@ -407,9 +435,11 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         .filter(|s| !s.is_empty());
     match &new_version {
         Some(v) => eprintln!(
-            "Upgraded safeclaw {} → {} ({}).",
+            "Upgraded sprott {} → {} ({}).",
             crate::build_version(),
-            v.strip_prefix("safeclaw ").unwrap_or(v),
+            v.strip_prefix("sprott ")
+                .or_else(|| v.strip_prefix("safeclaw "))
+                .unwrap_or(v),
             &actual[..12]
         ),
         None => eprintln!("Upgraded {} ({}).", current.display(), &actual[..12]),
@@ -452,15 +482,15 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
             {
                 use std::os::unix::process::CommandExt;
                 let err = std::process::Command::new(&current).arg("restart").exec();
-                eprintln!("  couldn't hand off to the new binary ({err}); run `sc up`.");
+                eprintln!("  couldn't hand off to the new binary ({err}); run `sprott up`.");
             }
             #[cfg(not(unix))]
-            eprintln!("  Restart it with `sc up`.");
+            eprintln!("  Restart it with `sprott up`.");
         } else {
-            eprintln!("  couldn't probe the new binary; restart it with `sc up`.");
+            eprintln!("  couldn't probe the new binary; restart it with `sprott up`.");
         }
     } else {
-        eprintln!("  Start it with `sc up`.");
+        eprintln!("  Start it with `sprott up`.");
     }
     Ok(())
 }

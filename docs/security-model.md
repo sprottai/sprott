@@ -1,13 +1,13 @@
 # Security model: where your keys actually live
 
 This page answers the security questions about Sprott's credential broker. The cryptographic detail behind each one is in
-[PROTOCOL.md](https://github.com/getsafeclaw/safeclaw/blob/main/design/protocol.md).
+[PROTOCOL.md](https://github.com/sprottai/sprott/blob/main/design/protocol.md).
 
 ## Where is the plaintext?
 
 In exactly one place: the daemon's memory on your machine, while the vault is
 unlocked. On disk (yours and ours) the vault exists only as a blob sealed
-under a key derived from your passkey. `sc lock` wipes the decrypted copy from
+under a key derived from your passkey. `sprott lock` wipes the decrypted copy from
 memory; so does stopping the daemon.
 
 ## What does the cloud store?
@@ -36,7 +36,7 @@ key it never held is not on the table.
 
 ## Is Sprott intercepting all my traffic?
 
-No. Only commands you deliberately prefix with `sc run --` are brokered.
+No. Only commands you deliberately prefix with `sprott run --` are brokered.
 Everything else on your machine goes straight out, untouched.
 
 ## What does a passkey tap actually authorize?

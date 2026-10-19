@@ -29,19 +29,19 @@ Services ship as declarative definitions (`services/*/service.toml`): hosts,
 secret shapes, OAuth wiring, and human-labeled policy rules. GitHub, OpenAI,
 Anthropic, Gemini, Gmail, Google Drive, GCP, Supabase, Railway, GitLab, npm,
 crates.io, Telegram and more are built in; agents discover what's connected
-with `sc connection ls`.
-Adding a service is a TOML file, not a plugin: `sc service add ./folder` or
-`sc service add github:owner/repo` ([services.md](reference/services.md)).
+with `sprott connection ls`.
+Adding a service is a TOML file, not a plugin: `sprott service add ./folder` or
+`sprott service add github:owner/repo` ([services.md](reference/services.md)).
 
 ## Ways to connect
 
 - **OAuth services**: connect from the console; Sprott runs the flow and
   manages token refresh. The agent's phantom stays stable across refreshes.
 - **Paste a key in the console**: encrypted in your browser before upload.
-- **At the terminal**: `sc set HF_TOKEN --host huggingface.co` prompts for
+- **At the terminal**: `sprott set HF_TOKEN --host huggingface.co` prompts for
   the value, takes one passkey approval, and the value never leaves your
   machine.
-- **`sc connection add`**: fills each secret slot from a new value
+- **`sprott connection add`**: fills each secret slot from a new value
   (`--from-literal SLOT=VALUE`) or from a secret already in the vault
   (`--from-secret SLOT=KEY`, no value shown anywhere). With `--service`, a
   slot is one of the service's secret roles; for a custom connection it is
@@ -50,9 +50,9 @@ Adding a service is a TOML file, not a plugin: `sc service add ./folder` or
   Cloudflare's account ID, are optional.
 
   ```
-  sc connection add codex_work --service openai_codex \
+  sprott connection add codex_work --service openai_codex \
       --from-secret OPENAI_CODEX_REFRESH_TOKEN=WORK_REFRESH_TOKEN
-  sc connection add myapi --host api.example.com --from-literal API_TOKEN=…
+  sprott connection add myapi --host api.example.com --from-literal API_TOKEN=…
   ```
 
   Your agent may run it to propose a connection. Nothing is written until you
@@ -60,7 +60,7 @@ Adding a service is a TOML file, not a plugin: `sc service add ./folder` or
   binds (new or existing), every host it sends them to, and any other
   connection already using the same key.
 
-  `sc connection rm <id>` deletes the secrets that connection wrote, unless
+  `sprott connection rm <id>` deletes the secrets that connection wrote, unless
   another connection uses them. A secret it was bound to with
   `--from-secret` stays in the vault, and so does every secret of a
   connection added before Sprott recorded which secrets a connection
@@ -75,4 +75,4 @@ Adding a service is a TOML file, not a plugin: `sc service add ./folder` or
 
 Accounts differ by phantom *value*, not env-var name: `__sc__github__` and
 `__sc__github_work__` are two connections behind the same `GITHUB_TOKEN`
-variable. See [`sc run` and phantoms](sc-run.md).
+variable. See [`sprott run` and phantoms](sc-run.md).

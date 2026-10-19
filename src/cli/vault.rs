@@ -67,7 +67,7 @@ async fn run_ls(json: bool) -> Result<(), String> {
         return Ok(());
     }
     if known.is_empty() {
-        println!("(no vaults yet; `safeclaw vault create` or `safeclaw vault use`)");
+        println!("(no vaults yet; `sprott vault create` or `sprott vault use`)");
         return Ok(());
     }
     for (i, kv) in known.iter().enumerate() {
@@ -127,18 +127,18 @@ async fn run_use(args: VaultUseArgs) -> Result<(), String> {
     match s.state {
         VaultState::NotFound => {
             return Err(format!(
-                "vault not found on custodian: {}\n  run `safeclaw vault create` to make a new one, or pick a different URL",
+                "vault not found on custodian: {}\n  run `sprott vault create` to make a new one, or pick a different URL",
                 join_vault_url(&custodian, &vault)
             ));
         }
         VaultState::Unreachable => {
             if is_localhost(&custodian) {
                 eprintln!(
-                    "warning: no local daemon at {}. Start one with `safeclaw c start`",
+                    "warning: no local daemon at {}. Start one with `sprott up`",
                     custodian
                 );
                 eprintln!(
-                    "  (saving anyway; `safeclaw status` will recheck once the daemon is up)"
+                    "  (saving anyway; `sprott status` will recheck once the daemon is up)"
                 );
             } else {
                 eprintln!("warning: couldn't reach custodian; saving anyway");
@@ -154,7 +154,7 @@ async fn run_use(args: VaultUseArgs) -> Result<(), String> {
     if let Ok(pin) = std::env::var("SAFECLAW_VAULT_ID") {
         if !pin.is_empty() && pin != vault {
             eprintln!(
-                "note: this shell is pinned to {} via $SAFECLAW_VAULT_ID, so `sc` here still targets it;",
+                "note: this shell is pinned to {} via $SAFECLAW_VAULT_ID, so `sprott` here still targets it;",
                 pin
             );
             eprintln!(
@@ -266,7 +266,7 @@ async fn run_create(_args: VaultCreateArgs) -> Result<(), String> {
 /// pairing. Vault creation and passkey enrollment happen there.
 pub(crate) fn console_page(path: &str) -> Result<String, String> {
     let origin = crate::cli::active::console_origin()
-        .ok_or("this machine isn't paired to Sprott yet: run `sc login` first")?;
+        .ok_or("this machine isn't paired to Sprott yet: run `sprott login` first")?;
     Ok(format!("{}{}", origin.trim_end_matches('/'), path))
 }
 
@@ -313,7 +313,7 @@ async fn run_rm(args: VaultDeleteArgs) -> Result<(), String> {
         &opts,
     )
     .await?;
-    eprintln!("safeclaw vault rm: ok (vault {} wiped)", vault);
+    eprintln!("sprott vault rm: ok (vault {} wiped)", vault);
     Ok(())
 }
 

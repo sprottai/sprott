@@ -1,5 +1,5 @@
 setup = """
-Run the publish under `sc run -- cargo publish`.
+Run the publish under `sprott run -- cargo publish`.
 Publishing is irreversible (crates.io only yanks) — expect a passkey prompt; the
 approve link surfaces in cargo's error output. Tap it, then re-run the command.
 """
