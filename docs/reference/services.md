@@ -145,8 +145,8 @@ all of them is what makes a connection "connected".
   (the proxy answers such a phantom with an explicit `403 refresh_forbidden`).
   The registry's per-connection `phantoms` list is the computed projection of
   this rule: agents copy from it, never derive.
-- The phantom `__sc__<conn>__` resolves to the sole injectable; if a connection
-  has several, agents use `__sc__<conn>__<key>__` (key lowercased).
+- The phantom `__sprott__<conn>__` resolves to the sole injectable; if a connection
+  has several, agents use `__sprott__<conn>__<key>__` (key lowercased).
 - Insertion needs no declaration: the value replaces the phantom wherever the
   tool puts it: any header, query param, URL path, body, or inside a decoded
   `Authorization: Basic`. Never in the URL authority.
@@ -201,7 +201,7 @@ client_id         = "499410884315-…apps.googleusercontent.com"  # PUBLIC clien
 # [auth] oauth2 section is inline-complete.
 # id_token = "GMAIL_ID_TOKEN"       # only when the provider returns a stored OIDC id token
 # exposes = ["account_id"]          # optional extra derived values →
-                                    #   __sc__<conn>__account_id__
+                                    #   __sprott__<conn>__account_id__
 ```
 
 Token-endpoint knobs, all optional:
@@ -245,10 +245,10 @@ auth mechanism, never by tool.
 The proxy decodes `Authorization: Basic` and substitutes phantoms inside it.
 Put the phantom where the pair goes:
 
-- git: `https://x:__sc__github__@github.com/owner/repo` (URL userinfo). If the
+- git: `https://x:__sprott__github__@github.com/owner/repo` (URL userinfo). If the
   service validates the username (e.g. Bitbucket, case-sensitive), type the
   real username there.
-- docker: `docker login -u <user> -p __sc__dockerhub__`.
+- docker: `docker login -u <user> -p __sprott__dockerhub__`.
 - `sprott git-credential` (optional helper): emits `("x", <phantom of the host
   connection's sole injectable secret>)`; declines if none or several.
 

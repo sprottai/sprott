@@ -19,7 +19,7 @@ The key never needed to be in the agent at all.
 ## The three moves
 
 **1. The phantom.** Each connected service gives the agent a placeholder like
-`__sc__github__` instead of a value. The agent puts it exactly where the
+`__sprott__github__` instead of a value. The agent puts it exactly where the
 credential would go: an env var, a request header, a config file, a URL path.
 The phantom is worthless everywhere except one place.
 

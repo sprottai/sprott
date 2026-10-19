@@ -48,7 +48,7 @@ creates a passkey, and approves the machine. The passkey also creates the
 first vault. They then approve the agent and choose which vaults it may use.
 Under the hood, setup runs `sprott login` if the machine is not paired and `sprott agent
 add` if the agent is not registered. It writes
-`~/.safeclaw/agents/<name>/agent.env` and installs the skill. It is safe to run
+`~/.sprott/agents/<name>/agent.env` and installs the skill. It is safe to run
 again.
 
 At a terminal, a person can still use `sprott login` to pair a machine or `sprott agent
@@ -70,7 +70,7 @@ sprott set HF_TOKEN --host huggingface.co
 ```
 
 Prompts for the value, asks for one passkey approval, and mints the phantom
-`__sc__hf_token__` anchored to `huggingface.co`. Entered this way the value
+`__sprott__hf_token__` anchored to `huggingface.co`. Entered this way the value
 never leaves your machine.
 
 ## 4. Unlock the vault
@@ -85,8 +85,8 @@ Put the phantom where the credential belongs and route the command through
 `sprott run --`:
 
 ```bash
-HF_TOKEN=__sc__hf_token__ sprott run -- huggingface-cli whoami
-GITHUB_TOKEN=__sc__github__ sprott run -- gh pr list
+HF_TOKEN=__sprott__hf_token__ sprott run -- huggingface-cli whoami
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
 ```
 
 The proxy swaps the phantom for the real value on the way out, only toward

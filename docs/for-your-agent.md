@@ -44,7 +44,7 @@ command. Run that wait command and continue after approval.
 The browser sequence is: the person signs in or creates an account, creates a
 passkey, and approves the machine; approves the agent and chooses which vaults
 it may use. Under the hood, setup runs `sprott login` and `sprott agent add` when needed,
-writes `~/.safeclaw/agents/<name>/agent.env`, and installs the skill. It is safe
+writes `~/.sprott/agents/<name>/agent.env`, and installs the skill. It is safe
 to re-run.
 
 Never ask the person to paste a key or a code into chat. Relay the sentence
@@ -52,16 +52,16 @@ that setup prints and run the next command it prints.
 
 ## Per-agent identity
 
-Each agent has its own identity under `~/.safeclaw/agents/<name>/`. If
-`SAFECLAW_AGENT_IDENTITY` is unset, the agent loads its own env file before
-running `sprott`: `set -a; . ~/.safeclaw/agents/<name>/agent.env; set +a`. With one
+Each agent has its own identity under `~/.sprott/agents/<name>/`. If
+`SPROTT_AGENT_IDENTITY` is unset, the agent loads its own env file before
+running `sprott`: `set -a; . ~/.sprott/agents/<name>/agent.env; set +a`. With one
 directory there, that one is the agent's; with several, it uses the name it set up
 with. `sprott setup` prints this line when it reports `done`. The file sets:
 
 | Variable | Meaning |
 |---|---|
-| `SAFECLAW_BROKER_URL` | The local broker, for example `http://127.0.0.1:23294` |
-| `SAFECLAW_AGENT_IDENTITY` | The agent identity file used to sign requests; it is not a credential |
+| `SPROTT_BROKER_URL` | The local broker, for example `http://127.0.0.1:23294` |
+| `SPROTT_AGENT_IDENTITY` | The agent identity file used to sign requests; it is not a credential |
 
 The env file is non-secret. Do not share an identity file between agents.
 

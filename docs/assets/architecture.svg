@@ -45,7 +45,7 @@
   <!-- agent -->
   <rect x="44" y="160" width="220" height="186" rx="12" fill="#141417" stroke="#2c2c33"/>
   <text class="bt" x="60" y="190">Your agent</text>
-  <text class="mono code" x="60" y="222">GITHUB_TOKEN=__sc__github__</text>
+  <text class="mono code" x="60" y="222" style="font-size:10.5px">GITHUB_TOKEN=__sprott__github__</text>
   <text class="mono code" x="60" y="241">sprott run -- gh pr list</text>
   <text class="bd" x="60" y="284">knows the phantom,</text>
   <text class="bd" x="60" y="302">never the value</text>

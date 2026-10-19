@@ -17,12 +17,12 @@ gets its own keypair; what any agent may *do* is decided elsewhere, by
 ## The identity
 
 `sprott agent add <name>` mints one identity and writes its env file at
-`~/.safeclaw/agents/<name>/agent.env`. The file contains two non-secret values:
+`~/.sprott/agents/<name>/agent.env`. The file contains two non-secret values:
 
 | Var | Meaning |
 |---|---|
-| `SAFECLAW_BROKER_URL` | the local broker, e.g. `http://127.0.0.1:23294` |
-| `SAFECLAW_AGENT_IDENTITY` | path to the agent's identity file (its keypair). Not a secret; `sprott run` signs a fresh proof with it per request, and no key is stored or sent. |
+| `SPROTT_BROKER_URL` | the local broker, e.g. `http://127.0.0.1:23294` |
+| `SPROTT_AGENT_IDENTITY` | path to the agent's identity file (its keypair). Not a secret; `sprott run` signs a fresh proof with it per request, and no key is stored or sent. |
 
 The vault is not part of the env: each request names one in its URL
 (`/v/<vault>/…`), and `sprott run` binds one per launched command

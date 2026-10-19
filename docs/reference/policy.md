@@ -2,7 +2,7 @@
 
 This page describes Sprott's per-action policy levels and how the policy engine evaluates them.
 
-> 状态:**已实现 (safeclaw v0.9.2)**。源码即权威:`src/core/policy.rs`(类型 + 求值)、
+> 状态:**已实现 (v0.9.2)**。源码即权威:`src/core/policy.rs`(类型 + 求值)、
 > `src/service/mod.rs`(recipe 解析)、`src/storage/plaintext.rs`(`VaultAux.policy`)。
 > 关联 `design/protocol.md §6`、`design/stores-and-items.md §7`、`design/connection-schema.md`。
 

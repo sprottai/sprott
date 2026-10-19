@@ -9,7 +9,7 @@ secret  HF_TOKEN = hf_xxx…                      inert storage
    +
 anchor  huggingface.co                          where it may be spent
    =
-connection "hf_token"  →  phantom __sc__hf_token__
+connection "hf_token"  →  phantom __sprott__hf_token__
 ```
 
 Three rules keep this unambiguous:
@@ -73,6 +73,6 @@ Adding a service is a TOML file, not a plugin: `sprott service add ./folder` or
 
 ## Multiple accounts
 
-Accounts differ by phantom *value*, not env-var name: `__sc__github__` and
-`__sc__github_work__` are two connections behind the same `GITHUB_TOKEN`
+Accounts differ by phantom *value*, not env-var name: `__sprott__github__` and
+`__sprott__github_work__` are two connections behind the same `GITHUB_TOKEN`
 variable. See [`sprott run` and phantoms](sc-run.md).

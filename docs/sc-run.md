@@ -1,7 +1,7 @@
 # `sprott run` and phantoms: use a key without seeing it
 
 The one habit that makes Sprott work: **the agent handles phantoms, never
-values**. A phantom is a placeholder like `__sc__github__`. Put it exactly
+values**. A phantom is a placeholder like `__sprott__github__`. Put it exactly
 where the credential would go, prefix the command with `sprott run --`, and the
 proxy substitutes the real value at egress, only toward that connection's own
 hosts.
@@ -9,7 +9,7 @@ hosts.
 ## The pattern
 
 ```bash
-HF_TOKEN=__sc__hf_token__ sprott run -- python train.py
+HF_TOKEN=__sprott__hf_token__ sprott run -- python train.py
 ```
 
 The env var carries the phantom, not a value. Nothing in the agent's world
@@ -24,7 +24,7 @@ Three steps, always the same:
    as shown.
 2. **Place it** where the credential belongs: an env var a tool reads, an
    `Authorization` header, a config file, even a URL path
-   (`https://api.telegram.org/bot__sc__telegram__/sendMessage`).
+   (`https://api.telegram.org/bot__sprott__telegram__/sendMessage`).
 3. **Route the command** through `sprott run --`. Unrouted traffic is untouched,
    and an unrouted phantom reaches the upstream as a literal string: a clean
    401, never a leak.
@@ -35,8 +35,8 @@ Accounts are distinguished by phantom *value*, not env-var name. Same
 `GITHUB_TOKEN` variable, different phantom:
 
 ```bash
-GITHUB_TOKEN=__sc__github__ sprott run -- gh pr list        # personal
-GITHUB_TOKEN=__sc__github_work__ sprott run -- gh pr list   # work
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list        # personal
+GITHUB_TOKEN=__sprott__github_work__ sprott run -- gh pr list   # work
 ```
 
 ## Approvals mid-run

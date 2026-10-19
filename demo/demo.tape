@@ -26,14 +26,14 @@ Sleep 3s
 Type "# the agent writes the phantom, never the token"
 Enter
 Sleep 1s
-Type "GITHUB_TOKEN=__sc__github__ sprott run -- gh api user -q .login"
+Type "GITHUB_TOKEN=__sprott__github__ sprott run -- gh api user -q .login"
 Enter
 Sleep 4s
 
 Type "# outside sprott run, the phantom is a worthless string"
 Enter
 Sleep 1s
-Type "GITHUB_TOKEN=__sc__github__ gh api user -q .login"
+Type "GITHUB_TOKEN=__sprott__github__ gh api user -q .login"
 Enter
 Sleep 3s
 
