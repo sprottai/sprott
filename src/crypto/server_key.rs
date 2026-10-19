@@ -17,29 +17,29 @@
 //! / `contact_token_input`) and the backend mirrors it byte-for-byte in
 //! `safeclaw-pro-backend/src/server-signing.mjs` (guarded by a shared golden
 //! vector). The pinned key below is the DEV server key; a prod build or a test
-//! overrides it via `SAFECLAW_SERVER_PUBKEY` (64-hex).
+//! overrides it via `SPROTT_SERVER_PUBKEY` (64-hex).
 
 use crate::identity;
 
 /// The pinned DEV Sprott server signing public key (Ed25519, 32-byte hex). The
 /// matching private key lives server-side only (Supabase `server_signing_key`
-/// row, or the `SAFECLAW_SERVER_SIGNING_KEY` env in prod). Overridable at runtime
-/// via `SAFECLAW_SERVER_PUBKEY`.
+/// row, or the backend's signing-key env var in prod). Overridable at runtime
+/// via `SPROTT_SERVER_PUBKEY`.
 const PINNED_SERVER_PUBKEY_HEX: &str =
     "898c205d7b5da4f448404811b57d2093d21259423d6ee50c754f411fc1c55054";
 
-/// Resolve the server public key to verify against: the `SAFECLAW_SERVER_PUBKEY`
+/// Resolve the server public key to verify against: the `SPROTT_SERVER_PUBKEY`
 /// override (64-hex) if valid, else the pinned constant. Returns `None` only if
 /// the pinned constant is malformed (a build error — never at runtime).
 pub fn server_pubkey() -> Option<[u8; 32]> {
-    if let Ok(hex) = std::env::var("SAFECLAW_SERVER_PUBKEY") {
+    if let Ok(hex) = std::env::var("SPROTT_SERVER_PUBKEY") {
         let hex = hex.trim();
         if !hex.is_empty() {
             if let Some(k) = parse_hex32(hex) {
                 return Some(k);
             }
             tracing::warn!(
-                "SAFECLAW_SERVER_PUBKEY is not 32-byte hex; falling back to the pinned key"
+                "SPROTT_SERVER_PUBKEY is not 32-byte hex; falling back to the pinned key"
             );
         }
     }

@@ -22,11 +22,11 @@ use zeroize::Zeroizing;
 use crate::cli::active::put_cloud_coords;
 use crate::config::LoginArgs;
 
-/// Default daemon control-plane port (matches `ServeArgs` `SAFECLAW_PORT`).
+/// Default daemon control-plane port (matches `ServeArgs` `SPROTT_PORT`).
 const DEFAULT_DAEMON_PORT: u16 = crate::config::CONTROL_PORT;
 
 /// Resolve which cloud this machine pairs with. Precedence:
-///   1. `SAFECLAW_CLOUD_URL` — runtime self-host escape hatch (any URL; HTTPS
+///   1. `SPROTT_CLOUD_URL` — runtime self-host escape hatch (any URL; HTTPS
 ///      enforced below). Undocumented; for people running their own custodian.
 ///   2. `--profile {prod,dev}` — the FIRST-PARTY selector the console's install
 ///      prompt uses. It is a SYMBOL, not a URL: it resolves only against the
@@ -36,13 +36,13 @@ const DEFAULT_DAEMON_PORT: u16 = crate::config::CONTROL_PORT;
 ///      first-party domains means a hostile prompt can at worst flip you
 ///      between your OWN prod/dev, never to a third party. The prod console
 ///      omits the flag (→ default prod); the dev console appends `--profile dev`.
-///   3. `SAFECLAW_BAKED_CLOUD_URL` — compile-time self-host bake.
+///   3. `SPROTT_BAKED_CLOUD_URL` — compile-time self-host bake.
 ///   4. Default: prod. Every real user only ever deals with prod.
 /// The resolved value is only the target at `sc login` time; once paired, the
 /// machine is pinned to the backend persisted in config.toml, so this never
 /// matters again for that machine.
 pub(crate) fn resolve_custodian(env_flag: Option<&str>) -> Result<String, String> {
-    if let Ok(u) = std::env::var("SAFECLAW_CLOUD_URL") {
+    if let Ok(u) = std::env::var("SPROTT_CLOUD_URL") {
         if !u.is_empty() {
             return Ok(u);
         }
@@ -50,7 +50,7 @@ pub(crate) fn resolve_custodian(env_flag: Option<&str>) -> Result<String, String
     if let Some(env) = env_flag {
         return env_selector_to_url(env);
     }
-    if let Some(u) = option_env!("SAFECLAW_BAKED_CLOUD_URL") {
+    if let Some(u) = option_env!("SPROTT_BAKED_CLOUD_URL") {
         if !u.is_empty() {
             return Ok(u.to_string());
         }
@@ -317,7 +317,7 @@ pub(crate) fn persist_device_approval(
         .unwrap_or(&custodian)
         .trim_end_matches('/')
         .to_string();
-    let daemon_port = std::env::var("SAFECLAW_PORT")
+    let daemon_port = std::env::var("SPROTT_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_DAEMON_PORT);

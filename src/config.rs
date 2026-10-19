@@ -3,11 +3,11 @@ use std::path::PathBuf;
 
 /// Control plane port (`0x5AFD`) — the axum Router (op / approve / ceremonies /
 /// events). The `sprott` CLI's target; the agent's own traffic never touches it (the
-/// agent holds only `$SAFECLAW_BROKER_URL`, the proxy port's API face).
+/// agent holds only `$SPROTT_BROKER_URL`, the proxy port's API face).
 /// Sits just below the proxy's `0x5AFE`: both are below the OS ephemeral floor
 /// and IANA-unregistered, so nothing should grab them by chance. Moved off the
 /// former `23295` (`0x5AFF`), which some dev tools (e.g. a VS Code extension
-/// host) deterministically squat — overridable via `$SAFECLAW_PORT`.
+/// host) deterministically squat — overridable via `$SPROTT_PORT`.
 pub const CONTROL_PORT: u16 = 23293;
 
 /// Credential-proxy plane port (`0x5AFE`) — the phantom-only local HTTPS MITM the
@@ -20,7 +20,7 @@ pub const PROXY_PORT: u16 = 23294;
 /// REFUSED (413) rather than forwarded policy-blind. Generous by design (the
 /// daemon runs user-side, authenticated, cost is local); the same convention
 /// as nginx's `client_max_body_size`: hard limit + explained refusal +
-/// user-adjustable knob (`--body-cap` / `SAFECLAW_BODY_CAP`).
+/// user-adjustable knob (`--body-cap` / `SPROTT_BODY_CAP`).
 pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
 
 /// Top-level CLI shape. `sprott` (aliases `sc` and `safeclaw`) is one binary
@@ -51,7 +51,7 @@ pub struct Cli {
     /// Target vault for this invocation (any subcommand, any position): an id, a
     /// unique id prefix, or the exact name (`sprott vault ls`; quote a name with
     /// spaces). An ambiguous name or prefix errors with the candidates. Overrides
-    /// the shell's `$SAFECLAW_VAULT_ID` pin and the device default (top of the
+    /// the shell's `$SPROTT_VAULT_ID` pin and the device default (top of the
     /// resolution chain, design/vault-addressing.md).
     #[arg(long, global = true, value_name = "VAULT")]
     pub vault: Option<String>,
@@ -103,7 +103,7 @@ pub enum Command {
     /// ADVANCED / self-host: run the daemon in the FOREGROUND (this process),
     /// for Docker / a hand-written systemd unit / non-systemd hosts. On a normal
     /// Linux box you never call this — `sprott up` installs a background service
-    /// whose entry-point IS `sprott serve`. Config via SAFECLAW_* env + flags;
+    /// whose entry-point IS `sprott serve`. Config via SPROTT_* env + flags;
     /// Ctrl-C to stop.
     Serve(ServeArgs),
     /// HPKE outer-envelope public key (diagnostic).
@@ -146,7 +146,7 @@ pub enum Command {
     /// device-key authed, cloud-backed.
     Device(DeviceArgs),
     /// Print `export` lines for the HUMAN's shell (`eval "$(sprott env)"`):
-    /// SAFECLAW_BROKER_URL projected from this device's config — never a key,
+    /// SPROTT_BROKER_URL projected from this device's config — never a key,
     /// never a vault pin (vault follows `sprott vault use`; per-call override is
     /// `--vault`). An AGENT's env (incl. its key) is minted by `sprott agent add`.
     Env,
@@ -164,7 +164,7 @@ pub enum Command {
     /// local pairing (active vault, cloud backend, known vaults), removes the
     /// `~/.sprott/device-key`, and revokes that device-key cloud-side (its
     /// plaintext is gone locally, so the server row is dead weight otherwise).
-    /// `--keep-remote` skips the cloud revoke. Your agent's `SAFECLAW_*` shell
+    /// `--keep-remote` skips the cloud revoke. Your agent's `SPROTT_*` shell
     /// env is yours to remove (we can't edit your profile).
     Logout(LogoutArgs),
     /// Manage external stores connected to the active vault. Today: list.
@@ -281,7 +281,7 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -343,7 +343,7 @@ pub struct ConnectionHostArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -369,7 +369,7 @@ pub struct ConnectionRmArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -490,7 +490,7 @@ pub struct ServiceAddArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -517,7 +517,7 @@ pub struct ServiceUpdateArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -537,7 +537,7 @@ pub struct ServiceRmArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -568,7 +568,7 @@ pub struct AgentArgs {
 #[derive(Debug, Subcommand)]
 pub enum AgentSubcommand {
     /// Mint a new agent identity and print its env: two non-secret dotenv lines,
-    /// SAFECLAW_BROKER_URL + SAFECLAW_AGENT_IDENTITY (a file path, not a secret),
+    /// SPROTT_BROKER_URL + SPROTT_AGENT_IDENTITY (a file path, not a secret),
     /// which the agent appends to its own `.env`. No vault line: vault is per-call,
     /// not identity (design/vault-addressing.md). Account-level: works on any of
     /// your paired devices.
@@ -766,7 +766,7 @@ pub struct VaultDeleteArgs {
     /// Fixed port for the localhost callback server. When set, the CLI
     /// always binds to this port (useful for SSH port-forwarding).
     /// Default: random OS-assigned port.
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -846,32 +846,32 @@ pub struct ServeArgs {
     /// which silently created a fresh empty state dir when the daemon was
     /// launched from an arbitrary working directory (e.g. a systemd unit
     /// with cwd=$HOME landed at `~/state`). Resolved in `from_serve_args`.
-    #[arg(long, env = "SAFECLAW_STATE_DIR")]
+    #[arg(long, env = "SPROTT_STATE_DIR")]
     pub state_dir: Option<PathBuf>,
 
     /// The control plane port (`CONTROL_PORT`). The `sprott` CLI, op-approval
     /// polling, ceremonies, `/events`, and any reverse proxy talk to the
     /// daemon here; the agent's own traffic uses only the proxy port
-    /// (`$SAFECLAW_BROKER_URL`).
-    #[arg(long, env = "SAFECLAW_PORT", default_value_t = CONTROL_PORT)]
+    /// (`$SPROTT_BROKER_URL`).
+    #[arg(long, env = "SPROTT_PORT", default_value_t = CONTROL_PORT)]
     pub port: u16,
 
     /// The credential-proxy plane port (`PROXY_PORT`). The resident local HTTPS
     /// MITM the agent's tool traffic is routed through; addressed only by the
     /// env bundle `sprott run` pastes, never by number in agent-facing config.
-    #[arg(long, env = "SAFECLAW_PROXY_PORT", default_value_t = PROXY_PORT)]
+    #[arg(long, env = "SPROTT_PROXY_PORT", default_value_t = PROXY_PORT)]
     pub proxy_port: u16,
 
     /// Network interface to listen on. `127.0.0.1` =
     /// localhost only (default, safe). `0.0.0.0` = all interfaces;
     /// only do that behind a reverse proxy or inside a private network.
-    #[arg(long, env = "SAFECLAW_LISTEN", default_value = "127.0.0.1")]
+    #[arg(long, env = "SPROTT_LISTEN", default_value = "127.0.0.1")]
     pub listen: String,
 
     /// Expected WebAuthn origin — the full URL the browser sees, e.g.
     /// `https://custodian.example.com`. Defaults to `http://localhost:<port>`
     /// for local dev.
-    #[arg(long, env = "SAFECLAW_ORIGIN")]
+    #[arg(long, env = "SPROTT_ORIGIN")]
     pub origin: Option<String>,
 
     /// WebAuthn relying party ID. Defaults to the host part of --origin
@@ -882,7 +882,7 @@ pub struct ServeArgs {
     /// `app.` and `www.` origins of both roots of the pair under either root
     /// RP ID (`passkey::webauthn::RelyingParty::console`); any other console
     /// origin is matched exactly.
-    #[arg(long, env = "SAFECLAW_RP_ID")]
+    #[arg(long, env = "SPROTT_RP_ID")]
     pub rp_id: Option<String>,
 
     /// Shared secret that authenticates this daemon to the cloud op-relay
@@ -893,7 +893,7 @@ pub struct ServeArgs {
     /// Rotate by changing the env var and redeploying. (Named `admin_key` for
     /// historical reasons — the old `/admin/*` HTTP surface it also gated is
     /// gone; today it is purely the relay credential.)
-    #[arg(long, env = "SAFECLAW_ADMIN_KEY")]
+    #[arg(long, env = "SPROTT_ADMIN_KEY")]
     pub admin_key: Option<String>,
 
     /// Cloud op-relay base URL (e.g. `https://api.dev.sprott.ai`). When set,
@@ -901,20 +901,20 @@ pub struct ServeArgs {
     /// browser-deposited (HPKE-sealed) grant — this is what enables web
     /// approval for a zero-inbound localhost daemon. When unset, the daemon is
     /// local-only (legacy embedded op-page). Auth uses `--admin-key`.
-    #[arg(long, env = "SAFECLAW_RELAY_URL")]
+    #[arg(long, env = "SPROTT_RELAY_URL")]
     pub relay_url: Option<String>,
 
     /// Max body size (bytes) the broker will buffer for a phantom-bearing
     /// request. Over the cap the request is refused with a clear 413 — the
     /// proxy never forwards a credential alongside a body policy couldn't
     /// inspect. Raise it if a legitimate brokered upload hits the limit.
-    #[arg(long, env = "SAFECLAW_BODY_CAP", default_value_t = DEFAULT_BODY_CAP)]
+    #[arg(long, env = "SPROTT_BODY_CAP", default_value_t = DEFAULT_BODY_CAP)]
     pub body_cap: u64,
 }
 
 /// `sprott status` takes no flags — the daemon (control root) comes from
 /// `~/.sprott/config.toml`; the active vault is `--vault` else
-/// `$SAFECLAW_VAULT_ID` (env pin) else the config default (§5).
+/// `$SPROTT_VAULT_ID` (env pin) else the config default (§5).
 #[derive(Debug, Args)]
 pub struct StatusArgs {}
 
@@ -928,7 +928,7 @@ pub struct UnlockArgs {
     pub no_browser: bool,
 
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
 
     /// How long (seconds) to wait for the browser-callback before giving up.
@@ -997,7 +997,7 @@ pub struct LogoutArgs {
 }
 
 /// Reusable arg set for read-only short-lived commands. The daemon control
-/// root comes from the shared derivation (env `$SAFECLAW_BROKER_URL` host >
+/// root comes from the shared derivation (env `$SPROTT_BROKER_URL` host >
 /// config > default); `--vault` only reselects the vault id on that daemon.
 #[derive(Debug, Args)]
 pub struct CommonArgs {}
@@ -1013,7 +1013,7 @@ pub struct GetArgs {
     /// Fixed port for the localhost callback server. When set, the CLI
     /// always binds to this port (useful for SSH port-forwarding).
     /// Default: random OS-assigned port.
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -1043,7 +1043,7 @@ pub struct SetArgs {
     /// Fixed port for the localhost callback server. When set, the CLI
     /// always binds to this port (useful for SSH port-forwarding).
     /// Default: random OS-assigned port.
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -1063,7 +1063,7 @@ pub struct RmArgs {
     /// Fixed port for the localhost callback server. When set, the CLI
     /// always binds to this port (useful for SSH port-forwarding).
     /// Default: random OS-assigned port.
-    #[arg(long, env = "SAFECLAW_CB_PORT")]
+    #[arg(long, env = "SPROTT_CB_PORT")]
     pub cb_port: Option<u16>,
     #[arg(long, default_value = "120")]
     pub timeout: u64,
@@ -1096,7 +1096,7 @@ impl Config {
         // self-host / unpaired one. (The local op-page ceremony — the only
         // thing that'd want a localhost rpId — isn't used when paired: all
         // approvals route to the cloud /grant page.) An explicit --origin /
-        // SAFECLAW_ORIGIN always wins.
+        // SPROTT_ORIGIN always wins.
         let explicit = args.origin.is_some() || args.rp_id.is_some();
         let origin = args.origin.unwrap_or_else(|| {
             crate::cli::active::frontend_origin()
@@ -1127,13 +1127,13 @@ impl Config {
 }
 
 /// The daemon's state directory, resolved the SAME way `from_serve_args` does:
-/// `$SAFECLAW_STATE_DIR` else `~/.sprott/state` (single `~/.sprott` tree so
+/// `$SPROTT_STATE_DIR` else `~/.sprott/state` (single `~/.sprott` tree so
 /// the whole footprint is one dir to chmod/back up; cwd-relative `./state` only
 /// if the home dir is somehow unknown). Short-lived CLI verbs that need the
 /// resident CA path (`sprott run`, `sprott status`) share this so they never drift from
 /// where the daemon actually wrote `ca.pem`.
 pub fn default_state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("SAFECLAW_STATE_DIR") {
+    if let Some(dir) = std::env::var_os("SPROTT_STATE_DIR") {
         return PathBuf::from(dir);
     }
     crate::names::data_dir()

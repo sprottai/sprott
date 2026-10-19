@@ -176,18 +176,18 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
         std::env::current_exe().map_err(|e| format!("can't find current binary path: {}", e))?;
     let bin_str = bin.to_string_lossy().to_string();
 
-    // Collect any SAFECLAW_* env vars set in the calling shell — these
+    // Collect any SPROTT_* env vars set in the calling shell — these
     // become Environment= lines in the unit. The user controls config
     // by setting env vars *before* `sc start`; flags are ignored here
     // (they'd be invisible after install, which is worse).
     let mut env_lines = Vec::new();
     for (k, v) in std::env::vars() {
-        // Don't leak the agent-facing SAFECLAW_API_KEY into the daemon's
+        // Don't leak the agent-facing SPROTT_API_KEY into the daemon's
         // env — the daemon reads its api-key from the FILE `~/.sprott/api-key`
         // (provisioned below), and a stray/foreign value in the operator's
         // shell must not be adopted as the broker key.
-        if k.starts_with("SAFECLAW_")
-            && k != "SAFECLAW_API_KEY"
+        if k.starts_with("SPROTT_")
+            && k != "SPROTT_API_KEY"
             && k != crate::cli::human_action::STATUS_ENV
         {
             // systemd unit syntax: quote the value to allow spaces/=.
@@ -249,7 +249,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     }
     std::fs::write(&unit_path, &unit)
         .map_err(|e| format!("write {}: {}", unit_path.display(), e))?;
-    // Unit may embed SAFECLAW_ADMIN_KEY and other secrets via
+    // Unit may embed SPROTT_ADMIN_KEY and other secrets via
     // Environment= lines. Tighten to user-only so other accounts on a
     // multi-user host can't read them.
     #[cfg(unix)]
@@ -265,7 +265,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     eprintln!("✓ daemon enabled and running ({})", unit_path.display());
     eprintln!("  binary:   {}", bin_str);
     if !env_lines.is_empty() {
-        eprintln!("  env:      {} SAFECLAW_* var(s) embedded", env_lines.len());
+        eprintln!("  env:      {} SPROTT_* var(s) embedded", env_lines.len());
     }
     eprintln!("  broker:   requires an agent key (synced from your account); mint one with `sprott agent add` or the dashboard's \"Connect a new agent\"");
     eprintln!();
@@ -280,13 +280,13 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
         std::env::current_exe().map_err(|e| format!("can't find current binary path: {}", e))?;
     let bin_str = bin.to_string_lossy().to_string();
 
-    // Same policy as the systemd path: the daemon inherits SAFECLAW_* set in
-    // the calling shell (so `SAFECLAW_PORT=<p> sc up` moves the port and it
-    // sticks across restarts), EXCEPT the agent-facing SAFECLAW_API_KEY.
+    // Same policy as the systemd path: the daemon inherits SPROTT_* set in
+    // the calling shell (so `SPROTT_PORT=<p> sc up` moves the port and it
+    // sticks across restarts), EXCEPT the agent-facing SPROTT_API_KEY.
     let mut env_entries = Vec::new();
     for (k, v) in std::env::vars() {
-        if k.starts_with("SAFECLAW_")
-            && k != "SAFECLAW_API_KEY"
+        if k.starts_with("SPROTT_")
+            && k != "SPROTT_API_KEY"
             && k != crate::cli::human_action::STATUS_ENV
         {
             env_entries.push(format!(
@@ -381,7 +381,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     eprintln!("  binary:   {}", bin_str);
     if !env_entries.is_empty() {
         eprintln!(
-            "  env:      {} SAFECLAW_* var(s) embedded",
+            "  env:      {} SPROTT_* var(s) embedded",
             env_entries.len()
         );
     }

@@ -1,7 +1,7 @@
 //! Status hand-off between a detached `sc setup` background process and its parent.
 //!
 //! Ordinary `sc login`, `sc agent add`, and approval commands do not set
-//! `SAFECLAW_SETUP_STATUS`, so the hooks in their existing ceremony paths are
+//! `SPROTT_SETUP_STATUS`, so the hooks in their existing ceremony paths are
 //! no-ops and keep their terminal behavior unchanged.
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-pub const STATUS_ENV: &str = "SAFECLAW_SETUP_STATUS";
+pub const STATUS_ENV: &str = "SPROTT_SETUP_STATUS";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetupEntry {

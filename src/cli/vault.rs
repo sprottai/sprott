@@ -86,7 +86,7 @@ async fn run_ls(json: bool) -> Result<(), String> {
 }
 
 /// Parse a `url_or_idx` arg into (custodian, vault). Accepts:
-/// - SAFECLAW_VAULT_URL (`<custodian>/v/<id>`)
+/// - SPROTT_VAULT_URL (`<custodian>/v/<id>`)
 /// - numeric index (1-based) into the known_vaults list
 fn resolve_url_or_idx(arg: &str) -> Result<(String, String), String> {
     if let Ok(idx) = arg.parse::<usize>() {
@@ -117,7 +117,7 @@ async fn run_use(args: VaultUseArgs) -> Result<(), String> {
     } else {
         let url = interactive_pick(OnEmpty::UseLocalDefault)?
             .expect("UseLocalDefault never returns None");
-        split_vault_url(&url).ok_or_else(|| format!("not a valid SAFECLAW_VAULT_URL: {}", url))?
+        split_vault_url(&url).ok_or_else(|| format!("not a valid SPROTT_VAULT_URL: {}", url))?
     };
 
     // Probe before saving. If the vault doesn't exist on the custodian,
@@ -151,14 +151,14 @@ async fn run_use(args: VaultUseArgs) -> Result<(), String> {
     // Pin-aware (design/vault-addressing.md): a shell that carries a launch pin
     // keeps targeting it — say so here, at the moment of the switch, instead of
     // letting the very next `sc ls` contradict the header above.
-    if let Ok(pin) = std::env::var("SAFECLAW_VAULT_ID") {
+    if let Ok(pin) = std::env::var("SPROTT_VAULT_ID") {
         if !pin.is_empty() && pin != vault {
             eprintln!(
-                "note: this shell is pinned to {} via $SAFECLAW_VAULT_ID, so `sprott` here still targets it;",
+                "note: this shell is pinned to {} via $SPROTT_VAULT_ID, so `sprott` here still targets it;",
                 pin
             );
             eprintln!(
-                "      the new default applies everywhere else; `unset SAFECLAW_VAULT_ID` to follow it here"
+                "      the new default applies everywhere else; `unset SPROTT_VAULT_ID` to follow it here"
             );
         }
     }
@@ -173,7 +173,7 @@ async fn run_forget(args: VaultForgetArgs) -> Result<(), String> {
             return Err("no vaults in known list. Nothing to forget".into());
         }
         let url = interactive_pick(OnEmpty::Abort)?.ok_or("cancelled")?;
-        split_vault_url(&url).ok_or_else(|| format!("not a valid SAFECLAW_VAULT_URL: {}", url))?
+        split_vault_url(&url).ok_or_else(|| format!("not a valid SPROTT_VAULT_URL: {}", url))?
     };
     let removed = forget_vault(&custodian, &vault)?;
     if !removed {
@@ -222,13 +222,13 @@ fn interactive_pick(on_empty: OnEmpty) -> Result<Option<String>, String> {
     // - on_empty controls what Enter does
     let prompt = match (has_known, &on_empty) {
         (true, OnEmpty::UseLocalDefault) => {
-            "Pick: index, SAFECLAW_VAULT_URL, or Enter for local default: "
+            "Pick: index, SPROTT_VAULT_URL, or Enter for local default: "
         }
-        (true, OnEmpty::Abort) => "Pick: index or SAFECLAW_VAULT_URL (Enter to cancel): ",
+        (true, OnEmpty::Abort) => "Pick: index or SPROTT_VAULT_URL (Enter to cancel): ",
         (false, OnEmpty::UseLocalDefault) => {
-            "Paste a SAFECLAW_VAULT_URL, or press Enter for local default: "
+            "Paste a SPROTT_VAULT_URL, or press Enter for local default: "
         }
-        (false, OnEmpty::Abort) => "Paste a SAFECLAW_VAULT_URL (Enter to cancel): ",
+        (false, OnEmpty::Abort) => "Paste a SPROTT_VAULT_URL (Enter to cancel): ",
     };
     eprint!("{}", prompt);
     io::stderr().flush().ok();

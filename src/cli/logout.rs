@@ -12,8 +12,8 @@
 //! in the dashboard. `--keep-remote` skips the cloud revoke (rare; only when
 //! something external still manages that key).
 //!
-//! What we deliberately DON'T touch: the agent's `SAFECLAW_VAULT_URL` /
-//! `SAFECLAW_API_KEY` env in the user's shell profile. That's the user's file
+//! What we deliberately DON'T touch: the agent's `SPROTT_VAULT_URL` /
+//! `SPROTT_API_KEY` env in the user's shell profile. That's the user's file
 //! to edit (per their config-ownership) — we print a reminder instead.
 
 use serde::Deserialize;
@@ -79,7 +79,7 @@ pub async fn run(args: LogoutArgs) -> Result<(), String> {
         eprintln!("Nothing was paired; cleared any stale local config.");
     }
     eprintln!();
-    eprintln!("  Your agent's SAFECLAW_* env (BROKER_URL / AGENT_IDENTITY) may");
+    eprintln!("  Your agent's SPROTT_* env (BROKER_URL / AGENT_IDENTITY) may");
     eprintln!("  still be persisted in its .env. It's stale now; remove it. Agents stay");
     eprintln!("  valid account-wide (logout revokes only this DEVICE). Revoke unused ones");
     eprintln!("  with `sprott agent rm`. Re-pair with `sprott login`.");

@@ -10,7 +10,7 @@
 //! - API-face root = daemon host + `PROXY_PORT`   (the agent's `BROKER_URL`)
 //!
 //! THE self-consistency invariant: both planes derive from ONE daemon-host
-//! value. When `$SAFECLAW_BROKER_URL` is set (an agent's env snapshot), its
+//! value. When `$SPROTT_BROKER_URL` is set (an agent's env snapshot), its
 //! host wins — an agent's shelled `sc` then targets the SAME daemon the
 //! agent's own HTTP does, by construction; the two faces cannot split.
 //!
@@ -63,7 +63,7 @@ pub struct CliConfig {
     /// SSE sync-stream switch (design/sse-sync.md): absent/"auto" =
     /// connect the wake stream, "off" = pure long-poll. Read by the stream
     /// dispatcher at every (re)connect, so flipping it bites within ~15 min
-    /// without a restart. `SAFECLAW_SYNC_STREAM` overrides — and, unlike this
+    /// without a restart. `SPROTT_SYNC_STREAM` overrides — and, unlike this
     /// key, survives an OLD binary's config save (which drops unknown keys),
     /// so the env var is the robust rollback lever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +73,7 @@ pub struct CliConfig {
     /// cloud audit_events, "off" = Use ops only (the pre-rc.6 contract).
     /// Read once per 30s ship tick, so flipping it bites without a restart;
     /// while off, ceremony rows stay in the local outbox and back-ship on
-    /// re-enable (bounded by audit retention). `SAFECLAW_AUDIT_CEREMONIES`
+    /// re-enable (bounded by audit retention). `SPROTT_AUDIT_CEREMONIES`
     /// overrides, same robustness rationale as `sync_stream` above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_ceremonies: Option<String>,
@@ -119,7 +119,7 @@ pub struct Settings {
     /// `vault create`, etc.). The CLI binds this to receive WebAuthn
     /// redirects. Useful with SSH `-L` forwarding when the browser
     /// lives on a different machine than the daemon. Env override:
-    /// `SAFECLAW_CB_PORT`.
+    /// `SPROTT_CB_PORT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cb_port: Option<u16>,
 }
@@ -609,11 +609,11 @@ fn scheme_host(url: &str) -> Option<String> {
     Some(format!("{}://{}", scheme, host))
 }
 
-/// The agent's broker-face URL from the env: `$SAFECLAW_BROKER_URL` (the
+/// The agent's broker-face URL from the env: `$SPROTT_BROKER_URL` (the
 /// self-describing name, Sprott's broker/API face, not the control port).
 /// Empty values are ignored.
 pub fn env_broker_url() -> Option<String> {
-    std::env::var("SAFECLAW_BROKER_URL")
+    std::env::var("SPROTT_BROKER_URL")
         .ok()
         .filter(|s| !s.is_empty())
 }
@@ -634,37 +634,37 @@ pub fn device_daemon_host(cfg: &CliConfig) -> String {
 }
 
 /// The control root (`scheme://host:<control-port>`) every ceremony/write `sc`
-/// call targets. Env-first: `$SAFECLAW_BROKER_URL`'s HOST wins when set (the
+/// call targets. Env-first: `$SPROTT_BROKER_URL`'s HOST wins when set (the
 /// invariant — shelled `sc` and the agent's own HTTP share one daemon); else
 /// config's `daemon` VERBATIM (it may carry a hand-edited custom control
 /// port); else the loopback default. The env value carries the PROXY port,
 /// never the control port, so the control port comes from [`control_port`]:
-/// `$SAFECLAW_PORT` when set, else the constant. This is the SAME env `sc
-/// serve` and `sc login` read, so exporting `SAFECLAW_PORT=<p>` moves the
+/// `$SPROTT_PORT` when set, else the constant. This is the SAME env `sc
+/// serve` and `sc login` read, so exporting `SPROTT_PORT=<p>` moves the
 /// daemon, its recorded config, AND this resolution together — a coordinated
 /// port change survives even in an agent shell that carries a proxy-face
-/// `SAFECLAW_BROKER_URL`.
+/// `SPROTT_BROKER_URL`.
 pub fn control_root(cfg: &CliConfig) -> String {
     control_root_from(env_daemon_host(), cfg.daemon.as_deref(), control_port())
 }
 
-/// The control-plane port the `sc` CLI targets: `$SAFECLAW_PORT` when set (the
+/// The control-plane port the `sc` CLI targets: `$SPROTT_PORT` when set (the
 /// single override, shared with `sc serve` / `sc login`), else the constant.
 fn control_port() -> u16 {
-    std::env::var("SAFECLAW_PORT")
+    std::env::var("SPROTT_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(crate::config::CONTROL_PORT)
 }
 
-/// The proxy-face port the `sc` CLI targets: `$SAFECLAW_PROXY_PORT` when set (the
+/// The proxy-face port the `sc` CLI targets: `$SPROTT_PROXY_PORT` when set (the
 /// single override, shared with `sc serve`), else the constant. Mirrors
 /// [`control_port`] so a stale proxy port baked into an agent's snapshot
-/// (`$SAFECLAW_BROKER_URL` from an old `sc agent add`) never wins — a moved
+/// (`$SPROTT_BROKER_URL` from an old `sc agent add`) never wins — a moved
 /// daemon self-heals, and a real custom port is coordinated the same way
-/// `$SAFECLAW_PORT` coordinates the control face.
+/// `$SPROTT_PORT` coordinates the control face.
 fn proxy_port() -> u16 {
-    std::env::var("SAFECLAW_PROXY_PORT")
+    std::env::var("SPROTT_PROXY_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(crate::config::PROXY_PORT)
@@ -681,11 +681,11 @@ fn control_root_from(env_host: Option<String>, config_daemon: Option<&str>, port
 }
 
 /// The API-face root (`scheme://host:<proxy-port>`) — the daemon face an agent
-/// holds as `SAFECLAW_BROKER_URL`. Env-first HOST (the single-host invariant:
+/// holds as `SPROTT_BROKER_URL`. Env-first HOST (the single-host invariant:
 /// proxy and control share one daemon host), else the device atom; the PORT is
 /// always [`proxy_port`], NEVER the snapshot's port. This is symmetric with
 /// [`control_root`], which likewise takes the env HOST but resolves the port
-/// itself — so a stale `$SAFECLAW_BROKER_URL` port from an old `sc agent add`
+/// itself — so a stale `$SPROTT_BROKER_URL` port from an old `sc agent add`
 /// (the daemon since moved) is ignored by BOTH faces and self-heals, instead of
 /// silently pinning the child's `HTTPS_PROXY` to a dead port. The env value
 /// passes the SAME `scheme_host` parse gate as `control_root` — a malformed
@@ -733,7 +733,7 @@ pub fn vault_flag() -> Option<String> {
 ///
 /// - **control root:** see [`control_root`] — the env `BROKER_URL` HOST wins
 ///   (the single-host invariant), else config, else the loopback default.
-/// - **vault precedence:** `--vault flag > $SAFECLAW_VAULT_ID (env pin) >
+/// - **vault precedence:** `--vault flag > $SPROTT_VAULT_ID (env pin) >
 ///   config default > single-vault auto-select`. The env pin is launch-scoped
 ///   context (`sc run` injects it into the child) — it's what makes an agent's
 ///   shelled-out `sc` target the SAME vault its own HTTP does. Nothing durable
@@ -744,7 +744,7 @@ pub fn resolve_active(vault_override: Option<&str>) -> Result<(String, String), 
         .map(str::to_string)
         .or_else(vault_flag)
         .or_else(|| {
-            std::env::var("SAFECLAW_VAULT_ID")
+            std::env::var("SPROTT_VAULT_ID")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
@@ -963,7 +963,7 @@ mod tests {
             ),
             format!("https://box.example.com:{}", CONTROL_PORT)
         );
-        // A moved control port (SAFECLAW_PORT) rides through the env-host branch,
+        // A moved control port (SPROTT_PORT) rides through the env-host branch,
         // so an agent shell carrying a proxy-face BROKER_URL still targets it.
         assert_eq!(
             control_root_from(Some("http://127.0.0.1".into()), cfg_daemon, 23293),

@@ -64,7 +64,7 @@ pub async fn do_browser_gesture(
     enroll: bool,
     cb_port: Option<u16>,
 ) -> Result<GestureResult, String> {
-    // Resolution: flag (already includes SAFECLAW_CB_PORT via clap)
+    // Resolution: flag (already includes SPROTT_CB_PORT via clap)
     //   → ~/.sprott/config.toml [settings] cb_port → None (random).
     let cb_port_from_flag = cb_port;
     let cb_port = cb_port.or_else(crate::cli::active::settings_cb_port);
@@ -175,7 +175,7 @@ pub struct CreatedOp {
     pub op: Option<Value>,
 }
 
-/// When this CLI runs as an agent (`SAFECLAW_AGENT_IDENTITY` names its
+/// When this CLI runs as an agent (`SPROTT_AGENT_IDENTITY` names its
 /// identity file), a proof of possession over exactly `op` for `vault`, so the
 /// approval names the agent instead of a bare terminal. The daemon verifies it
 /// and drops any unproven claim; this is display and consent information, not

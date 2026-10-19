@@ -7,7 +7,7 @@
 //!
 //! WHY this exists separate from the child-facing proxy (`proxy_env`): the
 //! macOS launchd agent (and the systemd unit) do NOT inherit the operator's
-//! shell `HTTPS_PROXY`, and both unit generators whitelist only `SAFECLAW_*`, so
+//! shell `HTTPS_PROXY`, and both unit generators whitelist only `SPROTT_*`, so
 //! a `$HTTPS_PROXY` set in a terminal never reaches the long-running daemon.
 //! Agents behind a corporate/on-demand proxy (and users in regions that can only
 //! reach the Sprott backend through a proxy) therefore need a persisted,

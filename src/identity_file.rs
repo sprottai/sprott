@@ -9,7 +9,7 @@
 //!
 //! Paths (§5):
 //!   - AIK: `~/.sprott/agents/<name>/identity` — selected per wrapped child via
-//!     the env var `SAFECLAW_AGENT_IDENTITY` (a PATH, not a secret).
+//!     the env var `SPROTT_AGENT_IDENTITY` (a PATH, not a secret).
 //!   - DIK: `~/.sprott/device/identity` — daemon-local, one per machine, no env
 //!     (migrated from the legacy `~/.sprott/device-key` bearer file).
 //!

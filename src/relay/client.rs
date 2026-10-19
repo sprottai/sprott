@@ -199,7 +199,7 @@ pub fn spawn_cancel(
 /// the `sc_device_` device-key — exactly the channel the Slice-3 blob sync
 /// already uses. Backend gate: `resolveAuth` + `isOwnedVaultId`.
 ///
-/// Fallback: an operator-supplied `SAFECLAW_RELAY_URL` + `SAFECLAW_ADMIN_KEY`
+/// Fallback: an operator-supplied `SPROTT_RELAY_URL` + `SPROTT_ADMIN_KEY`
 /// (self-host / SaaS-custodian deployments that pre-date pairing).
 ///
 /// `None` ⇒ no relay ⇒ purely local daemon; the local op-page ceremony stands.

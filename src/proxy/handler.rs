@@ -1580,7 +1580,7 @@ fn body_over_cap(declared: u64, cap: u64) -> Response<Body> {
             "this request names a phantom but its {} exceeds the broker's inspectable \
              cap ({} bytes). The proxy will not forward a credential alongside a body \
              policy cannot see. If the request is legitimate, raise the daemon's \
-             --body-cap / SAFECLAW_BODY_CAP.",
+             --body-cap / SPROTT_BODY_CAP.",
             what, cap
         ),
     )

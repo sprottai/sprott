@@ -87,11 +87,11 @@ const OFF_RECHECK: Duration = Duration::from_secs(60);
 /// anything else — including the key being absent — is auto. Read by the
 /// dispatcher at EVERY (re)connect (★★ design doc: flipping to "off" bites at
 /// the next reconnect, ≤15 min under the Railway cap; restart for immediate
-/// effect). `SAFECLAW_SYNC_STREAM` wins over config.toml because the env var
+/// effect). `SPROTT_SYNC_STREAM` wins over config.toml because the env var
 /// survives an old binary's config save (which drops unknown keys) — it is
 /// the robust rollback lever.
 pub fn sync_stream_enabled() -> bool {
-    let v = std::env::var("SAFECLAW_SYNC_STREAM")
+    let v = std::env::var("SPROTT_SYNC_STREAM")
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())

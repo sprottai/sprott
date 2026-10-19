@@ -105,7 +105,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
             .unwrap_or_else(|| Path::new("."))
             .join("agent.env");
         let env_body = format!(
-            "SAFECLAW_BROKER_URL={}\nSAFECLAW_AGENT_IDENTITY={}\n",
+            "SPROTT_BROKER_URL={}\nSPROTT_AGENT_IDENTITY={}\n",
             broker_url,
             crate::cli::agent::env_value(&identity_path.display().to_string())
         );
@@ -298,7 +298,7 @@ async fn wait_for_existing(
     pid: u32,
     json_output: bool,
 ) -> Result<Progress, i32> {
-    let seconds = std::env::var("SAFECLAW_SETUP_WAIT_SECS")
+    let seconds = std::env::var("SPROTT_SETUP_WAIT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(90);

@@ -1896,11 +1896,11 @@ fn event_from_row(row: &crate::audit::ApprovalRow) -> AuditEventWire {
 /// The `audit_ceremonies` switch: ship control-plane terminal outcomes
 /// alongside Use ops? Default ON (user decision 2026-07-14: the console's
 /// approved tile counts every consent terminal). Same shape as
-/// `sync_stream_enabled` — env `SAFECLAW_AUDIT_CEREMONIES` beats the config
+/// `sync_stream_enabled` — env `SPROTT_AUDIT_CEREMONIES` beats the config
 /// key, `off`-family synonyms disable, anything unrecognized stays on the
 /// default but warns once.
 fn audit_ceremonies_enabled(cfg: &crate::cli::active::CliConfig) -> bool {
-    let v = std::env::var("SAFECLAW_AUDIT_CEREMONIES")
+    let v = std::env::var("SPROTT_AUDIT_CEREMONIES")
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())

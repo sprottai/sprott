@@ -142,9 +142,9 @@ async fn add_cli(args: AgentAddArgs) -> Result<(), String> {
     // emitted (it was legacy dual-auth cruft the shim stripped anyway). So there's
     // no secret to guard: this output can be shown, and appended to the agent's env
     // file directly. The daemon still holds an account-roster row for this AIK.
-    println!("SAFECLAW_BROKER_URL={}", added.broker_url);
+    println!("SPROTT_BROKER_URL={}", added.broker_url);
     println!(
-        "SAFECLAW_AGENT_IDENTITY={}",
+        "SPROTT_AGENT_IDENTITY={}",
         env_value(&added.identity_path.display().to_string())
     );
 

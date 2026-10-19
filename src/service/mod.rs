@@ -861,7 +861,7 @@ impl ServiceRegistry {
     /// (a definition and its policy.toml are admitted or skipped together,
     /// never mixed across layers):
     /// 1. Compiled-in defaults (always loaded as base)
-    /// 2. $SAFECLAW_DATA/services/ (runtime override for dev/deployment)
+    /// 2. $SPROTT_DATA/services/ (runtime override for dev/deployment)
     /// 3. ~/.sprott/services/ (user-installed services, highest priority)
     pub fn load() -> Self {
         let mut services = HashMap::new();
@@ -873,7 +873,7 @@ impl ServiceRegistry {
         // Layer 1: compiled-in defaults (always loaded as base)
         Self::load_compiled_defaults(&mut services, &mut policy_texts);
 
-        // Layer 2: $SAFECLAW_DATA/services/ override
+        // Layer 2: $SPROTT_DATA/services/ override
         for files in Self::discover_service_dirs() {
             Self::admit_dir(files, &mut services, &mut policy_texts);
         }
@@ -886,7 +886,7 @@ impl ServiceRegistry {
     }
 
     /// Build a registry from ONLY the compiled-in (in-tree) services — no
-    /// `$SAFECLAW_DATA` / user-installed overrides, no filesystem I/O. Used by
+    /// `$SPROTT_DATA` / user-installed overrides, no filesystem I/O. Used by
     /// offline tooling (`sc registry`) and CI to render the exact catalog a
     /// freshly-built daemon serves, without booting a server or reading any
     /// deployment state.
@@ -978,8 +978,8 @@ impl ServiceRegistry {
     fn discover_service_dirs() -> Vec<ServiceDirFiles> {
         let mut results = vec![];
 
-        // Check $SAFECLAW_DATA/services/ first (runtime override)
-        if let Ok(data) = std::env::var("SAFECLAW_DATA") {
+        // Check $SPROTT_DATA/services/ first (runtime override)
+        if let Ok(data) = std::env::var("SPROTT_DATA") {
             let dir = std::path::Path::new(&data).join("services");
             if dir.is_dir() {
                 Self::scan_dir(&dir, &mut results);
@@ -1175,7 +1175,7 @@ impl ServiceRegistry {
     /// whether it's fatal).
     /// Ports the on-demand OAuth auto-catch listener may bind: the loopback
     /// targets announced by LOCALLY-INSTALLED service defs (compiled-in +
-    /// `$SAFECLAW_DATA` + `~/.sprott/services`) plus the canonical default —
+    /// `$SPROTT_DATA` + `~/.sprott/services`) plus the canonical default —
     /// today `{8765, 1455}` (google-suite default + openai_codex's registered
     /// callback). This is the SECURITY BOUNDARY for which ports a connect can
     /// open: vault-synced custom defs (`aux.services`) are deliberately NOT

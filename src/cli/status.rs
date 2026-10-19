@@ -111,7 +111,7 @@ pub async fn probe_local_daemon(control_root: &str) -> LocalDaemon {
 /// `service::control_port_alive` uses to gate `sc up`, so `sc status` can never
 /// disagree with it. Targets the same host:port the HTTP probe resolves
 /// (loopback in the normal case; an env-pinned host when a shell carries a
-/// `$SAFECLAW_BROKER_URL`). Fully async so it never blocks the runtime; ~600ms
+/// `$SPROTT_BROKER_URL`). Fully async so it never blocks the runtime; ~600ms
 /// ceiling, but a down daemon refuses immediately.
 async fn control_port_tcp_alive(control_root: &str) -> bool {
     let authority = control_root
@@ -276,7 +276,7 @@ pub async fn run(json: bool) -> Result<(), String> {
     // facts). Routing DETECTION is gone (§9): the broker is opt-in, the agent
     // routes explicitly with `sc run`, so there's no "am I routed?" to report.
     let flag = crate::cli::active::vault_flag();
-    let env_pin = std::env::var("SAFECLAW_VAULT_ID")
+    let env_pin = std::env::var("SPROTT_VAULT_ID")
         .ok()
         .filter(|s| !s.is_empty());
     let config_default = cfg.vault.clone();
@@ -324,12 +324,12 @@ pub async fn run(json: bool) -> Result<(), String> {
     }
     println!("  control: {}", control);
     println!("  broker:  {} (agent face; wired by `sprott run`)", broker);
-    // A shell carrying a stale `$SAFECLAW_BROKER_URL` snapshot (old `sc agent
+    // A shell carrying a stale `$SPROTT_BROKER_URL` snapshot (old `sc agent
     // add`, daemon since moved) is the port-mismatch case status exists to make
     // legible: the resolution above self-heals, so show the divergence.
     if let Some(env_url) = crate::cli::active::env_broker_url() {
         if env_url.trim_end_matches('/') != broker {
-            println!("  note:    this shell's $SAFECLAW_BROKER_URL ({}) is stale; `sprott run` uses the broker face above", env_url);
+            println!("  note:    this shell's $SPROTT_BROKER_URL ({}) is stale; `sprott run` uses the broker face above", env_url);
         }
     }
     println!();
@@ -380,8 +380,8 @@ pub async fn run(json: bool) -> Result<(), String> {
     if flag.is_none() {
         if let (Some(pin), Some(def)) = (env_pin.as_deref(), config_default.as_deref()) {
             if pin != def {
-                println!("  note:  this shell is pinned to {} via $SAFECLAW_VAULT_ID; the device default is {}", pin, def);
-                println!("         unset SAFECLAW_VAULT_ID to follow the default");
+                println!("  note:  this shell is pinned to {} via $SPROTT_VAULT_ID; the device default is {}", pin, def);
+                println!("         unset SPROTT_VAULT_ID to follow the default");
             }
         }
     }

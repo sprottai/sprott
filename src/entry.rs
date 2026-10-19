@@ -427,7 +427,7 @@ async fn run_daemon(
     // Two localhost listeners (2026-07-03 phantom-only proxy): the control/API
     // plane (op/approve/passkeys/registry/admin) on CONTROL_PORT here, and the
     // resident MITM credential proxy on PROXY_PORT (spawned above). The agent
-    // reaches control only via $SAFECLAW_VAULT_URL, so the port is env-addressed.
+    // reaches control only via $SPROTT_VAULT_URL, so the port is env-addressed.
     let addr = SocketAddr::new(listen_ip, config.port);
     let app = app_router(state.clone());
 
