@@ -52,22 +52,31 @@ jobs:
       # sprottai/sprott-ee (the org has deploy keys disabled, so a read
       # token is the minimal way for this public repo's CI to fetch the private
       # overlay). Store it in this repo's Actions secrets.
-      - name: Checkout private overlay (safeclaw-ee)
+      #
+      # 2.0 and later build the overlay's `main`, which carries its 2.0 rename
+      # (package sprott-ee, bin sprott, core dependency key `sprott`). A 1.x
+      # patch would point `ref` at the overlay's `v1` branch instead.
+      - name: Checkout private overlay (sprott-ee)
         uses: actions/checkout@v4
         with:
           repository: sprottai/sprott-ee
           ref: main
           token: ${{ secrets.EE_READ_TOKEN }}
-          path: safeclaw-ee
+          path: sprott-ee
 
       # Reproducible: pin the core dependency to THIS release tag, replacing the
-      # local `path = "../safeclaw"` used for dev. A given tag always assembles the
-      # core at that tag + the overlay's main at build time.
+      # overlay's local path dependency used for dev. A given tag always assembles
+      # the core at that tag + the overlay's main at build time. An overlay
+      # without the `sprott` dependency key is not the 2.0 overlay: stop.
       - name: Pin core to the release tag
         run: |
-          cd safeclaw-ee
-          sed -i -E "s#^safeclaw = .*#safeclaw = { git = \"https://github.com/sprottai/sprott\", tag = \"${{ github.ref_name }}\" }#" Cargo.toml
-          echo "--- pinned core dep ---"; grep '^safeclaw = ' Cargo.toml
+          cd sprott-ee
+          if ! grep -q '^sprott = ' Cargo.toml; then
+            echo "the overlay's Cargo.toml has no 'sprott = ' core dependency (is its 2.0 rename on main?)" >&2
+            exit 1
+          fi
+          sed -i -E "s#^sprott = .*#sprott = { git = \"https://github.com/sprottai/sprott\", tag = \"${{ github.ref_name }}\" }#" Cargo.toml
+          echo "--- pinned core dep ---"; grep '^sprott = ' Cargo.toml
           echo "core=${{ github.ref_name }} overlay=$(git rev-parse HEAD)" > ../assembly.txt
 
       - name: Record overlay revision (once)
@@ -98,20 +107,20 @@ jobs:
       # binary still self-reports vX.Y.Z(-rc.N).
       - name: Build (cross, Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        working-directory: safeclaw-ee
+        working-directory: sprott-ee
         env:
           SC_BUILD_TAG: ${{ github.ref_name }}
-        run: cross build --release --target ${{ matrix.target }} --bin safeclaw
+        run: cross build --release --target ${{ matrix.target }} --bin sprott
 
       - name: Build (cargo, native)
         if: matrix.target != 'aarch64-unknown-linux-musl'
-        working-directory: safeclaw-ee
+        working-directory: sprott-ee
         env:
           SC_BUILD_TAG: ${{ github.ref_name }}
-        run: cargo build --release --target ${{ matrix.target }} --bin safeclaw
+        run: cargo build --release --target ${{ matrix.target }} --bin sprott
 
       - name: Rename binary
-        run: cp safeclaw-ee/target/${{ matrix.target }}/release/safeclaw ${{ matrix.artifact }}
+        run: cp sprott-ee/target/${{ matrix.target }}/release/sprott ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
