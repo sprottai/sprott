@@ -10,7 +10,7 @@ metadata:
 # Sprott
 
 Sprott holds credentials and lends them to requests. Each connection has a
-**phantom**, a placeholder like `__sc__github__`. Put the phantom where the
+**phantom**, a placeholder like `__sprott__github__`. Put the phantom where the
 credential goes (an env var, a header, a config file) and run the command through
 `sprott run --`; any tool works. The broker swaps in the real value, only toward that
 connection's hosts. Traffic not run through `sprott run` is untouched, so an unrouted
@@ -42,14 +42,14 @@ until a run prints no `Next:`. After an error, run its `Fix:` command. The last
 command; run that and continue after the approval.
 
 `sprott setup` is safe to re-run: it skips whatever is already done. It writes under
-`~/.safeclaw/` and needs the network, so in a sandbox it may need to run outside
+`~/.sprott/` and needs the network, so in a sandbox it may need to run outside
 it. Never ask the user to paste a key or a code into the chat.
 
-Each agent has its own identity, kept in `~/.safeclaw/agents/<name>/`, where
-`<name>` is the name setup used. If `SAFECLAW_AGENT_IDENTITY` is unset, load
+Each agent has its own identity, kept in `~/.sprott/agents/<name>/`, where
+`<name>` is the name setup used. If `SPROTT_AGENT_IDENTITY` is unset, load
 your own env file before running `sprott`:
-`set -a; . ~/.safeclaw/agents/<name>/agent.env; set +a` (it sets
-`SAFECLAW_BROKER_URL` and `SAFECLAW_AGENT_IDENTITY`; neither is a secret). With
+`set -a; . ~/.sprott/agents/<name>/agent.env; set +a` (it sets
+`SPROTT_BROKER_URL` and `SPROTT_AGENT_IDENTITY`; neither is a secret). With
 one directory there, that one is yours; with several, use the name you set up
 with. Without it, your requests are not attributed to you.
 
@@ -61,7 +61,7 @@ them first.
 If the broker does not answer, start it:
 
 ```bash
-curl -s -o /dev/null --connect-timeout 1 "${SAFECLAW_BROKER_URL:-http://127.0.0.1:23294}/health" || sprott up
+curl -s -o /dev/null --connect-timeout 1 "${SPROTT_BROKER_URL:-http://127.0.0.1:23294}/health" || sprott up
 ```
 
 `sprott help` and `sprott <command> --help` have every command's syntax.
@@ -92,12 +92,12 @@ curl -s -o /dev/null --connect-timeout 1 "${SAFECLAW_BROKER_URL:-http://127.0.0.
 
 ```bash
 sprott run -- curl https://api.stripe.com/v1/charges \
-  -H "Authorization: Bearer __sc__stripe__"
-GITHUB_TOKEN=__sc__github__ sprott run -- gh pr list
+  -H "Authorization: Bearer __sprott__stripe__"
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
 ```
 
-- Two accounts of one service differ by phantom (`__sc__github__`,
-  `__sc__github_work__`). One request carries one connection's phantoms.
+- Two accounts of one service differ by phantom (`__sprott__github__`,
+  `__sprott__github_work__`). One request carries one connection's phantoms.
 - A connection with a `setup` hint brokers a local tool: tell the user what you are
   configuring, then apply its steps.
 - On a 401 or 403, first check the command ran under `sprott run --` with the exact
@@ -129,3 +129,7 @@ A locked vault: run `sprott unlock`; it prints a link for the user and the `spro
 `sprott upgrade` updates `sprott` and restarts the daemon, which locks the vault until the
 user taps their passkey. Upgrade when a command asks for it or the user agrees, then
 run `sprott unlock` and send the unlock link.
+
+A machine still on Sprott 1.x moves to 2.0 by running the installer above (its
+`sc upgrade` fails and changes nothing). The installer moves `~/.safeclaw` to
+`~/.sprott`; reload your agent env from there.

@@ -35,10 +35,10 @@ Are you an AI agent? Run the command above and follow what it prints. Install on
 Pasting an API key into an agent's env hands it to every prompt injection, rogue skill, and log line downstream. Sprott takes the key out of the agent's hands entirely:
 
 ```bash
-GITHUB_TOKEN=__sc__github__ sprott run -- gh pr list
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
 ```
 
-`__sc__github__` is a **phantom**: a placeholder the agent uses instead of the credential. Sprott's local proxy swaps it for the real token at the network edge, only toward that service's own hosts. The agent gets the API response, never the key. Sensitive calls pause until you approve them with a passkey tap (Touch ID, Windows Hello, or a security key).
+`__sprott__github__` is a **phantom**: a placeholder the agent uses instead of the credential. Sprott's local proxy swaps it for the real token at the network edge, only toward that service's own hosts. The agent gets the API response, never the key. Sensitive calls pause until you approve them with a passkey tap (Touch ID, Windows Hello, or a security key).
 
 ## Why
 
@@ -53,14 +53,14 @@ GITHUB_TOKEN=__sc__github__ sprott run -- gh pr list
 ```
 AI agent ──── sprott run -- gh pr list ────► Sprott proxy ── real token ──► api.github.com
  holds only                               (localhost)
- __sc__github__                                │
+ __sprott__github__                            │
                                                ├─ vault: sealed under your passkey;
                                                │  plaintext only in daemon memory
                                                └─ sensitive calls wait for your
                                                   passkey tap
 ```
 
-`sprott`, `sc` and `safeclaw` are the same binary; an install older than 1.5 has only `sc` until `sc upgrade` adds `sprott`. The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
+`sprott` is the binary; `sc` and `safeclaw` are links to it. A machine on 1.x moves to 2.0 by running the installer again, which moves `~/.safeclaw` to `~/.sprott`. The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
 
 Only traffic routed through `sprott run` is touched. A phantom sent anywhere else reaches the upstream as a literal string and fails with a clean 401: nothing to leak.
 
@@ -93,7 +93,7 @@ After the machine and agent are approved, unlock the vault with `sprott unlock`;
 
 ```bash
 sprott set HF_TOKEN --host huggingface.co   # prompts for the value; one passkey approval
-                                        # mints the phantom __sc__hf_token__
+                                        # mints the phantom __sprott__hf_token__
 ```
 
 Entered this way, the value never leaves your machine.
@@ -101,7 +101,7 @@ Entered this way, the value never leaves your machine.
 **4. Use it.** The agent puts the phantom where the credential belongs and routes the command through the proxy:
 
 ```bash
-HF_TOKEN=__sc__hf_token__ sprott run -- python train.py
+HF_TOKEN=__sprott__hf_token__ sprott run -- python train.py
 ```
 
 Full walkthrough: [docs/quickstart.md](docs/quickstart.md).
@@ -121,7 +121,7 @@ Account       sprott agent · sprott device · sprott passkey · sprott vault
 Maintenance   sprott unlock · lock · sync · logs · doctor · upgrade · proxy · op
 ```
 
-`sprott --help` shows the grouped list; `sprott <cmd> --help` for details. Ports default to `23293` (control) and `23294` (the proxy `sprott run` routes through); state lives under `~/.safeclaw/`.
+`sprott --help` shows the grouped list; `sprott <cmd> --help` for details. Ports default to `23293` (control) and `23294` (the proxy `sprott run` routes through); state lives under `~/.sprott/`.
 
 ## FAQ
 
