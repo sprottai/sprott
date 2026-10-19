@@ -30,7 +30,7 @@ product name, such as `claude-code` or `codex`.
 anything, and the command to run next:
 
 ```
-To pair this machine, open this link and enter the code:
+To pair this machine, open this link on a device with your passkey and enter the code:
   https://app.sprott.ai/pair
   Code: 4821-0937-5563 (expires in about 15 minutes)
 Next: sc setup --name codex --wait
