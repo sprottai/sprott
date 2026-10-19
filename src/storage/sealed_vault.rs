@@ -335,7 +335,7 @@ pub struct StoredItem {
     /// `None` = unknown (the keep-both rule applies as is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// Written by SafeClaw's automatic upgrade of this vault (the legacy-row
+    /// Written by Sprott's automatic upgrade of this vault (the legacy-row
     /// migration), not by a person: a conflict on it pauses the upgrade,
     /// which retries. Local bookkeeping only (never sent).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2657,26 +2657,6 @@ impl PerItemVault {
         crate::identity::verify(&pub32, &crate::identity::vault_tombstone_input(vault_id), &sig)
     }
 
-    /// The `us_…` ids this keyset seats under one of THIS device's own passkeys:
-    /// entries keyed by a credential id that has a WebAuthn pubkey in the registry
-    /// (the membership triple keys only the caller's own member under its cids;
-    /// other members sit under their `us_…`), excluding every credential the
-    /// membership served as another member's approval material
-    /// ([`KeysetUik::approver_cids`]): an admin's passkey in the registry never
-    /// makes the admin "own". The fallback requester identity when the pairing
-    /// carries no account UIK.
-    pub(crate) fn own_identities(&self) -> std::collections::BTreeSet<String> {
-        let Some(uik) = self.keyset.uik.as_ref() else {
-            return Default::default();
-        };
-        uik.creds
-            .iter()
-            .filter(|(cid, _)| !uik.approver_cids.contains_key(*cid))
-            .filter(|(cid, _)| find_pubkey_in_registry(&self.keyset.registry, cid).is_some())
-            .map(|(_, c)| c.user_id.clone())
-            .collect()
-    }
-
     /// Adopt another member's passkey served as approval-verification material
     /// (`approver: true`): its WebAuthn pubkey into the registry (so an
     /// assertion by it verifies) and `cid → identity_id` into
@@ -3427,7 +3407,7 @@ impl PerItemVault {
         changed
     }
 
-    /// Mark the row at `iid` as written by SafeClaw's automatic upgrade.
+    /// Mark the row at `iid` as written by Sprott's automatic upgrade.
     fn mark_upgrade(&mut self, iid: &str) {
         if let Some(s) = self.items.get_mut(iid) {
             s.upgrade = true;
@@ -7582,7 +7562,7 @@ pub(crate) mod tests {
             pv.items[&ai_id].version, ai_version,
             "a native key keeps its record"
         );
-        // Each copy is marked as written by SafeClaw's automatic upgrade.
+        // Each copy is marked as written by Sprott's automatic upgrade.
         assert!(copies.iter().all(|id| pv.items[id].upgrade));
         assert!(!pv.items[&ai_id].upgrade);
         for field in [
@@ -8588,26 +8568,4 @@ pub(crate) mod tests {
         assert_eq!(pv.identity_sig_pub("v", "us_me"), None);
     }
 
-    /// The requester fallback: identities seated under a passkey this device
-    /// holds (a registry pubkey), never another member's `us_…`-keyed entry.
-    #[test]
-    fn own_identities_are_the_registry_keyed_entries() {
-        use crate::crypto::vault_key::UikRoot;
-        use crate::storage::plaintext::MemberRole;
-        let (_vault, _a, b_id, _c, mut pv) = authority_fixture();
-        assert!(pv.own_identities().is_empty(), "no entry under a registered passkey");
-        let me = UikRoot::from_root([0x22u8; 32]);
-        // build_initial registered passkey b"c" (url-safe "Yw").
-        pv.set_uik_cred(
-            "Yw".into(),
-            b_id.clone(),
-            me.signing().public_bytes().to_vec(),
-            vec![9u8; 32],
-            vec![1u8; 40],
-            vec![2u8; 40],
-            MemberRole::Member,
-            Vec::new(),
-        );
-        assert_eq!(pv.own_identities(), ids(&[&b_id]));
-    }
 }

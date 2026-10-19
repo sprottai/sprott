@@ -747,7 +747,7 @@ pub async fn principal_ledger_loop(state: Arc<AppState>) {
             ),
             DeviceGate::AccountMissing => tracing::warn!(
                 code = "device_not_admitted",
-                "principal ledger: this device is no longer paired with a SafeClaw account; run `sc login`"
+                "principal ledger: this device is no longer paired with a Sprott account; run `sc login`"
             ),
             DeviceGate::Stale => tracing::warn!(
                 code = "ledger_stale",
@@ -841,7 +841,7 @@ pub async fn authorize_agent(
 }
 
 /// The refusal for a request with no verified agent identity.
-pub const NO_AGENT_IDENTITY_MSG: &str = "this request carries no SafeClaw agent identity. Run the \
+pub const NO_AGENT_IDENTITY_MSG: &str = "this request carries no Sprott agent identity. Run the \
      agent through `sc run`, or set it up with `sc agent add`";
 
 #[cfg(test)]

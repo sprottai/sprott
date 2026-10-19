@@ -49,7 +49,7 @@ convention for the current authenticated principal's resources is `/me/…` — 
 (`GET /me`, `/me/messages`), Spotify (`GET /me`, `/me/tracks`), Google (`users/me`), X
 (`/2/users/me`), Atlassian (`/myself`). GitHub's variant is `/user` (singular). NO major API uses
 `/my/`. `account/` is reserved for the account ENTITY (billing/settings), not the personal inbox.
-Since a SafeClaw account is 1:1 with a person, `/api/me/*` is the single current-user namespace and
+Since a Sprott account is 1:1 with a person, `/api/me/*` is the single current-user namespace and
 the existing `/api/account/*` routes (billing/daemon-status/trial) migrate onto it.
 
 ### Account-level "what needs me" — all under `/api/me/*`, symmetric

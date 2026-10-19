@@ -41,7 +41,7 @@ label = "Delete a Cloud Storage bucket (loses all its objects)"
 match = "DELETE /storage/v1/b/*"
 level = "ask-always"
 
-# ── Mint a service-account KEY (a durable credential SafeClaw never sees) ──────
+# ── Mint a service-account KEY (a durable credential Sprott never sees) ──────
 # A downloadable SA key is a direct end-run around credential separation — the
 # agent minting one escapes the broker. Rare, so gating it costs nothing daily.
 [[rule]]

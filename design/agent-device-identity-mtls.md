@@ -331,7 +331,7 @@ host, realized as a DIK-signed request — the app-layer equivalent).
 > never in the prompt.
 - The agent-run prompt is ~unchanged (pair device [skip if paired] · `sc agent add` mints the
   identity env · persist skill + instructions · don't test). Only wording tweak: "three
-  SAFECLAW_* dotenv lines" → "your complete SafeClaw env" (now includes the identity-file path).
+  SAFECLAW_* dotenv lines" → "your complete Sprott env" (now includes the identity-file path).
 - **Authorization is Console-side, NOT in the prompt.** Which vault(s) an agent lands on = which
   entry the user used (§11.3); the Console performs the UIK-signed write automatically when it
   detects the new agent in the roster (poll). The hard-won prompt stays lean.

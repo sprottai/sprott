@@ -1,6 +1,6 @@
 # Service TOML reference (v4)
 
-This page explains how to write a SafeClaw service definition. Design rationale lives in
+This page explains how to write a Sprott service definition. Design rationale lives in
 [credential-broker.md](https://github.com/getsafeclaw/safeclaw/blob/main/design/credential-broker.md); this page is the authoring
 reference only.
 
@@ -41,7 +41,7 @@ names the service registry, which is not open yet.
 
 How it works:
 
-- **Third-party.** A service added from a source is installed: SafeClaw does
+- **Third-party.** A service added from a source is installed: Sprott does
   not review it. A vault loads installed services only while its owner turns
   them on (console: Settings → Services); while off, `add` and `update` are
   refused, `sc service ls` shows them skipped, and connections that use them

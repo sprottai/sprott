@@ -1,4 +1,4 @@
-# SafeClaw hero demo, rendered with vhs (https://github.com/charmbracelet/vhs):
+# Sprott hero demo, rendered with vhs (https://github.com/charmbracelet/vhs):
 #
 #     vhs demo/demo.tape
 #

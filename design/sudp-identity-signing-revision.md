@@ -15,7 +15,7 @@ SUDP 今天是一套**全对称**的、cloud-blind、server-authoritative、per-
 
 - **密钥链（全对称）**：`y_c(passkey PRF 输出) → W_c = HKDF(y_c; salt=prf_salt; info=DS_WRAP‖cid‖ver) → K̂_c = Wrap_{W_c}(K) → K 密封 M`。（protocol.md §2.2；`primitives/kdf.rs:52`、`primitives/wrap.rs`。）
 - **K**：每 vault 一把，**永不在活 id 下轮换**（sync.md §1 铁律，防「daemon 持 K 打不开 blob」的分叉）；delete+recreate 换新 id。`ver: u16`。
-- **SealedState** = `{version, registry(cid→WebAuthn pubkey), credentials[], ciphertext}`；明文视图 **M = ProtectedState** = `{secrets, authenticators(cid→W_c), aux(不透明 JSON)}`。SafeClaw 的 vault 模型全塞在 `aux` 里。（`state/sealed.rs`、`state/protected.rs`。）
+- **SealedState** = `{version, registry(cid→WebAuthn pubkey), credentials[], ciphertext}`；明文视图 **M = ProtectedState** = `{secrets, authenticators(cid→W_c), aux(不透明 JSON)}`。Sprott 的 vault 模型全塞在 `aux` 里。（`state/sealed.rs`、`state/protected.rs`。）
 - **AEAD** = XChaCha20-Poly1305（24B nonce、16B tag）；body 封装 AAD = `DS_SEAL‖ver_be`（nonce 前置**不进 AAD**）。
 - **per-item v3（已建/cutover 中）**：`item_id = HMAC(K_id, lp(ns)‖lp(name))`，`K_id=HKDF(K,…,"safeclaw/item-id/v1")`；`seal_record` 的 AAD = `suite‖lp(DS_ITEM)‖lp(domain)‖lp(vault)‖lp(id)‖lp(version)`（**version 已绑进 AAD**，但 crate 明说 AAD 不防回滚，回滚由 caller 单调版本管）。**`ItemPayload={ns,name,status,body}` 整个在密文里**（云连 tombstone 都分不出）；只有单向 HMAC 的 `item_id` 明文。（`storage/item.rs`、`state/record.rs`。）
 - **wire 明文字段**：whole-blob `{vid, version(云盖章、单调), status, blob}`；per-item `vault_items{item_id, version(写者定、CAS 单调), seq(云游标), ct}`、`vault_keys{cid, data=keyset}`（**keyset 云可见 by design**，它是给你 K 的东西、不被 K 密封；`data` 里已含 `x25519_pub`）。
@@ -113,9 +113,9 @@ cloud-blind、terminal-state 同步(非 oplog)、per-item 密封、tombstone、C
 
 ---
 
-## B. 代码修改规格（**改动全在 SafeClaw core / backend；sudp core crate 不动**；没时间充分测试，故按「先隔离可测、再接线」排）
+## B. 代码修改规格（**改动全在 Sprott core / backend；sudp core crate 不动**；没时间充分测试，故按「先隔离可测、再接线」排）
 
-> **边界（与顶部一致，重要）**：下列改动**全部落在 SafeClaw core / backend（sudp crate 之上）**，**sudp core crate 保持不动**——它继续只当「seal + wrap + grant」的通用 codec。依据：sudp = 「AEAD codec only」，record 的 id/type/payload/status 本就在 core（`storage/item.rs` 的 `ItemPayload/ItemNs/StoredItem`）；`custody→UIK→K` 由 **core 经 UIK 产出 wrapping key**，sudp 仍只见「K + 一把 wrapping key」；团队「K 封给成员 UIK」走 backend `vault_keys`（本就云可见、core 管）。B1 的身份签名原语放 **core / 独立 crate，不进 sudp core crate**。（若最终发现某处非改 sudp 不可，必须是**通用**添加、且在此显式记录理由——默认不碰。）
+> **边界（与顶部一致，重要）**：下列改动**全部落在 Sprott core / backend（sudp crate 之上）**，**sudp core crate 保持不动**——它继续只当「seal + wrap + grant」的通用 codec。依据：sudp = 「AEAD codec only」，record 的 id/type/payload/status 本就在 core（`storage/item.rs` 的 `ItemPayload/ItemNs/StoredItem`）；`custody→UIK→K` 由 **core 经 UIK 产出 wrapping key**，sudp 仍只见「K + 一把 wrapping key」；团队「K 封给成员 UIK」走 backend `vault_keys`（本就云可见、core 管）。B1 的身份签名原语放 **core / 独立 crate，不进 sudp core crate**。（若最终发现某处非改 sudp 不可，必须是**通用**添加、且在此显式记录理由——默认不碰。）
 
 **B1. crate 新原语(隔离、可黄金向量化,先做)**
 - 加 **Ed25519 sign/verify** 与 `Principal`/`IdentityKey` 类型(签名身份);今天 crate 只有 WebAuthn**验**、无通用签名。

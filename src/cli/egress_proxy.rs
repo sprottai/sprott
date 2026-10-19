@@ -1,5 +1,5 @@
 //! Device-level EGRESS proxy: the ONE upstream HTTP proxy that BOTH the daemon
-//! and this CLI use to reach every remote host — the SafeClaw backend (pairing,
+//! and this CLI use to reach every remote host — the Sprott backend (pairing,
 //! `sc agent`, sync), third-party OAuth code/refresh exchanges, the resident MITM
 //! proxy's forward hop, and `sc upgrade`'s GitHub fetch. Only loopback is exempt
 //! (pinned into `NO_PROXY` by `proxy_env::pin_localhost_no_proxy`); every other
@@ -10,7 +10,7 @@
 //! shell `HTTPS_PROXY`, and both unit generators whitelist only `SAFECLAW_*`, so
 //! a `$HTTPS_PROXY` set in a terminal never reaches the long-running daemon.
 //! Agents behind a corporate/on-demand proxy (and users in regions that can only
-//! reach the SafeClaw backend through a proxy) therefore need a persisted,
+//! reach the Sprott backend through a proxy) therefore need a persisted,
 //! device-level value the daemon — and every short-lived `sc` command — can read
 //! on its own, without depending on the current shell.
 //!
@@ -124,7 +124,7 @@ pub fn apply_to_env() {
             std::env::set_var(key, &url);
         }
     }
-    // NB: we do NOT pin the SafeClaw backend into NO_PROXY. A configured proxy
+    // NB: we do NOT pin the Sprott backend into NO_PROXY. A configured proxy
     // applies to every remote host (backend included) — the mainstream
     // convention, and the only behaviour that works for operators who can reach
     // us *only* through a proxy. Loopback stays direct via

@@ -23,6 +23,6 @@ secret_url = "https://linear.app/settings/api"
 # NOTE (policy): no policy.toml yet. Linear's whole API is one GraphQL endpoint
 # (POST /graphql), so danger has to be matched by mutation name in the request
 # body (the pattern railway/policy.toml uses). Those mutation names need to come
-# from live schema introspection, not memory — per SafeClaw's "ground truth, not
+# from live schema introspection, not memory — per Sprott's "ground truth, not
 # guessed" rule the policy is deferred rather than approximated. Runs on the
 # global allow floor until a verified policy is written.

@@ -1,6 +1,6 @@
 # Policy: 审批策略 (per-action decisions)
 
-This page describes SafeClaw's per-action policy levels and how the policy engine evaluates them.
+This page describes Sprott's per-action policy levels and how the policy engine evaluates them.
 
 > 状态:**已实现 (safeclaw v0.9.2)**。源码即权威:`src/core/policy.rs`(类型 + 求值)、
 > `src/service/mod.rs`(recipe 解析)、`src/storage/plaintext.rs`(`VaultAux.policy`)。
@@ -32,7 +32,7 @@ This page describes SafeClaw's per-action policy levels and how the policy engin
 | `ask-always` | 每次都审批,永不缓存 |
 | `deny` | 无条件拦截 |
 
-**deny 从不做出厂默认**:SafeClaw 是 gate 非 block。recipe/用户显式把某条 rule 设成 `deny`
+**deny 从不做出厂默认**:Sprott 是 gate 非 block。recipe/用户显式把某条 rule 设成 `deny`
 才会拦截。
 
 ## 3. Recipe `policy.toml` 格式

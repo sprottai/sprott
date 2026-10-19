@@ -101,7 +101,7 @@ pub struct CliConfig {
     /// (the `account_id` above is the Supabase UUID, NOT the anchor). Self-certifying:
     /// `derive_id(User, uik_pub) == account_uik`. Delivered + pinned at pairing; the
     /// daemon verifies the ledger anchor + its own per-vault membership against it.
-    /// Absent on an older backend / pre-UIK account (the ledger loop then doesn't run).
+    /// Absent only when this daemon is not paired to a cloud account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_uik: Option<String>,
     /// The account owner's UIK signing key (raw 32 bytes, base64url), pinned at
@@ -398,8 +398,8 @@ pub fn put_cloud_coords(
     daemon: &str,
     cloud_backend: &str,
     frontend_origin: Option<&str>,
-    account_id: Option<&str>,
-    account_uik: Option<&str>,
+    account_id: &str,
+    account_uik: &str,
 ) -> Result<PathBuf, String> {
     let mut cfg = load().unwrap_or_default();
     cfg.daemon = Some(daemon.to_string());
@@ -410,12 +410,8 @@ pub fn put_cloud_coords(
         .map(|s| s.trim_end_matches('/').to_string());
     // §15: persist the paired account UUID (reference) + the owner-UIK us_ (the
     // real, self-certifying principal-ledger anchor).
-    let (id, uik) = merge_account(
-        cfg.account_id.as_deref(),
-        cfg.account_uik.as_deref(),
-        account_id,
-        account_uik,
-    );
+    let id = Some(account_id.to_string());
+    let uik = Some(account_uik.to_string());
     if uik != cfg.account_uik {
         cfg.account_uik_pub = None; // a pinned key belongs to the previous account
     }
@@ -429,53 +425,28 @@ fn nonempty(s: Option<&str>) -> Option<&str> {
 }
 
 /// Is the account in a pairing response (`new_id` / `new_uik`) a DIFFERENT
-/// account from the one this machine is paired to (`prior_*`)? Only a positive
-/// mismatch on a field both sides carry counts: an unpaired machine, or a
-/// response that omits a field, is not a switch.
+/// account from the one this machine is paired to (`prior_*`)? An unpaired
+/// machine is not a switch.
 pub fn is_other_account(
     prior_id: Option<&str>,
     prior_uik: Option<&str>,
-    new_id: Option<&str>,
-    new_uik: Option<&str>,
+    new_id: &str,
+    new_uik: &str,
 ) -> bool {
-    let differs = |a: Option<&str>, b: Option<&str>| match (nonempty(a), nonempty(b)) {
-        (Some(a), Some(b)) => a != b,
-        _ => false,
-    };
-    differs(prior_id, new_id) || differs(prior_uik, new_uik)
+    nonempty(prior_id).is_some_and(|prior| prior != new_id)
+        || nonempty(prior_uik).is_some_and(|prior| prior != new_uik)
 }
 
 /// Is this machine currently paired to an account OTHER than
 /// (`account_id`, `account_uik`)? `sc login` to a different account switches the
 /// machine to it and starts clean (see `cli::logout::wipe_local_account_state`).
-pub fn paired_to_other_account(account_id: Option<&str>, account_uik: Option<&str>) -> bool {
+pub fn paired_to_other_account(account_id: &str, account_uik: &str) -> bool {
     let cfg = load().unwrap_or_default();
     is_other_account(
         cfg.account_id.as_deref(),
         cfg.account_uik.as_deref(),
         account_id,
         account_uik,
-    )
-}
-
-/// The `(account_id, account_uik)` to persist after a pairing. Re-pairing the
-/// SAME account keeps a prior value the response omits (older backend /
-/// pre-UIK account). Pairing a DIFFERENT account takes the response as-is, so
-/// the old account's pinned UIK / id never survive into the new pairing.
-fn merge_account(
-    prior_id: Option<&str>,
-    prior_uik: Option<&str>,
-    new_id: Option<&str>,
-    new_uik: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let (keep_id, keep_uik) = if is_other_account(prior_id, prior_uik, new_id, new_uik) {
-        (None, None)
-    } else {
-        (nonempty(prior_id), nonempty(prior_uik))
-    };
-    (
-        nonempty(new_id).or(keep_id).map(str::to_string),
-        nonempty(new_uik).or(keep_uik).map(str::to_string),
     )
 }
 
@@ -487,8 +458,8 @@ pub fn account_id() -> Option<String> {
 }
 
 /// The account's owner-UIK id (`us_…`) captured at pairing — the §15 principal-ledger
-/// ANCHOR + the daemon's own per-vault member identity. `None` on an older backend /
-/// pre-UIK account (the ledger loop then doesn't start; membership-loss wipe is skipped).
+/// ANCHOR + the daemon's own per-vault member identity. `None` when this daemon is not
+/// paired to a cloud account.
 pub fn account_uik() -> Option<String> {
     load().ok()?.account_uik.filter(|s| !s.is_empty())
 }
@@ -550,18 +521,22 @@ pub fn frontend_origin() -> Option<String> {
     Some(derive_frontend_from_backend(backend))
 }
 
-/// Where console pages are linked for this pairing: the `app.` host of a
-/// SafeClaw console (whichever form was stored at `sc login`), otherwise the
-/// stored origin. [`frontend_origin`] stays the stored value (it selects the
-/// passkey relying party).
+/// Where console pages are linked for this pairing: `https://app.<new root>`
+/// for a first-party console on either root of a pair (whichever form was
+/// stored at `sc login`; a legacy root maps to its new root here, at read
+/// time), otherwise the stored origin. [`frontend_origin`] stays the stored
+/// value (it selects the passkey relying party), and nothing rewrites it on
+/// disk, so an older binary reading the same config behaves as before.
 pub fn console_origin() -> Option<String> {
     frontend_origin().map(|o| crate::passkey::webauthn::console_link_origin(&o))
 }
 
 /// The console origin for a cloud backend URL, before any pairing is stored
 /// (`sc login`): the backend's frontend (`api.` dropped), at its console link
-/// host. The backend comes from the first-party allowlist / pinned config,
-/// never from a server response, so this is the origin `sc` pins for pairing.
+/// host (`https://app.<new root>` for either root of a pair). The backend
+/// comes from the first-party allowlist / pinned config, never from a server
+/// response, so this is the origin `sc` pins for pairing (the SPAKE2 identity,
+/// matching the console's `pairingOrigin` on that host).
 pub fn console_origin_for_backend(backend: &str) -> String {
     crate::passkey::webauthn::console_link_origin(&derive_frontend_from_backend(backend))
 }
@@ -580,7 +555,7 @@ pub fn grant_url(op_id: &str) -> String {
     }
 }
 
-/// `https://api.dev.safeclaw.pro` → `https://dev.safeclaw.pro`. Only strips a
+/// `https://api.dev.sprott.ai` → `https://dev.sprott.ai`. Only strips a
 /// leading `api.` on the host; everything else (scheme, port, path) is kept.
 /// A backend host without an `api.` prefix is returned unchanged (self-host
 /// where frontend == backend).
@@ -635,7 +610,7 @@ fn scheme_host(url: &str) -> Option<String> {
 }
 
 /// The agent's broker-face URL from the env: `$SAFECLAW_BROKER_URL` (the
-/// self-describing name, SafeClaw's broker/API face, not the control port).
+/// self-describing name, Sprott's broker/API face, not the control port).
 /// Empty values are ignored.
 pub fn env_broker_url() -> Option<String> {
     std::env::var("SAFECLAW_BROKER_URL")
@@ -1036,12 +1011,12 @@ mod tests {
     #[test]
     fn derive_frontend_strips_api_label() {
         assert_eq!(
-            derive_frontend_from_backend("https://api.dev.safeclaw.pro"),
-            "https://dev.safeclaw.pro"
+            derive_frontend_from_backend("https://api.dev.sprott.ai"),
+            "https://dev.sprott.ai"
         );
         assert_eq!(
-            derive_frontend_from_backend("https://api.safeclaw.pro/"),
-            "https://safeclaw.pro"
+            derive_frontend_from_backend("https://api.sprott.ai/"),
+            "https://sprott.ai"
         );
         // No api. prefix (self-host) → unchanged.
         assert_eq!(
@@ -1055,61 +1030,30 @@ mod tests {
         );
     }
 
-    /// Re-pairing the SAME account keeps today's behavior: a field the response
-    /// omits keeps its prior value. Pairing a DIFFERENT account never carries
-    /// the old account's id / pinned UIK over, even when the response omits one.
     #[test]
-    fn merge_account_clears_old_account_on_switch() {
-        let s = |v: &str| Some(v.to_string());
-        // same account, full response
-        assert_eq!(
-            merge_account(Some("a"), Some("us_a"), Some("a"), Some("us_a")),
-            (s("a"), s("us_a"))
-        );
-        // same account, response omits the UIK → keep the pinned one
-        assert_eq!(
-            merge_account(Some("a"), Some("us_a"), Some("a"), None),
-            (s("a"), s("us_a"))
-        );
-        assert_eq!(
-            merge_account(Some("a"), Some("us_a"), Some("a"), Some("")),
-            (s("a"), s("us_a"))
-        );
-        // different account, response omits the UIK → the old UIK is dropped
-        assert_eq!(
-            merge_account(Some("a"), Some("us_a"), Some("b"), None),
-            (s("b"), None)
-        );
-        // different account by UIK alone (id omitted) → the old id is dropped
-        assert_eq!(
-            merge_account(Some("a"), Some("us_a"), None, Some("us_b")),
-            (None, s("us_b"))
-        );
-        // first pairing
-        assert_eq!(
-            merge_account(None, None, Some("b"), Some("us_b")),
-            (s("b"), s("us_b"))
-        );
+    fn either_root_of_a_pair_links_to_the_new_root() {
+        let prod = "https://app.sprott.ai";
+        let dev = "https://app.dev.sprott.ai";
+        for (backend, link) in [
+            ("https://api.sprott.ai", prod),
+            ("https://sprott.ai", prod),
+            ("https://api.dev.sprott.ai/", dev),
+            ("https://api.safeclaw.pro", prod),     // rename:keep
+            ("https://safeclaw.pro/", prod),        // rename:keep
+            ("https://api.dev.safeclaw.pro", dev),  // rename:keep
+            ("https://api.example.com", "https://example.com"),
+            ("http://localhost:8787", "http://localhost:8787"),
+        ] {
+            assert_eq!(console_origin_for_backend(backend), link, "{backend}");
+        }
     }
 
     #[test]
     fn other_account_needs_a_positive_mismatch() {
-        assert!(is_other_account(Some("a"), None, Some("b"), None));
-        assert!(is_other_account(None, Some("us_a"), None, Some("us_b")));
-        assert!(!is_other_account(
-            Some("a"),
-            Some("us_a"),
-            Some("a"),
-            Some("us_a")
-        ));
-        // unpaired machine, or nothing comparable in the response: not a switch
-        assert!(!is_other_account(None, None, Some("b"), Some("us_b")));
-        assert!(!is_other_account(Some("a"), None, None, Some("us_b")));
-        assert!(!is_other_account(
-            Some(""),
-            Some(""),
-            Some("b"),
-            Some("us_b")
-        ));
+        assert!(is_other_account(Some("a"), Some("us_a"), "b", "us_b"));
+        assert!(is_other_account(Some("a"), Some("us_a"), "a", "us_b"));
+        assert!(!is_other_account(Some("a"), Some("us_a"), "a", "us_a"));
+        assert!(!is_other_account(None, None, "b", "us_b"));
+        assert!(!is_other_account(Some(""), Some(""), "b", "us_b"));
     }
 }

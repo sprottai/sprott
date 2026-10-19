@@ -19,6 +19,6 @@ secret_url = "https://app.netlify.com/user/applications#personal-access-tokens"
 
 # NOTE (policy): no policy.toml yet. Netlify's destructive endpoints (delete a
 # site, delete a deploy, rotate build hooks) were not verified against the API
-# reference at add time, so per SafeClaw's "ground truth, not guessed" rule the
+# reference at add time, so per Sprott's "ground truth, not guessed" rule the
 # danger rules are deliberately omitted rather than approximated. The service
 # runs on the global allow floor until a verified policy is written.

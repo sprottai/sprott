@@ -501,7 +501,7 @@ async fn local_ceremony(
     if keyset.uik.is_none() {
         return Err(
             "this vault has no identity key on this machine, so it can't be approved here; \
-             approve it in the SafeClaw console (pair this machine with `sc login`)"
+             approve it in the Sprott console (pair this machine with `sc login`)"
                 .into(),
         );
     }
@@ -610,7 +610,7 @@ pub(crate) fn build_local_grant(
         .find(|c| c.credential_id == cred_id_raw)
         .map(|c| c.wrapped_key.clone())
         .ok_or(
-            "this passkey's identity key isn't held on this machine; approve in the SafeClaw \
+            "this passkey's identity key isn't held on this machine; approve in the Sprott \
              console (pair this machine with `sc login`)",
         )?;
     let root = crate::crypto::vault_key::unwrap_uik_root(w_c, cred_id_raw, &wrapped_root)
@@ -667,7 +667,7 @@ async fn fetch_keyset(
         .map_err(|e| format!("keyset: {}", e))?;
     if !resp.status().is_success() {
         return Err(format!(
-            "this vault's keys aren't on this machine (HTTP {}); approve it in the SafeClaw console",
+            "this vault's keys aren't on this machine (HTTP {}); approve it in the Sprott console",
             resp.status()
         ));
     }

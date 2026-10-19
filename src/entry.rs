@@ -30,7 +30,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
     // process's env before any client is built — the launchd/systemd daemon does
     // not inherit the operator's shell `HTTPS_PROXY`, so this is how the daemon's
     // backend sync, OAuth exchange, and MITM forward reach a corporate/on-demand
-    // or region-required upstream. It covers every remote host (the SafeClaw
+    // or region-required upstream. It covers every remote host (the Sprott
     // backend included, so `sc agent`/`sc login`/sync all honour it); a real
     // shell `HTTPS_PROXY` still wins, and only loopback stays direct.
     cli::egress_proxy::apply_to_env();
@@ -102,7 +102,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         Command::Pubkey(args) => cli::custodian::pubkey(args).await.map_err(daemon_err),
         Command::Registry(_args) => cli::custodian::registry(json).map_err(daemon_err),
         Command::Up => {
-            // `sc up` = make SafeClaw ready: ensure the daemon is running, then
+            // `sc up` = make Sprott ready: ensure the daemon is running, then
             // ensure the vault is unlocked (the single auto-unlock chokepoint;
             // see cli/up.rs). login / upgrade-restart / agent lazy-start all
             // route through here, so the user never runs a bare "unlock".
@@ -355,7 +355,7 @@ async fn run_daemon(
     // browser. Best-effort — a local-only or offline daemon serves whatever
     // vault.dat is already on disk.
     // Record this build's team-serve identity so the sync path can leave SHARED
-    // (team) vaults to the official SafeClaw build. A no-op for the official build
+    // (team) vaults to the official Sprott build. A no-op for the official build
     // (which serves team, so nothing is filtered). team-edition §9.
     crate::team_hooks::init_serves_shared(hooks.serves_shared_vaults());
     crate::sync::pull_on_start(&config.state_dir).await;
@@ -434,7 +434,7 @@ async fn run_daemon(
     tracing::info!(
         listen = %addr,
         state_dir = %config.state_dir.display(),
-        rp_id = %config.relying_party.rp_id,
+        rp_ids = %config.relying_party.rp_ids.join(","),
         webauthn_origins = %config.relying_party.origins.join(","),
         origin = %config.origin,
         "safeclaw daemon starting"

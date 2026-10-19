@@ -4,7 +4,7 @@
 **Builds on**: [services.md](../docs/reference/services.md) v2
 **Supersedes**: `SOURCE_ABSTRACTION.md` (stub)
 
-This document is the canonical specification for SafeClaw's stores/items
+This document is the canonical specification for Sprott's stores/items
 abstraction. The design was converged through a multi-round discussion
 under the constraint of **minimum complexity**:
 
@@ -19,9 +19,9 @@ under the constraint of **minimum complexity**:
 
 ## 1. Why this exists
 
-SafeClaw v2 hardcodes the user's SafeClaw vault as the only place a
+Sprott v2 hardcodes the user's Sprott vault as the only place a
 credential can live. Real users keep credentials in 3–10 places: the
-SafeClaw vault (personal), 1Password (company shared), GCP / AWS Secret
+Sprott vault (personal), 1Password (company shared), GCP / AWS Secret
 Manager (production), etc. Dev branch already has a working file vault
 for blob-typed credentials (PEMs, SA JSON) but it's not exposed through
 a uniform abstraction.
@@ -353,7 +353,7 @@ bot_token = "{{telegram_bot_token}}"
 # Used with url = "https://api.telegram.org/:bot_token"
 
 [upstream.locked]                          # Existing — unchanged
-response = "Please unlock the SafeClaw vault to use this service."
+response = "Please unlock the Sprott vault to use this service."
 
 [upstream.auth]                            # Reserved for stateful auth
 provider = "oauth2"                        # currently the only supported value
@@ -494,7 +494,7 @@ new store and deletes from the old.
   reference OAuth-managed entries via the same `{{X}}` syntax.
 - **Cross-store policy** ("auto-approve OpenAI ≤10/hr, always ask
   Stripe"). Belongs in the policy DSL.
-- **Adapter-side writes**. SafeClaw reads from external stores. Writes
+- **Adapter-side writes**. Sprott reads from external stores. Writes
   go through each provider's own UI (deeplink from the store browser).
 - **Caching**. Every resolve hits the store. External adds 50–300ms;
   acceptable for pre-launch volumes.
@@ -569,7 +569,7 @@ compat via the version handshake.
 
 ## 16. Security considerations
 
-- **Trust root**: SafeClaw vault remains the trust root. All external-
+- **Trust root**: Sprott vault remains the trust root. All external-
   store credentials are items in `native-secrets`, encrypted under the
   user's passkey. An attacker with the encrypted vault file cannot
   decrypt store credentials without the passkey.
@@ -579,7 +579,7 @@ compat via the version handshake.
 - **Per-request approval preserved**: stores/items change the
   *physical fetch path* only. The passkey-signed approval at the moment
   of action is unchanged.
-- **Network surface**: connecting an external store means SafeClaw makes
+- **Network surface**: connecting an external store means Sprott makes
   outbound calls to that provider on every relevant broker request —
   observable to the provider. Document in the Connect-store dialog.
 - **Source-side audit**: external stores have their own audit logs;
@@ -616,7 +616,7 @@ Things I decided but flagged for re-review:
 | Adapter | Code implementing a store kind |
 | Kind | Adapter discriminator (`native-secrets`, `gcp-secret-manager`, ...) |
 | Category | `value` or `file` — fixes item shape; declared by adapter |
-| Native | A store whose backing is SafeClaw's own storage (`native-*`) |
+| Native | A store whose backing is Sprott's own storage (`native-*`) |
 | `store_order` | Priority list determining resolution order across stores |
 
 ---

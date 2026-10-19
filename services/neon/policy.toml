@@ -1,7 +1,7 @@
 # Neon policy. The key never enters the agent and egress is host-anchored. A Neon
 # project IS a database, so a delete here destroys data, not just config — every
 # delete is gated. Minting an API key is also gated: it's a durable credential
-# SafeClaw never sees, a direct end-run around credential separation. Routine
+# Sprott never sees, a direct end-run around credential separation. Routine
 # reads and creates ride the floor. Each rule is a per-connection console toggle.
 #
 # Paths are relative to host console.neon.tech (base /api/v2). Single `*` = one

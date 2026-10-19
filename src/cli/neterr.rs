@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn with_proxy_hint_only_on_reachability_and_not_twice() {
         // Reach failure → hint appended.
-        let m = with_proxy_hint("reach https://api.safeclaw.pro: connection refused");
+        let m = with_proxy_hint("reach https://api.sprott.ai: connection refused");
         assert!(m.contains("sc proxy set"));
         // Already carries the knob → left alone (no double hint).
         assert_eq!(

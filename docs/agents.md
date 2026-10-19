@@ -10,7 +10,7 @@ This page explains agent identities, the setup commands that create them, and ho
 | `sc agent add <name>` | Registers an agent and creates its identity and env file | A person at a terminal, or `sc setup` under the hood | Once per agent |
 | `sc setup --name <name>` | Runs whichever pairing or registration is still needed, then writes the env file, installs the skill, and asks for vault unlock | A person or their agent | First setup and safe to re-run |
 
-To SafeClaw, an agent is an **identity**, not a trust decision. Each agent
+To Sprott, an agent is an **identity**, not a trust decision. Each agent
 gets its own keypair; what any agent may *do* is decided elsewhere, by
 [policy](approvals.md), per action, at use time.
 

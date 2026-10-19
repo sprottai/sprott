@@ -1,6 +1,6 @@
 # Overview: the whole model on one page
 
-SafeClaw gives an agent the **use** of a credential without ever letting it
+Sprott gives an agent the **use** of a credential without ever letting it
 **hold** the credential.
 
 ![One brokered request, end to end: the agent holds only a phantom, the local broker resolves it, checks host and policy, and swaps in the real value at the last hop; the vault stays sealed under your passkey, and the cloud syncs only sealed data it cannot decrypt](assets/architecture.svg)
@@ -34,7 +34,7 @@ flow; sensitive ones pause until you approve them with a passkey tap, and one
 tap authorizes exactly one operation. The same passkey seals the vault
 itself: no password exists anywhere in the system.
 
-## What SafeClaw is not
+## What Sprott is not
 
 - **Not a machine-wide interceptor.** Only `sc run` traffic is brokered; the
   phantom is the only trigger.

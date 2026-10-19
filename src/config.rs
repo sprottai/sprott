@@ -42,7 +42,7 @@ pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
     // NOT bare `version` (= CARGO_PKG_VERSION): rc builds must self-report
     // their release tag here too, same as `sc status` / the custom prints.
     version = crate::build_version(),
-    about = "SafeClaw: passkey-gated credential broker"
+    about = "Sprott: passkey-gated credential broker"
 )]
 pub struct Cli {
     /// Target vault for this invocation (any subcommand, any position): an id, a
@@ -66,12 +66,12 @@ pub enum Command {
     /// Set up this machine and one agent without prompting. Re-run the command
     /// after completing each browser approval until it reports done.
     Setup(SetupArgs),
-    /// Install or remove the SafeClaw agent skill.
+    /// Install or remove the Sprott agent skill.
     Skill(SkillArgs),
-    /// Print SafeClaw's status: the daemon (running? version) and the active
+    /// Print Sprott's status: the daemon (running? version) and the active
     /// vault (which one, locked/unlocked, key count).
     Status(StatusArgs),
-    /// Get SafeClaw running and ready: install + start the daemon if needed,
+    /// Get Sprott running and ready: install + start the daemon if needed,
     /// then unlock the vault (one passkey tap). Idempotent — the everyday
     /// "make sure it's up" command (the `tailscale up` idiom; the skill's
     /// lazy-start). This is the single setup entrypoint after `sc login`.
@@ -151,7 +151,7 @@ pub enum Command {
     /// verify its sha256, and replace the running binary in place. No-op when
     /// already current. This is also how the baked cloud domain changes ship.
     Upgrade(UpgradeArgs),
-    /// Pair this host to your SafeClaw account: prints a short code and an
+    /// Pair this host to your Sprott account: prints a short code and an
     /// approval link; you approve in the browser, then this host gets its
     /// cloud-side daemon credential. Writes `~/.safeclaw/device-key` (0600). Run once per host (re-run to repair/re-pair).
     /// `sc login` then brings the daemon up and unlocks for you; `sc up` is the
@@ -177,7 +177,7 @@ pub enum Command {
     Rm(RmArgs),
     /// Run a command with the resident credential proxy pasted into its
     /// environment — the everyday, zero-human way an agent routes one command's
-    /// traffic through SafeClaw. `sc run -- <cmd…>` execs the child with the
+    /// traffic through Sprott. `sc run -- <cmd…>` execs the child with the
     /// proxy + CA env bundle merged in; `sc run --export-env` prints the same
     /// bundle as shell `export` lines for `eval "$(sc run --export-env)"`. No
     /// plaintext secret ever enters the child's env — the agent writes the
@@ -572,7 +572,7 @@ pub enum AgentSubcommand {
     Add(AgentAddArgs),
     /// List this account's agents (name, key prefix, last-used).
     Ls,
-    /// Remove an agent: prints the SafeClaw console page where the owner signs
+    /// Remove an agent: prints the Sprott console page where the owner signs
     /// the removal. Every device refuses the agent at its next ledger pull.
     Rm(AgentRmArgs),
 }
@@ -629,22 +629,22 @@ pub struct SkillArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SkillSubcommand {
-    /// Install or update the SafeClaw skill for agents on this machine.
+    /// Install or update the Sprott skill for agents on this machine.
     Install(SkillInstallArgs),
-    /// Remove the skill files previously written by SafeClaw.
+    /// Remove the skill files previously written by Sprott.
     Remove(SkillRemoveArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct SkillInstallArgs {
-    /// Replace a copy that was modified after SafeClaw installed it.
+    /// Replace a copy that was modified after Sprott installed it.
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct SkillRemoveArgs {
-    /// Remove a copy that was modified after SafeClaw installed it.
+    /// Remove a copy that was modified after Sprott installed it.
     #[arg(long)]
     pub force: bool,
 }
@@ -670,7 +670,7 @@ pub enum PasskeySubcommand {
     /// credential id, device name, transports, timestamps). No vault
     /// unlock or passkey gesture required.
     Ls(CommonArgs),
-    /// Add a passkey: prints the SafeClaw console page where passkeys are
+    /// Add a passkey: prints the Sprott console page where passkeys are
     /// enrolled (in the browser, where the identity key lives).
     Add(CommonArgs),
     /// Remove an enrolled passkey by credential id. NOT YET IMPLEMENTED.
@@ -710,7 +710,7 @@ pub enum VaultSubcommand {
     /// Remove a vault from the local known list (does NOT touch the
     /// daemon, for that use `sc vault rm`). Pass URL or index.
     Forget(VaultForgetArgs),
-    /// Create a new vault: prints the SafeClaw console page where vaults are
+    /// Create a new vault: prints the Sprott console page where vaults are
     /// created. The new vault syncs to this machine on its own.
     Create(VaultCreateArgs),
     /// Irreversibly delete a vault's daemon-side state. Passkey-gated
@@ -874,10 +874,10 @@ pub struct ServeArgs {
     /// WebAuthn relying party ID. Defaults to the host part of --origin
     /// (e.g. `custodian.example.com`), which is what 99% of deployments
     /// want. Override only for eTLD+1 sharing across subdomains. With
-    /// neither --origin nor --rp-id, a daemon paired with the SafeClaw
-    /// console (safeclaw.pro, dev.safeclaw.pro) accepts its root, `app.` and
-    /// `www.` origins under the root RP ID
-    /// (`passkey::webauthn::RelyingParty::console`); any other console
+    /// neither --origin nor --rp-id, a daemon paired with the first-party
+    /// console (either root of a prod or dev root pair) accepts the root,
+    /// `app.` and `www.` origins of both roots of the pair under either root
+    /// RP ID (`passkey::webauthn::RelyingParty::console`); any other console
     /// origin is matched exactly.
     #[arg(long, env = "SAFECLAW_RP_ID")]
     pub rp_id: Option<String>,
@@ -893,7 +893,7 @@ pub struct ServeArgs {
     #[arg(long, env = "SAFECLAW_ADMIN_KEY")]
     pub admin_key: Option<String>,
 
-    /// Cloud op-relay base URL (e.g. `https://api.dev.safeclaw.pro`). When set,
+    /// Cloud op-relay base URL (e.g. `https://api.dev.sprott.ai`). When set,
     /// the daemon registers each pending op with the relay and polls for the
     /// browser-deposited (HPKE-sealed) grant — this is what enables web
     /// approval for a zero-inbound localhost daemon. When unset, the daemon is
@@ -1086,7 +1086,7 @@ pub struct Config {
 impl Config {
     pub fn from_serve_args(args: ServeArgs) -> Self {
         // WebAuthn origin/rpId. When the daemon is cloud-paired, the vault's
-        // passkeys were enrolled on the cloud FRONTEND (e.g. dev.safeclaw.pro)
+        // passkeys were enrolled on the cloud FRONTEND (e.g. dev.sprott.ai)
         // and every web approval happens there — so the assertions the daemon
         // must verify carry the frontend origin/rpId, NOT localhost. Validate
         // against the frontend origin for a paired daemon; localhost for a
@@ -1099,9 +1099,10 @@ impl Config {
             crate::cli::active::frontend_origin()
                 .unwrap_or_else(|| format!("http://localhost:{}", args.port))
         });
-        // A paired daemon's console origin (stored at `sc login`, either the
-        // root or its `app.` host) gives the console relying party: the root
-        // RP ID and its root / `app.` / `www.` origins. Explicit --origin /
+        // A paired daemon's console origin (stored at `sc login`, the root or
+        // its `app.` host, on either root of a pair) gives the console relying
+        // party: both roots' RP IDs and their root / `app.` / `www.` origins.
+        // The stored value is read as is, never rewritten. Explicit --origin /
         // --rp-id, and a localhost or self-host origin, match exactly; the
         // rp_id then defaults to the origin's host (scheme, path and :port
         // stripped; "localhost" if it does not parse).
@@ -1137,11 +1138,11 @@ pub fn default_state_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./state"))
 }
 
-/// The WebAuthn relying party for `origin`: the SafeClaw console's (root RP
-/// ID, root / `app.` / `www.` origins) when `origin` is one of its hosts and
-/// neither the origin nor the RP ID was given explicitly. Every other origin
-/// (a self-hosted console, localhost) is matched exactly under `rp_id`
-/// (default: the origin's host).
+/// The WebAuthn relying party for `origin`: the console's (both RP IDs of the
+/// root pair, root / `app.` / `www.` origins of both roots) when `origin` is
+/// one of its hosts and neither the origin nor the RP ID was given
+/// explicitly. Every other origin (a self-hosted console, localhost) is
+/// matched exactly under `rp_id` (default: the origin's host).
 fn relying_party_for(
     origin: &str,
     explicit: bool,
@@ -1177,28 +1178,44 @@ mod relying_party_tests {
 
     #[test]
     fn stored_console_origin_gives_the_root_party_explicit_flags_stay_exact() {
-        for stored in ["https://safeclaw.pro", "https://app.safeclaw.pro"] {
+        for stored in [
+            "https://sprott.ai",
+            "https://app.sprott.ai",
+            "https://safeclaw.pro",     // rename:keep
+            "https://app.safeclaw.pro", // rename:keep
+        ] {
             let rp = relying_party_for(stored, false, None);
-            assert_eq!(rp.rp_id, "safeclaw.pro");
-            assert!(rp.allows("https://safeclaw.pro"));
-            assert!(rp.allows("https://app.safeclaw.pro"));
-            assert!(rp.allows("https://www.safeclaw.pro"));
-            assert!(!rp.allows("https://evil.safeclaw.pro"));
+            assert_eq!(rp.rp_ids, vec!["sprott.ai", "safeclaw.pro"], "{stored}"); // rename:keep
+            assert!(rp.allows("https://sprott.ai"));
+            assert!(rp.allows("https://app.sprott.ai"));
+            assert!(rp.allows("https://www.sprott.ai"));
+            assert!(rp.allows("https://app.safeclaw.pro")); // rename:keep
+            assert!(!rp.allows("https://evil.sprott.ai"));
+            assert!(!rp.allows("https://evil-sprott.ai"));
+            assert!(!rp.allows("https://evil.safeclaw.pro")); // rename:keep
+            assert!(!rp.allows("https://app.dev.sprott.ai"));
         }
-        let dev = relying_party_for("https://app.dev.safeclaw.pro", false, None);
-        assert_eq!(dev.rp_id, "dev.safeclaw.pro");
-        // --origin / --rp-id: exactly as given.
-        let explicit = relying_party_for("https://app.safeclaw.pro", true, None);
-        assert_eq!(explicit.rp_id, "app.safeclaw.pro");
-        assert_eq!(
-            explicit.origins,
-            vec!["https://app.safeclaw.pro".to_string()]
-        );
-        let rp_only = relying_party_for("https://safeclaw.pro", true, Some("safeclaw.pro".into()));
-        assert_eq!(rp_only.origins, vec!["https://safeclaw.pro".to_string()]);
+        for stored in [
+            "https://app.dev.sprott.ai",
+            "https://app.dev.safeclaw.pro", // rename:keep
+        ] {
+            let dev = relying_party_for(stored, false, None);
+            assert_eq!(dev.rp_ids, vec!["dev.sprott.ai", "dev.safeclaw.pro"]); // rename:keep
+            assert!(!dev.allows("https://app.sprott.ai"));
+        }
+        // --origin / --rp-id: exactly as given, one RP ID, on either root.
+        let legacy = relying_party_for("https://app.safeclaw.pro", true, None); // rename:keep
+        assert_eq!(legacy.rp_ids, vec!["app.safeclaw.pro"]); // rename:keep
+        assert_eq!(legacy.origins, vec!["https://app.safeclaw.pro".to_string()]); // rename:keep
+        let explicit = relying_party_for("https://app.sprott.ai", true, None);
+        assert_eq!(explicit.rp_ids, vec!["app.sprott.ai"]);
+        assert_eq!(explicit.origins, vec!["https://app.sprott.ai".to_string()]);
+        let rp_only = relying_party_for("https://sprott.ai", true, Some("sprott.ai".into()));
+        assert_eq!(rp_only.rp_ids, vec!["sprott.ai"]);
+        assert_eq!(rp_only.origins, vec!["https://sprott.ai".to_string()]);
         // Unpaired localhost.
         let local = relying_party_for("http://localhost:23293", false, None);
-        assert_eq!(local.rp_id, "localhost");
+        assert_eq!(local.rp_ids, vec!["localhost"]);
         assert_eq!(local.origins, vec!["http://localhost:23293".to_string()]);
         // A self-hosted console: its own hostname is the RP ID and its origin
         // the only one, whatever its labels.
@@ -1208,7 +1225,7 @@ mod relying_party_tests {
             ("https://www.corp.example", "www.corp.example"),
         ] {
             let rp = relying_party_for(stored, false, None);
-            assert_eq!(rp.rp_id, host, "{stored}");
+            assert_eq!(rp.rp_ids, vec![host], "{stored}");
             assert_eq!(rp.origins, vec![stored.to_string()], "{stored}");
             assert!(!rp.allows(&format!("https://app.{host}")));
             assert!(!rp.allows(&format!("https://www.{host}")));

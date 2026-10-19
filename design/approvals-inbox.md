@@ -168,7 +168,7 @@ zombies: the daemon's op store is in-memory and poll tasks spawn only at
 mint, so a pre-restart row can never apply. On register, the backend
 CANCELS pending rows of the same `registered_key_id` whose `boot_id`
 differs, reason `daemon_restarted`; a deposit on them returns 409 and the
-grant page says "this request ended when SafeClaw restarted on <device>; ask
+grant page says "this request ended when Sprott restarted on <device>; ask
 your agent to retry".
 
 Register ordering: independent register tasks can land out of order (B's

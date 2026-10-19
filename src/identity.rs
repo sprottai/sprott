@@ -1,4 +1,4 @@
-//! SafeClaw identity & signing layer — Ed25519 principals (UIK / AIK),
+//! Sprott identity & signing layer — Ed25519 principals (UIK / AIK),
 //! self-certifying ids, and the canonical signing-input builders that config
 //! signatures, re-key events, lineage succession, and the server-signed sync
 //! envelope are all computed over.
@@ -8,7 +8,7 @@
 //! sudp core stays a pure symmetric seal / wrap / grant codec: it knows nothing
 //! of UIK, roles, or state signatures (design/sudp-identity-signing-revision.md
 //! §0 — "SUDP core 只知道 K + 一把包 K 的 wrapping key + 抽象 authenticator +
-//! grant/redeem"). Everything in this module is the SafeClaw-level extension
+//! grant/redeem"). Everything in this module is the Sprott-level extension
 //! built *on top* of sudp. We reuse sudp's HKDF (so there is exactly one KDF
 //! across the system — see [`storage::item`](crate::storage::item)) but keep our
 //! own `safeclaw/v1/*` domain labels, pairwise-disjoint from sudp's `sudp/v1/*`
@@ -49,7 +49,7 @@ use sha2::{Digest, Sha256};
 use sudp::primitives::{Kdf, PrimitiveSuite, StdPrimitives};
 use zeroize::Zeroizing;
 
-// ── Domain-separation labels (SafeClaw namespace; disjoint from sudp/v1/*) ──
+// ── Domain-separation labels (Sprott namespace; disjoint from sudp/v1/*) ──
 
 /// Owner UIK signature over a config singleton (policy / stores / store_order /
 /// audit_retention_days / services / members). See [`config_sig_input`].
@@ -395,7 +395,7 @@ pub fn record_signature_input(
 /// verifier), `timestamp` (unix seconds) bounds the replay window, the body hash
 /// pins the payload (use `&[]` for a bodyless GET — its SHA-256 is a fixed
 /// constant both sides compute), and `device_id` (the `dev_…` self-id) tells the
-/// verifier which registered pubkey to check. This is a SafeClaw transport-auth
+/// verifier which registered pubkey to check. This is a Sprott transport-auth
 /// concern, not part of the SUDP sealed-record protocol, so it lives in the
 /// `safeclaw/v1/*` domain (unlike the `sudp/v1/item-sig` record signature).
 ///

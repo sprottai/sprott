@@ -24,7 +24,7 @@
 //!
 //! Vault selection is via URL path (`{vid}`). The custodian does no
 //! principal authentication — that's a deployment-layer concern (the
-//! SafeClaw pro-backend is the auth boundary).
+//! Sprott pro-backend is the auth boundary).
 
 pub mod broker;
 pub mod broker_flow;
@@ -98,7 +98,7 @@ pub fn app_router(state: Arc<AppState>) -> Router {
         .route("/sync/nudge", post(handlers::nudge::sync_nudge))
         // Op-flat (vault context lives on the approval record).
         // GET /op/{id} returns the JSON poll response (status + cached value).
-        // The agent / CLI polls this; the human approves on safeclaw.pro via
+        // The agent / CLI polls this; the human approves on sprott.ai via
         // the op-relay, so the daemon serves no approval HTML of its own.
         .route("/op/{op_id}", get(handlers::approve::get_op))
         .route("/op/{op_id}/approve", post(handlers::approve::approve_op))
@@ -122,7 +122,7 @@ pub fn app_router(state: Arc<AppState>) -> Router {
     router = router.merge(broker);
 
     // CORS: the only browser inbound was the embedded op-page, now deleted —
-    // approval happens on safeclaw.pro, not against the daemon. With no browser
+    // approval happens on sprott.ai, not against the daemon. With no browser
     // flow left, no CorsLayer is added (the broker plane must stay off browsers
     // anyway — F-25). Self-host dev that fronts the daemon with a browser can
     // still terminate CORS at its reverse proxy.

@@ -8,7 +8,7 @@ hidden = true
 help = """
 # Files API
 
-Encrypted file storage in SafeClaw vault.
+Encrypted file storage in Sprott vault.
 
 ## Endpoints (via proxy)
 

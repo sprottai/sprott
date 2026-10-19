@@ -1,5 +1,5 @@
 #!/bin/sh
-# SafeClaw CLI installer: github.com/getsafeclaw/safeclaw (open source).
+# Sprott CLI installer: github.com/getsafeclaw/safeclaw (open source).
 #
 # What it does, in order (read it before you run it):
 #   * Downloads the prebuilt `sc` binary for this platform from the project's
@@ -8,7 +8,7 @@
 #     mismatch or missing checksum.
 #   * Installs it to ~/.local/bin (or SAFECLAW_BIN_DIR). No sudo, no shell
 #     config changes, no telemetry.
-#   * Installs the SafeClaw agent skill with `sc skill install` (skip with
+#   * Installs the Sprott agent skill with `sc skill install` (skip with
 #     --no-skill or SAFECLAW_NO_SKILL=1).
 #   * When an AI agent runs it, continues with `sc setup`; skip this with
 #     SAFECLAW_NO_SETUP=1. Otherwise, prints one next step.
@@ -82,7 +82,7 @@ trap - EXIT HUP INT TERM
 if [ "${NO_SKILL}" != "1" ]; then
   if "${DEST}/sc" skill --help >/dev/null 2>&1; then
     if ! "${DEST}/sc" skill install; then
-      echo "Warning: SafeClaw was installed, but the agent skill could not be installed." >&2
+      echo "Warning: Sprott was installed, but the agent skill could not be installed." >&2
     fi
   fi
 fi
@@ -99,7 +99,7 @@ else
 fi
 if [ "${SAFECLAW_NO_SETUP:-0}" != "1" ] &&
   "${DEST}/sc" setup --detect-agent >/dev/null 2>&1; then
-  echo "Setting up SafeClaw for this agent:"
+  echo "Setting up Sprott for this agent:"
   exec "${DEST}/sc" setup${PROFILE_ARG}
 fi
 echo "Next: sc setup --name <a name for this agent>${PROFILE_ARG}"

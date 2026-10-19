@@ -1,18 +1,18 @@
 # Quickstart
 
-This page explains how to install SafeClaw, run agent-driven setup, approve the browser steps, and make the first brokered call.
+This page explains how to install Sprott, run agent-driven setup, approve the browser steps, and make the first brokered call.
 
 ## 1. Install
 
 ```bash
-curl -fsSL https://safeclaw.pro/install.sh | sh
+curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 The installer uses no sudo, verifies the download's SHA256, puts `sc` in
 `~/.local/bin`, and installs the skill at `skills/safeclaw/SKILL.md`. When run by
 an agent, it continues straight into `sc setup`; in a terminal it prints one
 next step. It also installs the skill with `sc skill install`. Official sources
-are [safeclaw.pro](https://safeclaw.pro) and
+are [sprott.ai](https://sprott.ai) and
 [github.com/getsafeclaw/safeclaw](https://github.com/getsafeclaw/safeclaw).
 Supported platforms: [Platform support](reference/platform-support.md).
 
@@ -31,7 +31,7 @@ anything, and the command to run next:
 
 ```
 To pair this machine, open this link and enter the code:
-  https://app.safeclaw.pro/pair
+  https://app.sprott.ai/pair
   Code: 4821-0937-5563 (expires in about 15 minutes)
 Next: sc setup --name codex --wait
 ```

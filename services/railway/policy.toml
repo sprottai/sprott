@@ -23,7 +23,7 @@ body = "workspaceDelete|projectDelete|serviceDelete|environmentDelete|volumeDele
 level = "ask-always"
 
 # ── Mint a durable credential (escapes the broker) ───────────────────────────
-# A new API token is a key SafeClaw never sees — the agent minting one via the
+# A new API token is a key Sprott never sees — the agent minting one via the
 # API is a direct end-run around credential separation. Rare, so gating it costs
 # nothing day to day.
 [[rule]]

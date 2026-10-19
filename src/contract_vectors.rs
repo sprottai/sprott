@@ -300,7 +300,7 @@ fn generate() -> Value {
         "set:device",
         "0421",
         "12345678",
-        "https://app.dev.safeclaw.pro",
+        "https://app.dev.safeclaw.pro", // rename:keep
         &[device_entry],
         &owner,
     );
@@ -308,7 +308,7 @@ fn generate() -> Value {
         "set:agent",
         "9067",
         "00042517",
-        "https://app.safeclaw.pro",
+        "https://app.safeclaw.pro", // rename:keep
         &[agent_entry],
         &owner,
     );
@@ -316,7 +316,7 @@ fn generate() -> Value {
         "set:device+agent",
         "3141",
         "27182818",
-        "https://app.safeclaw.pro",
+        "https://app.safeclaw.pro", // rename:keep
         &[device_entry, agent_entry],
         &owner,
     );

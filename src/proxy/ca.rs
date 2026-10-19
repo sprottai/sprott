@@ -70,8 +70,8 @@ fn generate() -> Result<(String, String), String> {
         CertificateParams::new(Vec::<String>::new()).map_err(|e| format!("ca params: {}", e))?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, "SafeClaw Local Broker CA");
-    dn.push(DnType::OrganizationName, "SafeClaw");
+    dn.push(DnType::CommonName, "Sprott Local Broker CA");
+    dn.push(DnType::OrganizationName, "Sprott");
     params.distinguished_name = dn;
     params.key_usages = vec![
         KeyUsagePurpose::KeyCertSign,

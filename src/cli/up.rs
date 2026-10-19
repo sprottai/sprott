@@ -1,4 +1,4 @@
-//! `sc up` — bring SafeClaw to a ready state: ensure the local daemon is
+//! `sc up` — bring Sprott to a ready state: ensure the local daemon is
 //! running, then make sure the vault is unlocked.
 //!
 //! Unlock is invisible by design. `ensure_unlocked` below is the ONLY place
@@ -6,7 +6,7 @@
 //! everything else (an `sc upgrade` restart, the agent's lazy-start `sc up`)
 //! goes through `sc up`. So the user never runs a separate "unlock" command and
 //! never confuses the local vault state with the web console's unlock — they
-//! just tap their passkey when SafeClaw asks.
+//! just tap their passkey when Sprott asks.
 
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use crate::cli::status::{fetch_status, VaultState};
 use crate::cli::{service, unlock};
 use crate::config::UnlockArgs;
 
-/// `sc up`: get SafeClaw ready — install the daemon service on first run (so
+/// `sc up`: get Sprott ready — install the daemon service on first run (so
 /// there's no separate setup step), make sure it's running, then unlock.
 pub async fn run() -> Result<(), String> {
     service::ensure_running_with_fallback().await?;

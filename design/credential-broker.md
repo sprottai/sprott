@@ -1,4 +1,4 @@
-# SafeClaw Credential Broker — one proxy, one phantom (design, LOCKED 2026-07-03)
+# Sprott Credential Broker — one proxy, one phantom (design, LOCKED 2026-07-03)
 
 > **Status: LOCKED — phantom-only proxy model.** This supersedes the earlier
 > two-stage `/use`+`/proxy` design (see §Superseded). Pre-launch, 0 users,
@@ -22,7 +22,7 @@ connection → secret, checks the destination host against the connection's
 anchor, substitutes at egress, forwards. The agent never receives the real value
 back.
 
-**One mental model, one sentence:** *"SafeClaw is a local proxy. Put the phantom
+**One mental model, one sentence:** *"Sprott is a local proxy. Put the phantom
 where the credential goes; send your traffic through the proxy."*
 
 **No `/use`, no `/proxy` JSON endpoint, no base-URL rewriting.** Those are all
@@ -275,7 +275,7 @@ __sc__<conn>__                   // DEFAULT shorthand — the connection's sole 
   (`github`, `gmail_work`) — nothing new to learn. Connect enforces env-safe ids.
 - Storage keys are ALL bare env-valid names; the connection record's `keys`
   map binds role → KEY (connection-schema.md §3). The phantom stays the only
-  SafeClaw-invented string on any surface.
+  Sprott-invented string on any surface.
 - The `__sc__…__` shell is a **leak breadcrumb**: an un-substituted phantom is
   recognizable in logs/upstream errors.
 - Multi-account is disambiguated by **conn name** (`__sc__gmail__` vs
@@ -285,7 +285,7 @@ __sc__<conn>__                   // DEFAULT shorthand — the connection's sole 
 - No industry standard for phantom tokens exists; `__X__` is the folk
   placeholder idiom (scaffolding/templating), and vendor prefixes are the modern
   secret-string convention (`ghp_`, `sk_live_`, secret-scanning). `__sc__…__`
-  carries both signals: *"I am a placeholder"* + *"SafeClaw substitutes me."*
+  carries both signals: *"I am a placeholder"* + *"Sprott substitutes me."*
 
 **Multi-profile is selected by phantom VALUE — never by env var name.** The env
 var *name* is the consuming tool's contract (`gh` reads only

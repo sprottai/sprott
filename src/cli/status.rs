@@ -248,7 +248,7 @@ fn ledger_text(standing: Option<&str>, checked_at: Option<u64>, now: u64) -> Str
         Some("admitted") => format!("admitted{}", checked.unwrap_or_default()),
         Some("not_admitted") => "not admitted to your account: run `sc login`".to_string(),
         Some("account_missing") => crate::error::DEVICE_ACCOUNT_MISSING_MSG.to_string(),
-        Some("stale") => "locked: SafeClaw could not reach your account for 7 days".to_string(),
+        Some("stale") => "locked: Sprott could not reach your account for 7 days".to_string(),
         Some("revoked") => "removed from your account: run `sc login` to pair it again".to_string(),
         _ => "unknown (daemon did not report its account standing)".to_string(),
     }
@@ -392,7 +392,7 @@ pub async fn run(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `https://dev.safeclaw.pro/foo` → `dev.safeclaw.pro`. Scheme and any path are
+/// `https://dev.sprott.ai/foo` → `dev.sprott.ai`. Scheme and any path are
 /// dropped; a bare host (no scheme) is returned unchanged.
 fn origin_host(origin: &str) -> &str {
     origin
@@ -404,11 +404,12 @@ fn origin_host(origin: &str) -> &str {
 }
 
 /// Short environment label for a paired cloud host: the first-party prod / dev
-/// domains, else `self-host`. Purely cosmetic — it never gates anything.
+/// domains (either root of the pair), else `self-host`. Purely cosmetic — it
+/// never gates anything.
 fn env_label(host: &str) -> &'static str {
-    match crate::passkey::webauthn::console_root_of_host(host).unwrap_or(host) {
-        "safeclaw.pro" => "prod",
-        "dev.safeclaw.pro" => "dev",
+    match crate::passkey::webauthn::console_new_root_of_host(host) {
+        Some("sprott.ai") => "prod",
+        Some("dev.sprott.ai") => "dev",
         _ => "self-host",
     }
 }
@@ -521,10 +522,23 @@ mod env_label_tests {
 
     #[test]
     fn either_console_host_names_its_environment() {
-        assert_eq!(env_label("dev.safeclaw.pro"), "dev");
-        assert_eq!(env_label("app.dev.safeclaw.pro"), "dev");
-        assert_eq!(env_label("app.safeclaw.pro"), "prod");
-        assert_eq!(env_label("vault.example.com"), "self-host");
+        for (host, label) in [
+            ("sprott.ai", "prod"),
+            ("app.sprott.ai", "prod"),
+            ("www.sprott.ai", "prod"),
+            ("dev.sprott.ai", "dev"),
+            ("app.dev.sprott.ai", "dev"),
+            ("safeclaw.pro", "prod"),        // rename:keep
+            ("app.safeclaw.pro", "prod"),    // rename:keep
+            ("dev.safeclaw.pro", "dev"),     // rename:keep
+            ("app.dev.safeclaw.pro", "dev"), // rename:keep
+            ("evil-sprott.ai", "self-host"),
+            ("app.app.sprott.ai", "self-host"),
+            ("sprott.ai.evil.com", "self-host"),
+            ("vault.example.com", "self-host"),
+        ] {
+            assert_eq!(env_label(host), label, "{host}");
+        }
     }
 
     #[test]
@@ -535,7 +549,7 @@ mod env_label_tests {
         );
         assert_eq!(
             ledger_text(Some("stale"), None, 0),
-            "locked: SafeClaw could not reach your account for 7 days"
+            "locked: Sprott could not reach your account for 7 days"
         );
         assert!(ledger_text(Some("not_admitted"), None, 0).contains("`sc login`"));
         assert_eq!(

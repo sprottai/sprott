@@ -1,8 +1,8 @@
 [package]
 name = "safeclaw"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2021"
-description = "SafeClaw daemon — multi-vault passkey-gated credential vault for AI agents"
+description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
 # Functional Source License 1.1 (Apache-2.0 future). FSL is not an SPDX id,
 # so we point at the LICENSE file. Use is unrestricted EXCEPT "Competing Use"
 # (offering a substitute commercial product/service); converts to Apache-2.0
@@ -30,7 +30,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tower = "0.5"
 hostname = "0.4"
 
-# Protocol / crypto core — see [[sudp-crate]]. SafeClaw is a custodian
+# Protocol / crypto core — see [[sudp-crate]]. Sprott is a custodian
 # implementation; sudp provides the abstract protocol + standard cryptographic
 # profile (Hash/Kdf/Aead/KeyWrap, β computation, grant validation, WebAuthn
 # Authenticator). We keep p256 direct only for places sudp doesn't yet cover.
@@ -48,7 +48,7 @@ subtle = "2"
 # + HKDF-SHA-256 + ChaCha20-Poly1305 (= PROTOCOL.md §4.2 mandated).
 hpke = { version = "0.12", features = ["x25519"] }
 # Identity/signing layer (src/identity.rs) — Ed25519 UIK/AIK principals, config
-# signatures, re-key events, server-envelope signing. This is the SafeClaw-level
+# signatures, re-key events, server-envelope signing. This is the Sprott-level
 # extension on top of sudp (sudp core carries no signing identity); see
 # design/sudp-identity-signing-revision.md §B1. data-encoding = base32 for the
 # self-certifying id (ETH-address style).

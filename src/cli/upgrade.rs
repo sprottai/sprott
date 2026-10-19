@@ -47,7 +47,7 @@ fn asset_name() -> Result<&'static str, String> {
 /// Decide the release channel and WHY, before any network call. Explicit flags
 /// win (`--stable` > derivation, `--prerelease` > derivation; the two can't co-occur,
 /// clap `conflicts_with`). Otherwise it's derived from the paired cloud's
-/// frontend host: a `dev.` prefix (e.g. `dev.safeclaw.pro`) is a dogfood box and
+/// frontend host: a `dev.` prefix (e.g. `dev.sprott.ai`) is a dogfood box and
 /// tracks pre-releases; prod, self-host, and an unpaired daemon all track stable
 /// — the conservative default. The `dev.` test is the SAME signal the backend's
 /// registry channel uses, so the two never disagree about what "dev" means.
@@ -81,7 +81,7 @@ fn resolve_channel(args: &UpgradeArgs) -> (bool, String) {
     }
 }
 
-/// `https://dev.safeclaw.pro/foo` → `dev.safeclaw.pro`. Scheme and any path are
+/// `https://dev.sprott.ai/foo` → `dev.sprott.ai`. Scheme and any path are
 /// dropped; a bare host (no scheme) is returned unchanged.
 fn origin_host(origin: &str) -> &str {
     origin
@@ -250,19 +250,29 @@ mod tests {
 
     #[test]
     fn a_dev_pairing_is_dev_on_either_console_host() {
-        assert!(paired_to_dev("https://dev.safeclaw.pro"));
-        assert!(paired_to_dev("https://app.dev.safeclaw.pro"));
-        assert!(!paired_to_dev("https://app.safeclaw.pro"));
-        assert!(!paired_to_dev("https://safeclaw.pro"));
+        for (origin, dev) in [
+            ("https://dev.sprott.ai", true),
+            ("https://app.dev.sprott.ai", true),
+            ("https://www.dev.sprott.ai", true),
+            ("https://dev.safeclaw.pro", true),     // rename:keep
+            ("https://app.dev.safeclaw.pro", true), // rename:keep
+            ("https://sprott.ai", false),
+            ("https://app.sprott.ai", false),
+            ("https://safeclaw.pro", false),     // rename:keep
+            ("https://app.safeclaw.pro", false), // rename:keep
+            ("https://vault.example.com", false),
+        ] {
+            assert_eq!(paired_to_dev(origin), dev, "{origin}");
+        }
     }
 
     #[test]
     fn origin_host_strips_scheme_and_path() {
         assert_eq!(
-            origin_host("https://dev.safeclaw.pro/grant/x"),
-            "dev.safeclaw.pro"
+            origin_host("https://dev.sprott.ai/grant/x"),
+            "dev.sprott.ai"
         );
-        assert_eq!(origin_host("https://safeclaw.pro"), "safeclaw.pro");
+        assert_eq!(origin_host("https://sprott.ai"), "sprott.ai");
         assert_eq!(origin_host("bare.host.example"), "bare.host.example");
     }
 

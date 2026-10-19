@@ -270,7 +270,7 @@ re-prompt) or is a documented author responsibility, none is a silent bypass:
   Always keep a base rule (snaplii's `purchase → ask` under the
   `purchase-large → ask-always`). Verification requires a `when` var to be
   bound, but does not (cannot) prove a base rule exists.
-- **Parser differential.** The binding assumes SafeClaw's JSON parse equals the
+- **Parser differential.** The binding assumes Sprott's JSON parse equals the
   upstream's. `serde_json` is duplicate-key-last-wins and lenient in ways a
   given API may not share; a crafted body (`{"amount":180,"amount":80}`) could
   bind/show one value while the upstream acts on another. This is the

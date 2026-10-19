@@ -16,7 +16,7 @@ pub async fn run(sub: PasskeySubcommand, json: bool) -> Result<(), String> {
         PasskeySubcommand::Ls(_a) => run_ls(json).await,
         PasskeySubcommand::Add(_) => {
             let url = crate::cli::vault::console_page("/account/passkeys")?;
-            eprintln!("Add a passkey in the SafeClaw console:");
+            eprintln!("Add a passkey in the Sprott console:");
             eprintln!("  {}", url);
             Ok(())
         }

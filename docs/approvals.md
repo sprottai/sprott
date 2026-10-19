@@ -1,6 +1,6 @@
 # Approvals & policy: who decides what runs
 
-This page explains SafeClaw's per-action approval levels, policy sources, and passkey decisions.
+This page explains Sprott's per-action approval levels, policy sources, and passkey decisions.
 
 Every brokered request gets exactly one decision:
 
@@ -34,11 +34,11 @@ some or set its floors.
    `OPTIONS` are reads; every other method is a write. They apply when no
    rule matches.
 
-There are no "risk scores". SafeClaw doesn't grade actions medium-spicy on
+There are no "risk scores". Sprott doesn't grade actions medium-spicy on
 your behalf; rules state what an action *is*, and the level states your
 decision about it.
 
-`deny` is never a factory default. SafeClaw is a gate, not a block: the point
+`deny` is never a factory default. Sprott is a gate, not a block: the point
 is to let agents work, with you at the choke point that matters.
 
 ## What a tap actually approves

@@ -1,6 +1,6 @@
 # Security model: where your keys actually live
 
-This page answers the security questions about SafeClaw's credential broker. The cryptographic detail behind each one is in
+This page answers the security questions about Sprott's credential broker. The cryptographic detail behind each one is in
 [PROTOCOL.md](https://github.com/getsafeclaw/safeclaw/blob/main/design/protocol.md).
 
 ## Where is the plaintext?
@@ -28,13 +28,13 @@ Enroll a backup passkey (your vault's Passkeys tab) the day you set up.
 ## What can a compromised agent do?
 
 Less than you'd fear. It holds phantoms, which are inert everywhere except
-SafeClaw's proxy. Through the proxy it can spend a credential only toward that
+Sprott's proxy. Through the proxy it can spend a credential only toward that
 connection's own hosts, under your policy, and sensitive actions wait until
 you approve them with a passkey. What it cannot do: read a value, send a
 credential to an attacker's host, or approve its own requests. Exfiltrating a
 key it never held is not on the table.
 
-## Is SafeClaw intercepting all my traffic?
+## Is Sprott intercepting all my traffic?
 
 No. Only commands you deliberately prefix with `sc run --` are brokered.
 Everything else on your machine goes straight out, untouched.

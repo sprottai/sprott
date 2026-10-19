@@ -17,7 +17,7 @@ This page lists the operating systems and CPU architectures supported by the `sc
 ## Install
 
 ```bash
-curl -fsSL https://safeclaw.pro/install.sh | sh
+curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 Puts the `sc` binary in `~/.local/bin` (override with `$SAFECLAW_BIN_DIR`),

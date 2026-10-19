@@ -1,4 +1,4 @@
-//! Channel binding hash for SafeClaw grants — SafeClaw's multi-domain
+//! Channel binding hash for Sprott grants — Sprott's multi-domain
 //! specialisation of SUDP §5.5 β.
 //!
 //! ```text
@@ -6,7 +6,7 @@
 //! β       = H(domain ‖ 0x00 ‖ r ‖ op_hash)
 //! ```
 //!
-//! SUDP defines β with a single `DS_bind` label. SafeClaw extends this with
+//! SUDP defines β with a single `DS_bind` label. Sprott extends this with
 //! several pairwise-disjoint domains (setup / setup-overwrite / identity /
 //! offline / standard) so that the same `(o, r)` cannot be replayed across
 //! contexts. The `0x00` separator after `domain` matches the on-wire format

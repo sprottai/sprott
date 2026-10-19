@@ -1,9 +1,9 @@
 //! JSON canonicalization for channel binding — thin adapter over
 //! `sudp::canonical`.
 //!
-//! `canonicalize` and `canonicalize_body` are SafeClaw's call sites; the byte
+//! `canonicalize` and `canonicalize_body` are Sprott's call sites; the byte
 //! encoding (JCS subset: sorted keys, no whitespace, standard JSON escapes) is
-//! produced by sudp so client and server stay in lockstep. SafeClaw adds the
+//! produced by sudp so client and server stay in lockstep. Sprott adds the
 //! request-body field filter (`EXCLUDED_FIELDS`) — that's a deployment concern
 //! about which fields are part of the bound operation `o`, not part of the
 //! canonical-encoding contract.

@@ -1,6 +1,6 @@
 # Broker: one local egress point
 
-The whole mechanism in one sentence: **SafeClaw is a local proxy; put the
+The whole mechanism in one sentence: **Sprott is a local proxy; put the
 phantom where the credential goes and send that traffic through the proxy.**
 
 ## Three questions, three owners
@@ -28,7 +28,7 @@ proxy on your machine. Inside that stream:
 - A request with no phantom is forwarded untouched. The broker never injects
   where it wasn't asked to.
 
-And outside that stream, nothing happens at all: SafeClaw is not a
+And outside that stream, nothing happens at all: Sprott is not a
 machine-wide interceptor. A phantom that escapes unrouted (pasted into a
 browser, sent by a tool you forgot to route) reaches the upstream as a
 literal string and fails with a clean 401. The failure mode of a leak is an
@@ -44,7 +44,7 @@ nothing the command spawns, ever observes plaintext.
 ## Failing loudly
 
 A brokered request that can't proceed says so in the command's own output
-with a stable `SafeClaw: <code>` line: vault locked, approval needed (with
+with a stable `Sprott: <code>` line: vault locked, approval needed (with
 the link), host outside the anchor, store unreachable. Every code is
 catalogued with its fix in [DIAGNOSTICS.md](reference/diagnostics.md). The broker
 never swallows a refusal into a mystery timeout, and never fakes a success.

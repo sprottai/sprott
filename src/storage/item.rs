@@ -1,4 +1,4 @@
-//! Per-item vault records — the SafeClaw-owned layer over sudp's generic
+//! Per-item vault records — the Sprott-owned layer over sudp's generic
 //! per-record seal/unseal primitive ([`sudp::state`] `record`).
 //!
 //! Division of labour (see `wt-merge-spec/docs/PER_ITEM_SYNC.md` + the build
@@ -7,7 +7,7 @@
 //! - **sudp** does the AEAD only: [`seal_record`] / [`unseal_record`], binding
 //!   `AAD = domain ‖ vault ‖ id ‖ version`. It never derives the id, compares
 //!   versions, merges, or GCs.
-//! - **SafeClaw (this module)** owns everything else: the opaque **item id**
+//! - **Sprott (this module)** owns everything else: the opaque **item id**
 //!   (HMAC of `ns ‖ name` under a K-derived subkey), the [`SealCtx`] build, the
 //!   JSON payload shape `{ns,name,status,body}`, and where a conflict copy
 //!   lands (an ordinary record, [`conflict_copy_slot`]). The

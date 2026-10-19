@@ -253,7 +253,7 @@ async fn require_agent(
         Err(AgentRefusal::NotAuthorized) => Err(problem(
             ScCode::AgentNotAuthorized,
             "this agent is not turned on for any vault. Turn it on in a vault's \
-             Agent access page in the SafeClaw console",
+             Agent access page in the Sprott console",
         )),
     }
 }

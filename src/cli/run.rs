@@ -44,7 +44,7 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     // agent that is fully set up gets a misleading warning.
     if !args.export_env && !agent_has_key() && load_agent_signer().is_none() {
         eprintln!(
-            "note: this shell carries no SafeClaw agent identity, so credential substitution \
+            "note: this shell carries no Sprott agent identity, so credential substitution \
              will 407. Load your agent env (SAFECLAW_AGENT_IDENTITY, or a legacy SAFECLAW_API_KEY) \
              and retry. This is not a daemon or port problem; non-credential traffic is unaffected."
         );
@@ -122,7 +122,7 @@ fn warn_git_url_specific_proxy(cmd: &[String]) {
     }
     eprintln!(
         "note: your git config sets URL-specific proxies. Git traffic to those URLs \
-         bypasses SafeClaw, so credential substitution won't happen there:\n{found}\n\
+         bypasses Sprott, so credential substitution won't happen there:\n{found}\n\
          Drop the key (`git config --unset <key>`) if that host should be brokered."
     );
 }
@@ -216,7 +216,7 @@ fn agent_has_key() -> bool {
 async fn preflight(ca: &Path, control_root: &str) -> Result<(), String> {
     if !ca.exists() {
         return Err(format!(
-            "SafeClaw CA not found at {}. The daemon generates it on first start. Run `sc up`, then retry.",
+            "Sprott CA not found at {}. The daemon generates it on first start. Run `sc up`, then retry.",
             ca.display()
         ));
     }
@@ -235,13 +235,13 @@ async fn preflight(ca: &Path, control_root: &str) -> Result<(), String> {
         .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()).map(|_| k))
     {
         return Err(format!(
-            "SafeClaw daemon isn't answering at {control_root}. It's most likely \
+            "Sprott daemon isn't answering at {control_root}. It's most likely \
              just not running: start it with `sc up`, then retry. (If instead you \
              moved the daemon to another host, your agent env's {name} is stale; \
              unset it or re-run `sc agent add`.)"
         ));
     }
-    Err("SafeClaw daemon isn't running. Bring it up with `sc up`, then retry.".into())
+    Err("Sprott daemon isn't running. Bring it up with `sc up`, then retry.".into())
 }
 
 /// Tell the LOCAL daemon our live shell egress proxy (`POST /proxy/ambient`) so

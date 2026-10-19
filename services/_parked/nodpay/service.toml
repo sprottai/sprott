@@ -8,12 +8,12 @@ tags = ["wallet"]
 hidden = true
 help = """
 A shared on-chain wallet is configured and ready. **Skip the NodPay SKILL.md setup section** — \
-keygen and wallet creation are already done by SafeClaw.
+keygen and wallet creation are already done by Sprott.
 
 - **Safe address:** `{{wallet.safe}}`
 - Run `npx nodpay wallets` to get full wallet details (signers, passkey coords, recovery, etc.)
 - When the user asks to send ETH/crypto/tokens or make a payment, use `npx nodpay propose` to create the transaction
-- Signing is handled automatically via SafeClaw — you do not have the private key and don't need it
+- Signing is handled automatically via Sprott — you do not have the private key and don't need it
 """
 
 [[vault]]

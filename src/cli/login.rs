@@ -1,4 +1,4 @@
-//! `sc login` — pair this machine to a SafeClaw account.
+//! `sc login` — pair this machine to a Sprott account.
 //!
 //! Pairing is the PAKE short-code ceremony (grant-v3 contract C2,
 //! `cli::pair_flow`): `sc` prints a code and a link it builds itself from the
@@ -55,16 +55,18 @@ pub(crate) fn resolve_custodian(env_flag: Option<&str>) -> Result<String, String
             return Ok(u.to_string());
         }
     }
-    Ok("https://safeclaw.pro".to_string())
+    Ok("https://sprott.ai".to_string())
 }
 
 /// The `--profile` allowlist. A SYMBOL → first-party URL only; anything else is a
 /// hard error. This is the gate that keeps a hostile install prompt from
 /// steering pairing off first-party domains; do not widen it to accept URLs.
+/// Each symbol names its environment's new root; a machine paired to the
+/// legacy root of the same pair is the same environment.
 pub(crate) fn env_selector_to_url(env: &str) -> Result<String, String> {
     match env {
-        "prod" => Ok("https://safeclaw.pro".to_string()),
-        "dev" => Ok("https://dev.safeclaw.pro".to_string()),
+        "prod" => Ok("https://sprott.ai".to_string()),
+        "dev" => Ok("https://dev.sprott.ai".to_string()),
         other => Err(format!(
             "unknown --profile '{}': expected 'prod' or 'dev'",
             other
@@ -91,10 +93,16 @@ mod tests {
 
     #[test]
     fn env_selector_allowlist_maps_first_party_only() {
-        assert_eq!(env_selector_to_url("prod").unwrap(), "https://safeclaw.pro");
+        assert_eq!(env_selector_to_url("prod").unwrap(), "https://sprott.ai");
+        assert_eq!(env_selector_to_url("dev").unwrap(), "https://dev.sprott.ai");
+        // Pairing links and the SPAKE2 identity land on each new root's app host.
         assert_eq!(
-            env_selector_to_url("dev").unwrap(),
-            "https://dev.safeclaw.pro"
+            crate::cli::active::console_origin_for_backend(&env_selector_to_url("prod").unwrap()),
+            "https://app.sprott.ai"
+        );
+        assert_eq!(
+            crate::cli::active::console_origin_for_backend(&env_selector_to_url("dev").unwrap()),
+            "https://app.dev.sprott.ai"
         );
         // Anything that is not an exact first-party symbol is rejected — a
         // hostile prompt cannot smuggle a custodian URL through `--profile`.
@@ -107,7 +115,6 @@ mod tests {
 /// What a completed pairing hands back (the approval body of `/api/pair/poll`).
 #[derive(Debug, Deserialize)]
 struct ExchangeResp {
-    #[serde(default)]
     account_id: String,
     device_key: String,
     pro_backend_url: Option<String>,
@@ -151,7 +158,7 @@ pub(crate) fn prepare_device() -> Result<PreparedDevice, String> {
 
 pub async fn run(args: LoginArgs) -> Result<(), String> {
     pair_and_persist(args, true).await?;
-    eprintln!("Starting SafeClaw…");
+    eprintln!("Starting Sprott…");
     if let Err(e) = bring_up(true).await {
         if let Some(e) = e.strip_prefix("auto-start: ") {
             eprintln!("  couldn't auto-start the daemon ({e}); run sc up to finish.");
@@ -245,6 +252,9 @@ pub(crate) fn persist_device_approval(
 ) -> Result<(), String> {
     let parsed: ExchangeResp = serde_json::from_value(paired.body.clone())
         .map_err(|e| format!("approved, but the server's response is incomplete: {}", e))?;
+    if parsed.account_id.is_empty() {
+        return Err("approved, but the server's response is incomplete: no account_id".into());
+    }
     // The VERIFIED owner (admit signer, owner_mac), never the poll's label.
     let account_uik = paired.uik_id.clone();
 
@@ -256,8 +266,8 @@ pub(crate) fn persist_device_approval(
     // the new pairing; `put_cloud_coords` drops the old account id / pinned UIK.
     // Re-pairing the same account skips all of this.
     if crate::cli::active::paired_to_other_account(
-        Some(parsed.account_id.as_str()),
-        Some(account_uik.as_str()),
+        parsed.account_id.as_str(),
+        account_uik.as_str(),
     ) {
         if !allow_account_switch {
             return Err(
@@ -318,8 +328,8 @@ pub(crate) fn persist_device_approval(
         parsed.console_url.as_deref(),
         // §15: persist the account UUID (for reference) AND the owner-UIK us_ (the
         // real principal-ledger anchor). Both pairing paths converge here.
-        (!parsed.account_id.is_empty()).then_some(parsed.account_id.as_str()),
-        Some(account_uik.as_str()),
+        parsed.account_id.as_str(),
+        account_uik.as_str(),
     )
     .map_err(|e| format!("save active config: {}", e))?;
     crate::cli::active::put_account_uik_key(&paired.uik_pub)
@@ -350,9 +360,7 @@ pub(crate) fn persist_device_approval(
     // Show the user's IDENTITY (the us_ UIK) as the account line; the Supabase UUID rides
     // as a secondary `id:` for support / console matching (debug only, never an anchor).
     eprintln!("  account: {}", account_uik);
-    if !parsed.account_id.is_empty() {
-        eprintln!("  id:      {}", parsed.account_id);
-    }
+    eprintln!("  id:      {}", parsed.account_id);
 
     Ok(())
 }

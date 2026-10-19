@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 /// `GET /op/{op_id}` — JSON poll: status + cached value + render(o).
 ///
 /// The agent (and the CLI's browser-callback flow) polls this for the op's
-/// state. There is no HTML branch: the human approves on safeclaw.pro (the
+/// state. There is no HTML branch: the human approves on sprott.ai (the
 /// op-relay carries the sealed grant back to the daemon), so the daemon serves
 /// no approval page of its own (2026-06-23 zero-inbound pivot).
 pub async fn get_op(
@@ -597,20 +597,15 @@ fn batch_expected_challenge(
 /// Who raised the ops this daemon holds: the account it is paired to, its
 /// pinned account UIK (`account`, from [`crate::cli::active::account_uik`]). The
 /// daemon acts for that one account, so that is the requester, whatever else
-/// the keyset seats. Membership data is not consulted when the pin exists: it
+/// the keyset seats. Membership data is not consulted: it
 /// is server-served, and since an admin's passkeys now ride the membership
 /// (`approver: true`, adopted into the registry, which is never pruned) a
 /// registry-derived set could name an admin, or a demoted one, as a requester.
-///
-/// Fallback for a daemon paired without an account UIK (an older backend):
-/// the identities the vault seats under this device's own passkeys
-/// ([`PerItemVault::own_identities`]), which excludes every credential the
-/// membership served as another member's approval material.
-fn requester_identities(pv: &PerItemVault, account: Option<String>) -> BTreeSet<String> {
-    match account {
-        Some(us) => [us].into(),
-        None => pv.own_identities(),
-    }
+fn requester_identities(account: Option<String>) -> Result<BTreeSet<String>> {
+    let account = account.ok_or_else(|| {
+        AppError::ApproverNotAuthorized("this daemon has no paired account identity".into())
+    })?;
+    Ok([account].into())
 }
 
 /// The paired account's UIK (`us_…`) this daemon acts for.
@@ -651,7 +646,7 @@ fn require_vault_key_delivery(grant: &Grant, pv: Option<&PerItemVault>) -> Resul
         DeliveryForm::Plain | DeliveryForm::SealedSecret => {
             let shared = pv.is_some_and(|pv| pv.keyset.uik.is_some());
             Err(AppError::WkRefused(format!(
-                "this approval delivered an unlock secret{}; SafeClaw takes only the vault key \
+                "this approval delivered an unlock secret{}; Sprott takes only the vault key \
                  and the approver's signature. Reload the approval page and approve again",
                 if shared { " on a shared vault" } else { "" }
             )))
@@ -754,10 +749,7 @@ fn verify_grant_identity(
 /// ([`verify_grant_identity`]) must be the requester (the paired account) or
 /// an admin of the vault per its verified role fold.
 fn check_approval_authority(pv: Option<&PerItemVault>, vault_id: &str, signer: &str) -> Result<()> {
-    let requester = match pv {
-        Some(pv) => requester_identities(pv, paired_account()),
-        None => paired_account().into_iter().collect(),
-    };
+    let requester = requester_identities(paired_account())?;
     authorize_approver(pv, vault_id, &requester, signer)
 }
 
@@ -1716,13 +1708,13 @@ pub async fn approve_op(
                     )?;
                 let base = crate::storage::sealed_vault::ViewBase::of(&view)?;
                 if !view.native_secrets.contains_key(&key) {
-                    // One flat namespace, two authorities: SafeClaw OWNS
+                    // One flat namespace, two authorities: Sprott OWNS
                     // native items but only READS external stores — so an
                     // external-hosted key gets a precise refusal, not a
                     // misleading "not found".
                     if view.resolve_value_async(&key).await?.is_some() {
                         return Err(AppError::BadRequest(format!(
-                            "key '{}' is hosted by an external store. SafeClaw reads it pass-through and cannot delete it; remove it in the provider's console",
+                            "key '{}' is hosted by an external store. Sprott reads it pass-through and cannot delete it; remove it in the provider's console",
                             key
                         )));
                     }
@@ -2615,14 +2607,14 @@ pub async fn reject_op(
 /// never delivers: the console creates the vault and enrolls passkeys in the
 /// browser, where the identity key already lives.
 pub(crate) const ENROLL_RETIRED: &str = "creating a vault and adding a passkey happen in the \
-     SafeClaw console now: open it in your browser (`sc vault create` prints the link)";
+     Sprott console now: open it in your browser (`sc vault create` prints the link)";
 
 /// The refusal for a whole-blob `ActType::Write`. No current client sends one
 /// (console writes are per-item; the CLI writes through grant-approved
 /// mutations), and applying a base-less full replacement would revert or drop
 /// items another device changed since.
 pub(crate) const WHOLE_BLOB_WRITE_RETIRED: &str = "whole-vault write ops are no longer supported: \
-     this client is out of date. Upgrade the SafeClaw console/CLI (`sc upgrade`) and retry.";
+     this client is out of date. Upgrade the Sprott console/CLI (`sc upgrade`) and retry.";
 
 /// The role KEYs cached for a service's connections: the declared `secrets`
 /// plus any oauth `[auth].exposes` roles (derived at connect, stored UPPERCASED —
@@ -5581,10 +5573,8 @@ mod tests {
     }
 
     /// The requester is the paired account (`account_uik`) alone: an admin's
-    /// passkey in the registry, or a seat an older adoption keyed under an
-    /// admin's passkey, never makes them a requester. Without a pinned account
-    /// the fallback is this device's own passkeys, minus every credential the
-    /// membership served as another member's approval material.
+    /// passkey in the registry, or a stale seat keyed under an admin's passkey,
+    /// never makes them a requester. A missing paired account fails closed.
     #[test]
     fn the_requester_is_the_paired_account() {
         use crate::crypto::vault_key::UikRoot;
@@ -5615,25 +5605,20 @@ mod tests {
         );
         pv.set_registry_pubkey(ADMIN_CID, "x", "y", "").unwrap();
         let only = |id: &str| -> BTreeSet<String> { [id.to_string()].into() };
-        assert_eq!(requester_identities(&pv, Some(b_id.clone())), only(&b_id));
+        assert_eq!(requester_identities(Some(b_id.clone())).unwrap(), only(&b_id));
         assert_eq!(
-            requester_identities(&pv, Some("us_other".into())),
+            requester_identities(Some("us_other".into())).unwrap(),
             only("us_other")
         );
-        // The approver label (as the membership serves it) takes the admin out
-        // of the fallback too.
-        pv.keyset
-            .uik
-            .as_mut()
-            .unwrap()
-            .approver_cids
-            .insert(ADMIN_CID.into(), admin_id.clone());
-        assert_eq!(requester_identities(&pv, None), only(&b_id));
+        assert!(matches!(
+            requester_identities(None),
+            Err(AppError::ApproverNotAuthorized(_))
+        ));
         // So the admin approving B's op is an admin, never "the requester".
         assert_eq!(
             pv.approval_authority(
                 vault,
-                &requester_identities(&pv, Some(b_id.clone())),
+                &requester_identities(Some(b_id.clone())).unwrap(),
                 &admin_id
             ),
             ApprovalAuthority::Admin

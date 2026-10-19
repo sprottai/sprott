@@ -328,7 +328,7 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        // Design stance: SafeClaw is *first* a credential-separating proxy —
+        // Design stance: Sprott is *first* a credential-separating proxy —
         // the agent never holds the secret, the daemon injects it — and only
         // *secondly* an approval gate for risky operations. So the baseline
         // floor is `allow` (inject + forward, no per-call friction); services

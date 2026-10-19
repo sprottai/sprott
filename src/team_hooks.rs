@@ -47,7 +47,7 @@ pub trait TeamHooks: Send + Sync {
 
     /// Does this build SERVE shared (team) vaults at all? The open-source PERSONAL
     /// edition returns `false`: it does not sync or serve team vaults, leaving them
-    /// to the official SafeClaw build (team-edition §9). The closed `safeclaw-ee`
+    /// to the official Sprott build (team-edition §9). The closed `safeclaw-ee`
     /// overlay returns `true`. Default `false` — a build that injects no team
     /// policy is the personal edition.
     fn serves_shared_vaults(&self) -> bool {

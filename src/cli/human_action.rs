@@ -119,7 +119,7 @@ pub fn report(url: &str, code: Option<&str>, expires_in: Option<u64>) {
     let _ = write(&path, &status);
 }
 
-/// Create a directory for SafeClaw's private state and keep it private.
+/// Create a directory for Sprott's private state and keep it private.
 pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {}", path.display(), e))?;
     let metadata = fs::metadata(path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
@@ -233,7 +233,7 @@ mod tests {
             }],
             Some("dev".into()),
         );
-        want.url = Some("https://safeclaw.pro/pair".into());
+        want.url = Some("https://sprott.ai/pair".into());
         want.code = Some("1234-5678-9012".into());
         want.expires_in = Some(90);
         want.message = Some("waiting".into());

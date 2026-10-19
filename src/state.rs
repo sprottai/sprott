@@ -330,7 +330,7 @@ pub enum SyncNote {
     /// A person's change to the record: it changed elsewhere meanwhile and
     /// was set aside (`sc sync` asks to re-run it).
     ChangedElsewhere(String),
-    /// SafeClaw's automatic upgrade of this vault paused on the record: it
+    /// Sprott's automatic upgrade of this vault paused on the record: it
     /// changed elsewhere meanwhile; the upgrade retries.
     UpgradePaused(String),
     /// Refused, with why (a full sentence).
@@ -344,7 +344,7 @@ impl SyncNote {
         match self {
             SyncNote::ChangedElsewhere(_) => None,
             SyncNote::UpgradePaused(r) => Some(format!(
-                "SafeClaw's automatic upgrade of this vault paused: {} changed elsewhere meanwhile; it retries at the next unlock",
+                "Sprott's automatic upgrade of this vault paused: {} changed elsewhere meanwhile; it retries at the next unlock",
                 r
             )),
             SyncNote::Refused(why) => Some(why.clone()),
