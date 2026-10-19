@@ -12,7 +12,7 @@
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
-Paste it to your AI agent, or run it in a terminal. It installs `sc` and the agent skill. When an agent runs it, the installer continues straight into `sc setup`; in a terminal it prints the next step.
+Paste it to your AI agent, or run it in a terminal. It installs `sprott` and the agent skill. When an agent runs it, the installer continues straight into `sprott setup`; in a terminal it prints the next step.
 
 Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/getsafeclaw/safeclaw.
 
@@ -35,7 +35,7 @@ Are you an AI agent? Run the command above and follow what it prints. Install on
 Pasting an API key into an agent's env hands it to every prompt injection, rogue skill, and log line downstream. Sprott takes the key out of the agent's hands entirely:
 
 ```bash
-GITHUB_TOKEN=__sc__github__ sc run -- gh pr list
+GITHUB_TOKEN=__sc__github__ sprott run -- gh pr list
 ```
 
 `__sc__github__` is a **phantom**: a placeholder the agent uses instead of the credential. Sprott's local proxy swaps it for the real token at the network edge, only toward that service's own hosts. The agent gets the API response, never the key. Sensitive calls pause until you approve them with a passkey tap (Touch ID, Windows Hello, or a security key).
@@ -43,7 +43,7 @@ GITHUB_TOKEN=__sc__github__ sc run -- gh pr list
 ## Why
 
 - **The agent never sees a secret.** It writes phantoms; the proxy injects real values at egress, pinned to each service's own hosts.
-- **No plaintext at rest, anywhere.** Keys are sealed under your passkey. The cloud syncs the sealed blob and cannot decrypt it. Plaintext exists only in the daemon's memory while unlocked; `sc lock` wipes it.
+- **No plaintext at rest, anywhere.** Keys are sealed under your passkey. The cloud syncs the sealed blob and cannot decrypt it. Plaintext exists only in the daemon's memory while unlocked; `sprott lock` wipes it.
 - **You approve what matters.** Every brokered call is policy-checked; sensitive ones wait for your passkey tap. A compromised agent can't spend your keys unsupervised, and can't exfiltrate what it never held.
 - **No passwords.** Passkeys only (WebAuthn).
 - **One ~5 MB static binary.** No runtime deps.
@@ -51,7 +51,7 @@ GITHUB_TOKEN=__sc__github__ sc run -- gh pr list
 ## How it works
 
 ```
-AI agent ──── sc run -- gh pr list ────► Sprott proxy ── real token ──► api.github.com
+AI agent ──── sprott run -- gh pr list ────► Sprott proxy ── real token ──► api.github.com
  holds only                               (localhost)
  __sc__github__                                │
                                                ├─ vault: sealed under your passkey;
@@ -60,9 +60,9 @@ AI agent ──── sc run -- gh pr list ────► Sprott proxy ── r
                                                   passkey tap
 ```
 
-`safeclaw` and `sc` are the same binary. The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
+`sprott`, `sc` and `safeclaw` are the same binary; an install older than 1.5 has only `sc` until `sc upgrade` adds `sprott`. The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
 
-Only traffic routed through `sc run` is touched. A phantom sent anywhere else reaches the upstream as a literal string and fails with a clean 401: nothing to leak.
+Only traffic routed through `sprott run` is touched. A phantom sent anywhere else reaches the upstream as a literal string and fails with a clean 401: nothing to leak.
 
 GitHub, OpenAI, Anthropic, Gemini, Gmail, Google Drive, GCP, Supabase, Railway, GitLab, npm, crates.io, Telegram and more ship in [the catalog](docs/reference/services.md); any other HTTPS API works as a custom connection.
 
@@ -74,25 +74,25 @@ GitHub, OpenAI, Anthropic, Gemini, Gmail, Google Drive, GCP, Supabase, Railway, 
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
-It installs `sc` in `~/.local/bin`, verifies the download's SHA256, and installs the agent skill. When run by an agent, it continues straight into `sc setup`; in a terminal it prints the next step. It uses no sudo.
+It installs `sprott` in `~/.local/bin`, verifies the download's SHA256, and installs the agent skill. When run by an agent, it continues straight into `sprott setup`; in a terminal it prints the next step. It uses no sudo.
 
-Each release also carries a sigstore build-provenance attestation: `gh attestation verify ~/.local/bin/sc --repo getsafeclaw/safeclaw`.
+Each release also carries a sigstore build-provenance attestation: `gh attestation verify ~/.local/bin/sprott --repo getsafeclaw/safeclaw`.
 
 **2. Set up the agent.** An agent installer continues here automatically. Otherwise run:
 
 ```bash
-sc setup
+sprott setup
 ```
 
 `--name <name>` is optional and defaults to the agent's product name.
 It never prompts. Follow each printed instruction until it reports `done`: sign in or create an account, create a passkey, approve the machine, and approve the agent and choose its vaults.
 
-After the machine and agent are approved, unlock the vault with `sc unlock`; it prints an unlock link and the `sc op wait` command. For several vaults, run `sc vault ls`, choose one, then run `sc unlock --vault <name>`.
+After the machine and agent are approved, unlock the vault with `sprott unlock`; it prints an unlock link and the `sprott op wait` command. For several vaults, run `sprott vault ls`, choose one, then run `sprott unlock --vault <name>`.
 
 **3. Add a credential.** In the console's Connections tab (values are encrypted in your browser before upload), or at your terminal:
 
 ```bash
-sc set HF_TOKEN --host huggingface.co   # prompts for the value; one passkey approval
+sprott set HF_TOKEN --host huggingface.co   # prompts for the value; one passkey approval
                                         # mints the phantom __sc__hf_token__
 ```
 
@@ -101,35 +101,35 @@ Entered this way, the value never leaves your machine.
 **4. Use it.** The agent puts the phantom where the credential belongs and routes the command through the proxy:
 
 ```bash
-HF_TOKEN=__sc__hf_token__ sc run -- python train.py
+HF_TOKEN=__sc__hf_token__ sprott run -- python train.py
 ```
 
 Full walkthrough: [docs/quickstart.md](docs/quickstart.md).
 
 ## Teach your agent
 
-Agents learn Sprott from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sc skill install` and `sc upgrade` installs it again. Without `sc`, an agent can add it with `npx skills add getsafeclaw/safeclaw`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sc get`; see [docs/sc-run.md](docs/sc-run.md).
+Agents learn Sprott from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sprott skill install` and `sprott upgrade` installs it again. Without `sprott`, an agent can add it with `npx skills add getsafeclaw/safeclaw`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sprott get`; see [docs/sc-run.md](docs/sc-run.md).
 
 ## CLI
 
 ```text
-Setup         sc setup · login · logout · up · down · restart · status
-Secrets       sc set · get · ls · rm              (aliases of sc secret …)
-Connections   sc connection add|ls|rm · sc run -- <cmd> · sc registry · sc store
-Services      sc service add|update|ls|rm|validate   (from ./folder or github:owner/repo)
-Account       sc agent · sc device · sc passkey · sc vault
-Maintenance   sc unlock · lock · sync · logs · doctor · upgrade · proxy · op
+Setup         sprott setup · login · logout · up · down · restart · status
+Secrets       sprott set · get · ls · rm              (aliases of sprott secret …)
+Connections   sprott connection add|ls|rm · sprott run -- <cmd> · sprott registry · sprott store
+Services      sprott service add|update|ls|rm|validate   (from ./folder or github:owner/repo)
+Account       sprott agent · sprott device · sprott passkey · sprott vault
+Maintenance   sprott unlock · lock · sync · logs · doctor · upgrade · proxy · op
 ```
 
-`sc --help` shows the grouped list; `sc <cmd> --help` for details. Ports default to `23293` (control) and `23294` (the proxy `sc run` routes through); state lives under `~/.safeclaw/`.
+`sprott --help` shows the grouped list; `sprott <cmd> --help` for details. Ports default to `23293` (control) and `23294` (the proxy `sprott run` routes through); state lives under `~/.safeclaw/`.
 
 ## FAQ
 
 **Where do my keys actually live?** Sealed under a key derived from your passkey. The cloud stores and syncs the sealed blob and cannot decrypt it. Plaintext exists in exactly one place: the daemon's memory on your machine, while unlocked. Details: [docs/security-model.md](docs/security-model.md).
 
-**Can't the agent just run `sc get`?** Every `sc get` is passkey-gated; it exists for you at a terminal, not for agents. An agent never needs the raw value: the phantom + `sc run` path uses a credential without revealing it. Patterns and anti-patterns: [docs/sc-run.md](docs/sc-run.md).
+**Can't the agent just run `sprott get`?** Every `sprott get` is passkey-gated; it exists for you at a terminal, not for agents. An agent never needs the raw value: the phantom + `sprott run` path uses a credential without revealing it. Patterns and anti-patterns: [docs/sc-run.md](docs/sc-run.md).
 
-**What about traffic I don't route through `sc run`?** Untouched. Sprott is not a machine-wide MITM; only commands you deliberately route are brokered, and a phantom sent unrouted is a worthless string.
+**What about traffic I don't route through `sprott run`?** Untouched. Sprott is not a machine-wide MITM; only commands you deliberately route are brokered, and a phantom sent unrouted is a worthless string.
 
 **What can a compromised agent do?** Spend credentials only through the proxy, only toward each connection's own hosts, under your policy, with sensitive actions waiting for your passkey. It cannot read the values, and outside the proxy its phantoms are inert.
 

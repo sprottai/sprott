@@ -31,7 +31,7 @@ session-wide approve-all token exists, so none can be stolen or replayed.
 
 **7. Plaintext lives in exactly one place.** The daemon's memory, on your
 machine, while unlocked. Disk holds only sealed data; the cloud syncs blobs
-it cannot read; `sc lock` ends even the one copy.
+it cannot read; `sprott lock` ends even the one copy.
 
 **8. Gate, don't block.** `deny` is never a factory default. Sprott exists
 to let agents do real work; the value is a human at the choke point that

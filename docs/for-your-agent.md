@@ -4,10 +4,10 @@ This page explains how an agent gets the Sprott skill, runs setup, loads its ide
 
 ## The skill
 
-The skill lives at [`skills/safeclaw/SKILL.md`](https://github.com/getsafeclaw/safeclaw/blob/main/skills/safeclaw/SKILL.md) in Agent Skills format. It is the source of truth for discovery, phantom placement, `sc run`, approvals, and setup.
+The skill lives at [`skills/safeclaw/SKILL.md`](https://github.com/getsafeclaw/safeclaw/blob/main/skills/safeclaw/SKILL.md) in Agent Skills format. It is the source of truth for discovery, phantom placement, `sprott run`, approvals, and setup.
 
-The installer adds it with `sc skill install`. `sc upgrade` runs the skill
-install again, so the installed copy stays current. An agent without `sc` can
+The installer adds it with `sprott skill install`. `sprott upgrade` runs the skill
+install again, so the installed copy stays current. An agent without `sprott` can
 add it with:
 
 ```bash
@@ -19,31 +19,31 @@ Install only from [sprott.ai](https://sprott.ai) or
 
 ## Set up
 
-If `sc` is not installed, run:
+If `sprott` is not installed, run:
 
 ```bash
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
-The installer verifies the download's SHA256, puts `sc` in `~/.local/bin`,
-installs this skill, and continues straight into `sc setup` when an agent runs
+The installer verifies the download's SHA256, puts `sprott` in `~/.local/bin`,
+installs this skill, and continues straight into `sprott setup` when an agent runs
 it. In a terminal, it prints the next step. Run:
 
 ```bash
-sc setup
+sprott setup
 ```
 
 `--name <a short name for the agent>` is optional and defaults to the agent's
 product name, such as `claude-code` or `codex`.
-`sc setup` never prompts. Give the person any link and code it prints (they
+`sprott setup` never prompts. Give the person any link and code it prints (they
 open the link and enter the code), then run its `Next:` command. Repeat until a
 run prints no `Next:`. After an error, run the printed `Fix:`. The last `Next:`
-is usually `sc unlock`: it prints a link for the person and an `sc op wait`
+is usually `sprott unlock`: it prints a link for the person and a `sprott op wait`
 command. Run that wait command and continue after approval.
 
 The browser sequence is: the person signs in or creates an account, creates a
 passkey, and approves the machine; approves the agent and chooses which vaults
-it may use. Under the hood, setup runs `sc login` and `sc agent add` when needed,
+it may use. Under the hood, setup runs `sprott login` and `sprott agent add` when needed,
 writes `~/.safeclaw/agents/<name>/agent.env`, and installs the skill. It is safe
 to re-run.
 
@@ -54,9 +54,9 @@ that setup prints and run the next command it prints.
 
 Each agent has its own identity under `~/.safeclaw/agents/<name>/`. If
 `SAFECLAW_AGENT_IDENTITY` is unset, the agent loads its own env file before
-running `sc`: `set -a; . ~/.safeclaw/agents/<name>/agent.env; set +a`. With one
+running `sprott`: `set -a; . ~/.safeclaw/agents/<name>/agent.env; set +a`. With one
 directory there, that one is the agent's; with several, it uses the name it set up
-with. `sc setup` prints this line when it reports `done`. The file sets:
+with. `sprott setup` prints this line when it reports `done`. The file sets:
 
 | Variable | Meaning |
 |---|---|
@@ -67,11 +67,11 @@ The env file is non-secret. Do not share an identity file between agents.
 
 ## What your agent can propose
 
-Changes to the vault come from you, but an agent may ask for one: a new host on a connection (`sc connection add-host`), or a new connection that uses a secret already in your vault (`sc connection add <id> --service <svc> --from-secret ROLE=KEY`). Each is an approval request; nothing changes until you approve it with your passkey, and the card lists every key and host involved.
+Changes to the vault come from you, but an agent may ask for one: a new host on a connection (`sprott connection add-host`), or a new connection that uses a secret already in your vault (`sprott connection add <id> --service <svc> --from-secret ROLE=KEY`). Each is an approval request; nothing changes until you approve it with your passkey, and the card lists every key and host involved.
 For an API that is not in the catalog, add #custom to that link; it opens the custom connection form.
 
 ## Terminal commands for people
 
-People can still run `sc login` to pair a machine and `sc agent add <name>` to
-register an agent at a terminal. `sc setup` runs whichever command is still
+People can still run `sprott login` to pair a machine and `sprott agent add <name>` to
+register an agent at a terminal. `sprott setup` runs whichever command is still
 needed, then handles the env file and skill.

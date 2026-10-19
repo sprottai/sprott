@@ -24,12 +24,12 @@ approvals later, so the root of trust is a single physical gesture.
 ## Lifecycle
 
 ```bash
-sc up       # daemon up + vault unlocked: one passkey tap, idempotent
-sc lock     # wipe decrypted state from memory
-sc status   # which vault, locked or not, daemon health
+sprott up       # daemon up + vault unlocked: one passkey tap, idempotent
+sprott lock     # wipe decrypted state from memory
+sprott status   # which vault, locked or not, daemon health
 ```
 
-On disk, yours or the cloud's, the vault only ever exists sealed. `sc lock`
+On disk, yours or the cloud's, the vault only ever exists sealed. `sprott lock`
 (or stopping the daemon) ends the plaintext's life entirely.
 
 ## Backup and multi-device
@@ -37,8 +37,8 @@ On disk, yours or the cloud's, the vault only ever exists sealed. `sc lock`
 The cloud stores the sealed vault for backup and syncs it across your
 machines per item, so two devices editing different entries don't clobber
 each other. The cloud cannot read what it syncs: sealing and unsealing happen
-on your devices only. Pairing a new machine is part of `sc setup`; at a
-terminal, a person can run `sc login` and approve it with a passkey. Unpairing
+on your devices only. Pairing a new machine is part of `sprott setup`; at a
+terminal, a person can run `sprott login` and approve it with a passkey. Unpairing
 revokes that device's standing cloud-side too.
 
 ## Multiple vaults
@@ -46,7 +46,7 @@ revokes that device's standing cloud-side too.
 One account can hold several vaults (work and personal, say). The daemon
 hosts all of them at once; which vault a request touches is named in the
 request itself, not global daemon state. Your CLI's active vault comes from
-`sc vault use`, and an agent's env can never redirect it.
+`sprott vault use`, and an agent's env can never redirect it.
 
 ## The honest edge case
 

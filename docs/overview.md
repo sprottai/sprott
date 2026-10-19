@@ -24,7 +24,7 @@ credential would go: an env var, a request header, a config file, a URL path.
 The phantom is worthless everywhere except one place.
 
 **2. The broker.** That place is a local proxy on your machine. Commands
-routed through `sc run --` egress through it; it resolves the phantom to a
+routed through `sprott run --` egress through it; it resolves the phantom to a
 connection, checks the destination against that connection's own hosts,
 substitutes the real value at the last hop, and forwards. The response comes
 back; the value never does. Traffic you don't route is untouched.
@@ -36,7 +36,7 @@ itself: no password exists anywhere in the system.
 
 ## What Sprott is not
 
-- **Not a machine-wide interceptor.** Only `sc run` traffic is brokered; the
+- **Not a machine-wide interceptor.** Only `sprott run` traffic is brokered; the
   phantom is the only trigger.
 - **Not cloud custody.** The cloud syncs the vault sealed under your passkey
   and cannot decrypt it. Plaintext exists only in the daemon's memory, on

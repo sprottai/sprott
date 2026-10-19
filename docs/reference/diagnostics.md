@@ -31,25 +31,25 @@ Sprott because it is the hop that observed them.
 | `not_found` | 404 | fix_request | request | no such resource |
 | `method_not_allowed` | 405 | fix_request | request | API face is GET-only |
 | `conflict` | 409 | fix_request | request | state conflict |
-| `vault_locked` | 423 | unlock | vault | vault has no in-memory key; canonical hint: run `sc up` |
+| `vault_locked` | 423 | unlock | vault | vault has no in-memory key; canonical hint: run `sprott up` |
 | `vault_access_revoked` | 403 | configure | auth | this account is no longer a member of the vault; ask a vault admin to add it back |
 | `vault_deleted` | 410 | none | vault | this vault was deleted |
-| `vault_key_changed` | 409 | unlock | vault | the vault was re-keyed after its members changed; approve `sc unlock` to read rows sealed under the new key |
+| `vault_key_changed` | 409 | unlock | vault | the vault was re-keyed after its members changed; approve `sprott unlock` to read rows sealed under the new key |
 | `rate_limited` | 429 | retry | request | slow down |
 | `internal` | 500 | retry | internal | daemon bug/failure |
 | `ca_unavailable` | 500 | retry | internal | resident CA unreadable |
-| `agent_key` | 407 | configure | auth | phantom-bearing request without a verified agent identity (run the agent through `sc run`; set it up with `sc setup --name <name>` or `sc agent add`) |
-| `agent_not_admitted` | 403 | configure | auth | the agent proved its identity, but the account's ledger does not admit it (never approved, or revoked); refused on every vault, whatever its Agent access page lists. Fix: run `sc setup --name <name>` or `sc agent add` |
-| `agent_not_in_account` | 403 | configure | auth | (cloud op relay) the agent isn't registered to the account this machine is signed in to. The daemon itself answers `agent_not_admitted`. Fix: run `sc setup --name <name>` or `sc agent add` on this machine |
+| `agent_key` | 407 | configure | auth | phantom-bearing request without a verified agent identity (run the agent through `sprott run`; set it up with `sprott setup --name <name>` or `sprott agent add`) |
+| `agent_not_admitted` | 403 | configure | auth | the agent proved its identity, but the account's ledger does not admit it (never approved, or revoked); refused on every vault, whatever its Agent access page lists. Fix: run `sprott setup --name <name>` or `sprott agent add` |
+| `agent_not_in_account` | 403 | configure | auth | (cloud op relay) the agent isn't registered to the account this machine is signed in to. The daemon itself answers `agent_not_admitted`. Fix: run `sprott setup --name <name>` or `sprott agent add` on this machine |
 | `ambiguous_phantom` | 400 | fix_request | request | bare phantom on a multi-secret connection; use a role phantom |
 | `approval_needed` | 401 | approve | policy | policy asks; body carries approve/poll URLs + op id |
 | `approval_register` | 503 | retry | internal | could not open the approval op |
 | `approver_not_authorized` | 403 | none | auth | the passkey that approved is neither the requester nor an admin of this shared vault; the request stays pending |
 | `wk_refused_v2` | 400 | none | request | an approval delivered an unlock secret instead of the vault key and the approver's signature; an approver's identity key never leaves their browser, so the daemon refuses it. The request stays pending; reload the approval page (it needs the current console) |
 | `grant_id_invalid` | 403 | none | auth | the approval's identity signature is missing, does not verify, or names someone other than the owner of the passkey that approved; the request stays pending |
-| `device_not_admitted` | 403 | configure | auth | this device has no valid owner-signed admit over its device and daemon keys, so no approval can be sealed to it. Fix: run `sc setup --name <name>` or `sc login` |
+| `device_not_admitted` | 403 | configure | auth | this device has no valid owner-signed admit over its device and daemon keys, so no approval can be sealed to it. Fix: run `sprott setup --name <name>` or `sprott login` |
 | `ledger_stale` | 423 | retry | environment | Sprott could not pull a verified device list from your account for 7 days; vaults are locked (data stays) until it reconnects |
-| `ledger_device_revoked` | 403 | configure | auth | the account owner revoked this device (a verified revoke in the device list; a newer admit of a re-paired device follows its revoke). The daemon latches it. Fix: run `sc setup --name <name>` or `sc login` to pair again |
+| `ledger_device_revoked` | 403 | configure | auth | the account owner revoked this device (a verified revoke in the device list; a newer admit of a re-paired device follows its revoke). The daemon latches it. Fix: run `sprott setup --name <name>` or `sprott login` to pair again |
 | `ledger_head_invalid` | 403 | none | auth | the account's device list does not match its owner-signed head (a forged or truncated list); the daemon keeps its previous view |
 | `broker_body_limit` | 413 | configure | config | body exceeds the inspectable cap; raise `--body-cap` if legitimate |
 | `egress_unreachable` | 502 | configure | environment | forward hop failed to connect (NOT a credential problem) |
@@ -68,10 +68,10 @@ Sprott because it is the hop that observed them.
 | `upstream_body` | 502 | retry | upstream | request body could not be read |
 | `upstream_error` | 502 | retry | upstream | upstream answered but the exchange failed (NOT a credential problem) |
 
-CLI exit codes: 0 ok, 1 error, 2 usage; `sc op wait`: 0 approved, 3 expired
+CLI exit codes: 0 ok, 1 error, 2 usage; `sprott op wait`: 0 approved, 3 expired
 or unknown, 4 timed out waiting, 5 not approved (a person said no, or a stated
 cause), 6 ended without a decision (withdrawn by the requester or superseded
-by a newer request). `sc doctor` exits non-zero if any check fails.
+by a newer request). `sprott doctor` exits non-zero if any check fails.
 
 Op terminal states: the poll body's `status` stays `pending | ok | consumed |
 rejected`; a rejected op carries `reason`, and waiters distinguish a USER
@@ -82,7 +82,7 @@ console's chips to change in the same release: parked as follow-up.
 
 ## Blind spots (the broker cannot yell here)
 
-1. **Not in the path**: the process wasn't routed (no `sc run` / env bundle):
+1. **Not in the path**: the process wasn't routed (no `sprott run` / env bundle):
    the phantom reaches the upstream literally. Upstreams reject (401) or
    silently degrade; either way there is no Sprott marker. The phantom
    string itself (`__sc__*__`) is the greppable brand; the skill's routing

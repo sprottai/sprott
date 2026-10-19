@@ -20,7 +20,7 @@ proxy".
 
 ## The phantom is the only trigger
 
-`sc run -- <cmd>` runs the command with its traffic egressing through the
+`sprott run -- <cmd>` runs the command with its traffic egressing through the
 proxy on your machine. Inside that stream:
 
 - A request carrying a phantom gets it resolved, host-checked,

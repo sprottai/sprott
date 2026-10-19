@@ -64,6 +64,6 @@ states the source as a fact only when the daemon fetched it again
 
 ## Distribution
 
-`sc registry --json` (the published SSoT catalog, opt-in like policy rules) →
+`sprott registry --json` (the published SSoT catalog, opt-in like policy rules) →
 CI `registry.json` → backend `/registry` passthrough → console. Version skew
 falls back: no descriptor → humanized slug card, never a raw debug dump.
