@@ -2,8 +2,8 @@
 # the agent and egress is host-anchored, so routine developer work — creating
 # projects, running SQL (POST /v1/projects/*/database/query), managing tables,
 # edge functions, config, secrets, branches — rides the write=allow floor. The
-# gate is spent on the consequential few, in three buckets: destroy, mint a
-# credential, change who can reach/own the project.
+# gate is spent on the consequential few, in four buckets: read a secret,
+# destroy, mint a credential, change who can reach/own the project.
 #
 # Paths + methods below are ground truth from the OpenAPI spec
 # (api.supabase.com/api/v1-json, 2026-07-08), not guessed. REST can't collapse
@@ -16,6 +16,34 @@
 [default]
 read = "allow"
 write = "allow"
+
+# ── Read a secret (the response carries it in plain text) ────────────────────
+# Reads ride the allow floor, except these GETs, whose responses hold secret
+# values: an agent reading them would hold the very credential the broker keeps
+# from it. Fields per the OpenAPI spec (api.supabase.com/api/v1-json, fetched
+# 2026-10-19); the api-keys behaviour per the recorded responses in the
+# Supabase CLI repo (supabase/cli):
+#   /v1/projects/{ref}/api-keys, …/api-keys/{id}  `api_key`: a secret key is
+#       unmasked with `reveal=true`, and the legacy service_role key (a JWT)
+#       comes back without it too, so the whole path is gated, not `reveal`
+#   /v1/projects/{ref}/postgrest   `jwt_secret` (signs the project's JWTs)
+#   /v1/projects/{ref}/pgsodium    `root_key` ("The pgsodium root key")
+#   /v1/branches/{branch_id_or_ref}  `db_pass`, `jwt_secret` of the branch
+# Not gated: /config/auth and /secrets return an HMAC or digest of each secret
+# (v2 spec: "Auth secrets are returned as an HMAC of their value"; CLI docs:
+# "value is digest"), and the pooler's connection_string carries the
+# placeholder [YOUR-PASSWORD], not the password.
+[[rule]]
+id = "read-secrets"
+label = "Read project secrets (API keys, JWT secret, database password, encryption root key)"
+match = [
+  "GET /v1/projects/*/api-keys",
+  "GET /v1/projects/*/api-keys/*",
+  "GET /v1/projects/*/postgrest",
+  "GET /v1/projects/*/pgsodium",
+  "GET /v1/branches/*",
+]
+level = "ask-always"
 
 # ── Destroy / lose work (irreversible) ───────────────────────────────────────
 # Only the project-level DELETE — the match is exactly one segment after

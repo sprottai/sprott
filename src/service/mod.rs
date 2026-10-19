@@ -2205,7 +2205,7 @@ secrets = ["GITHUB_TOKEN"]
     }
 
     #[test]
-    fn compiled_supabase_policy_gates_only_project_delete() {
+    fn compiled_supabase_policy_gates_the_consequential_few() {
         use crate::core::policy::{evaluate, AccessLevel, Policy};
         let r = ServiceRegistry::load();
         let rules = r
@@ -2270,6 +2270,28 @@ secrets = ["GITHUB_TOKEN"]
             eval("POST", "/v1/projects/abcdef/claim-token"),
             AccessLevel::AskAlways
         );
+        // Reads whose response holds a secret value ask every time.
+        for path in [
+            "/v1/projects/abcdef/api-keys",
+            "/v1/projects/abcdef/api-keys?reveal=true",
+            "/v1/projects/abcdef/api-keys/key1",
+            "/v1/projects/abcdef/postgrest",
+            "/v1/projects/abcdef/pgsodium",
+            "/v1/branches/br1",
+        ] {
+            assert_eq!(eval("GET", path), AccessLevel::AskAlways, "{path}");
+        }
+        // Reads that return only hashes, placeholders or no secrets stay allowed.
+        for path in [
+            "/v1/projects/abcdef",
+            "/v1/projects/abcdef/config/auth",
+            "/v1/projects/abcdef/secrets",
+            "/v1/projects/abcdef/config/database/pooler",
+            "/v1/projects/abcdef/branches",
+            "/v1/branches/br1/diff",
+        ] {
+            assert_eq!(eval("GET", path), AccessLevel::Allow, "{path}");
+        }
     }
 
     // ── [requests] extraction + scope digest (Phase 2) ───────────────────────
