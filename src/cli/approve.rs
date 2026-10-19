@@ -335,7 +335,7 @@ async fn remote_approve(
     let url = crate::cli::active::grant_url(op_id);
     eprintln!();
     eprintln!(
-        "To {}, open this link and tap your passkey:",
+        "To {}, open this link on a device with your passkey:",
         lower_first(label)
     );
     eprintln!("  {}", url);

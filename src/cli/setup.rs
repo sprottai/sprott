@@ -909,12 +909,13 @@ fn pairing_instruction(entries: &[SetupEntry], has_code: bool) -> String {
         (false, Some(agent)) => format!("agent {}", agent.name),
         (false, None) => "the selected principals".to_string(),
     };
-    let action = if has_code {
-        "enter the code"
-    } else {
-        "tap your passkey"
-    };
-    format!("To pair {}, open this link and {}", subject, action)
+    // Who does this step is part of the fact: it needs the account's passkey,
+    // so an agent reading the same text knows the step is not its own.
+    let code = if has_code { " and enter the code" } else { "" };
+    format!(
+        "To pair {}, open this link on a device with your passkey{}",
+        subject, code
+    )
 }
 
 fn expiry_phrase(expires_in: Option<u64>) -> Option<String> {
@@ -1053,15 +1054,15 @@ mod setup_tests {
         };
         assert_eq!(
             pairing_instruction(std::slice::from_ref(&device), true),
-            "To pair this machine, open this link and enter the code"
+            "To pair this machine, open this link on a device with your passkey and enter the code"
         );
         assert_eq!(
             pairing_instruction(std::slice::from_ref(&agent), false),
-            "To pair agent codex, open this link and tap your passkey"
+            "To pair agent codex, open this link on a device with your passkey"
         );
         assert_eq!(
             pairing_instruction(&[device, agent], true),
-            "To pair this machine and agent codex, open this link and enter the code"
+            "To pair this machine and agent codex, open this link on a device with your passkey and enter the code"
         );
         assert_eq!(
             expiry_phrase(Some(601)).as_deref(),
