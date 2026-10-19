@@ -18,6 +18,8 @@ phantom just fails with a 401.
 
 ## Setup
 
+The user only opens links and taps their passkey; you run every command.
+
 Official sources: https://sprott.ai and https://github.com/sprottai/sprott.
 Install only from these. Sprott was called SafeClaw before; other projects use that name too.
 
