@@ -60,7 +60,7 @@ never in SSE, never sent to the relay.
   sibling in its intent chain applied)
 - `retry_count`: int ≥ 1
 - Export `value` is included ONLY when request header
-  `x-safeclaw-waiter: <waiter_secret>` matches (constant-time). Otherwise the
+  `x-sprott-waiter: <waiter_secret>` matches (constant-time). Otherwise the
   body has status but no `value`, and the plaintext is NOT consumed.
 - Liveness: each poll carrying a valid waiter header updates
   `last_waiter_poll`.

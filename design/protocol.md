@@ -27,7 +27,7 @@
 | **R** Requester | LLM agent，credential traffic 走 resident proxy（phantom），需 approval 时 proxy 代建 op |
 | **T** Custodian | safeclaw daemon |
 | **E** Environment | 上游 service (OpenAI/Anthropic/...)，非 SUDP 参与者 |
-| **`\Sigma`** Sealed state | `~/.safeclaw/vault.dat`（SCSV format，§5.1） |
+| **`\Sigma`** Sealed state | `~/.sprott/vault.dat`（SCSV format，§5.1） |
 | **`\mathcal{A}`** Tamper-resistant module | FIDO2 authenticator (Touch ID/YubiKey/...) |
 | **U→T authenticated confidential channel** | TLS（外层）+ HPKE envelope（应用层端到端，§4.2）|
 
@@ -203,7 +203,7 @@ op；旧的 `/use`/`/stream` R-side sugar 已**移除**。control/API plane（�
 ```
 ─── Two localhost listeners (2026-07-03 port swap) ───────────────────────────
 # CONTROL/API plane  :23295 (CONTROL_PORT)  — the axum Router; every HTTP endpoint
-#                    below. Agent reaches it only via $SAFECLAW_VAULT_URL.
+#                    below. Agent reaches it only via $SPROTT_VAULT_URL.
 # CREDENTIAL proxy   :23294 (PROXY_PORT)     — resident local HTTPS MITM; the sole
 #                    agent credential-traffic surface (phantom substitution).
 #                    NOT an HTTP endpoint here — see credential-broker.md.
@@ -303,7 +303,7 @@ plaintext = JSON of inner request body (e.g., SUDP grant G for /grant)
 
 `sc_pk` / `sc_sk` 是 daemon 的 **静态 X25519 keypair**，**仅** 用于 HPKE outer envelope；**不参与** KEK 派生或任何 SUDP key hierarchy（跟 v0.5.0 的 dual-role sk_d 不同）。
 
-**生成时机**: daemon 首次启动（`safeclaw proxy start` 或 `safeclaw setup`）发现 `~/.safeclaw/crypto/sc_sk.jwk` 不存在 → 生成新 keypair → 持久化（atomic write）。
+**生成时机**: daemon 首次启动（`safeclaw proxy start` 或 `safeclaw setup`）发现 `~/.sprott/crypto/sc_sk.jwk` 不存在 → 生成新 keypair → 持久化（atomic write）。
 
 **rotation**: v1 不主动 rotation。Future work 可加 `safeclaw rotate-server-key` 命令。Rotation 时所有 client 需要重新 TOFU。详 §9.6。
 
@@ -314,18 +314,18 @@ plaintext = JSON of inner request body (e.g., SUDP grant G for /grant)
 CLI 根据 daemon 的位置选择如何获取 sc_pk：
 
 **路径 A（local mode）**: daemon 跟 CLI 在同一文件系统上（典型情况：用户笔记本上 daemon + CLI 同一台机器）
-- CLI 直接读 `~/.safeclaw/crypto/sc_pk.jwk`（filesystem 已经认证）
+- CLI 直接读 `~/.sprott/crypto/sc_pk.jwk`（filesystem 已经认证）
 - **不创建** `known_servers.json`，**不走 HTTP fetch**
 - 这是默认场景，多数 OSS user 走这条路径
 
 **路径 B（remote mode）**: daemon 在跨网位置（VPS、Pro relay、Docker 远端容器等）
 - CLI 走 `GET /pubkey` 跨网 HTTP fetch
-- TOFU pin 写到 `~/.safeclaw/known_servers.json`
+- TOFU pin 写到 `~/.sprott/known_servers.json`
 - 后续连接对比 fingerprint：match → 用；mismatch → 警告（潜在 MITM 或 server keypair rotation）
 
 **CLI 怎么知道走哪条路径**:
 - CLI 子命令显式指定：`safeclaw <cmd>` 默认 local；`safeclaw --remote <name> <cmd>` 走 remote
-- 远端配置在 `~/.safeclaw/config.toml` 的 `[remotes.<name>]` 段（host、port 等）
+- 远端配置在 `~/.sprott/config.toml` 的 `[remotes.<name>]` 段（host、port 等）
 - 第一次 `safeclaw remote add <name> <url>` 触发 sc_pk fetch + 显示 fingerprint 让用户 OOB 验证 + 写 `known_servers.json`
 
 `known_servers.json` schema（仅 remote mode 用户才有此文件）:
@@ -348,7 +348,7 @@ CLI 根据 daemon 的位置选择如何获取 sc_pk：
 #### 4.2.3 实现位置
 
 - Server: `src/crypto/envelope.rs`（重新启用，HPKE 实现，**不是** v0.5.0 的 ECIES 残留）
-- Client (CLI): `src/cli/transport/hpke.rs` + `~/.safeclaw/known_servers.json` 管理
+- Client (CLI): `src/cli/transport/hpke.rs` + `~/.sprott/known_servers.json` 管理
 - Client (browser-side, embedded in CLI's passkey.html): `passkey.html` 里 JS HPKE 实现（可用 `@hpke/core` 之类 npm 库或写小段 wrapper）
 
 ### 4.3 `GET /challenge`
@@ -604,7 +604,7 @@ Sketch:
 **单租户部署**（OSS 自托管 / openclaw bundle / 本地 CLI）:
 
 ```
-~/.safeclaw/
+~/.sprott/
   vault.dat                      # ★单文件 SCSV
   vault.dat.bak.1                # 自动备份（可选）
   passkeys.json                  # 注册的 passkey 列表（pub material only）
@@ -623,7 +623,7 @@ Sketch:
 
 ```
 <STATE_DIR>/                     # 实际部署：/var/lib/safeclaw/state/ (per systemd
-                                 # SAFECLAW_STATE_DIR=/var/lib/safeclaw/state)
+                                 # SPROTT_STATE_DIR=/var/lib/safeclaw/state)
   config.toml
   crypto/                        # daemon 全局共享（HPKE keypair 不分 tenant）
     sc_pk.jwk

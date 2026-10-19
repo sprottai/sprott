@@ -190,7 +190,7 @@ write lock.
    with no new secret in the vault. The card shows the key as referenced,
    `chatgpt.com, api.openai.com, auth.openai.com` as destinations, and any
    other connection bound to the key.
-2. A request through `sc run` carrying `__sc__codex_x__` in an Authorization
+2. A request through `sc run` carrying `__sprott__codex_x__` in an Authorization
    header toward `chatgpt.com` receives a minted access token.
 3. After a rotation, the new refresh token lands in
    `HEJIA_OAI_REFRESH_TOKEN_X`. No second key appears.

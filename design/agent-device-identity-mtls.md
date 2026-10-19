@@ -145,7 +145,7 @@ authority. §11's **UIK-signed in-vault table** fixes both with existing machine
   `sc run` sets up the per-agent context; the **`sc` transport** does the mTLS with that agent's
   identity file. The agent never touches the cert.
 - **Safer than today:** identity = possession-proven (not a copyable string, private key never
-  transmitted); the **raw key is NOT in the agent's env** (unlike today's `SAFECLAW_API_KEY` — a
+  transmitted); the **raw key is NOT in the agent's env** (unlike today's `SPROTT_API_KEY` — a
   path in env, key on disk, higher exfil bar); per-agent isolation (each identity file in its own
   boundary); per-agent rotate/revoke. **The daemon holds only PUBLIC keys (verifier); privates stay agent-side.**
 
@@ -156,15 +156,15 @@ authority. §11's **UIK-signed in-vault table** fixes both with existing machine
 |---|---|---|
 | key | **AIK** (Agent Identity Key) | **DIK** (Device Identity Key) |
 | id | `ag_…` | `dev_…` |
-| identity file | `~/.safeclaw/agents/<name>/identity` (0600) | `~/.safeclaw/device/identity` (0600) |
+| identity file | `~/.sprott/agents/<name>/identity` (0600) | `~/.sprott/device/identity` (0600) |
 | mint | `sc agent add <name>` | `sc login` (pairing) |
-| env selector | **`SAFECLAW_AGENT_IDENTITY`** = path to the identity file | none — daemon-local, one per machine (not a wrapped child) |
+| env selector | **`SPROTT_AGENT_IDENTITY`** = path to the identity file | none — daemon-local, one per machine (not a wrapped child) |
 | authorized set | vault **authorized-agents** | account **authorized-devices** |
 | checked by | local daemon | cloud backend |
 
 - The env var only applies to AGENTS (per-wrapped-child selection); the device identity is a
-  fixed daemon-local file (`~/.safeclaw/device-key` → **migrate to** `~/.safeclaw/device/identity`).
-- `SAFECLAW_AGENT_IDENTITY` holds a **path, not a secret** (leaking the var leaks a path).
+  fixed daemon-local file (`~/.sprott/device-key` → **migrate to** `~/.sprott/device/identity`).
+- `SPROTT_AGENT_IDENTITY` holds a **path, not a secret** (leaking the var leaks a path).
 - Vocabulary is symmetric everywhere: "identity key" / "identity file" / "authorized set" /
   "revoke = drop pubkey".
 
@@ -215,7 +215,7 @@ Both credentials move bearer → keypair with a compat window (same "never silen
    FIRST — does NOT depend on AIK (revoke works, no re-key). This is the immediately-testable piece.
 2. **AIK + hop-A mutual mTLS:** `sc agent add` mints AIK (`ag_…`, identity file); proxy → https +
    client-cert; daemon binds tunnel→`ag_id` + authorized-agents check; `sc run` uses
-   `SAFECLAW_AGENT_IDENTITY`; dual-auth with the legacy api-key.
+   `SPROTT_AGENT_IDENTITY`; dual-auth with the legacy api-key.
 3. **DIK + hop-B mutual mTLS:** `sc login` mints DIK (`dev_…`); daemon↔cloud calls use it; backend
    verifies authorized-devices; dual-auth with the legacy device bearer; migrate `device-key` path.
 4. **Frontend:** agent + device management (list / rename / revoke) on the symmetric model; Agents
@@ -234,7 +234,7 @@ user's batch e2e. See `IDENTITY_WAVE_BUILD_LOG.md` (repo root) for the decision 
   tab** (team-only). "Present grant = admitted; drop grant = clean revoke, no re-key" is live.
 - **Step 2 (AIK/DIK mint + registration) — DONE (store); serving DEFERRED to step 3.**
   `IdKind::Device`+`dev_`; `identity_file` module (mint/write/load, 0600 JSON, unit-tested);
-  `sc agent add` mints AIK→file + registers `ag_` pubkey + prints `SAFECLAW_AGENT_IDENTITY`;
+  `sc agent add` mints AIK→file + registers `ag_` pubkey + prints `SPROTT_AGENT_IDENTITY`;
   `sc login` mints/reuses DIK→file + registers `dev_` pubkey. Backend stores pubkeys on
   `api_keys.sig_pub`/`identity_id` (migration `2026-08-09-01-api-key-pubkey.sql`, defensive
   insert). Legacy api-key + device-key still the ACTIVE transport (§7). The identities are
@@ -331,7 +331,7 @@ host, realized as a DIK-signed request — the app-layer equivalent).
 > never in the prompt.
 - The agent-run prompt is ~unchanged (pair device [skip if paired] · `sc agent add` mints the
   identity env · persist skill + instructions · don't test). Only wording tweak: "three
-  SAFECLAW_* dotenv lines" → "your complete Sprott env" (now includes the identity-file path).
+  SPROTT_* dotenv lines" → "your complete Sprott env" (now includes the identity-file path).
 - **Authorization is Console-side, NOT in the prompt.** Which vault(s) an agent lands on = which
   entry the user used (§11.3); the Console performs the UIK-signed write automatically when it
   detects the new agent in the roster (poll). The hard-won prompt stays lean.
@@ -423,13 +423,13 @@ one passkey session.
 - **Which vault an agent lands on** = the human's ceremony selection (an authorization property of
   the AIK), resolved daemon-side — never carried by the agent. (Task-prompt text naming a vault is
   the human's data, not setup.)
-- **Ambient vault** = single source `SAFECLAW_VAULT_ID` (set by `sc run`; resolve or `--vault`;
+- **Ambient vault** = single source `SPROTT_VAULT_ID` (set by `sc run`; resolve or `--vault`;
   **fail-closed** on multi-with-no-default). Both faces read it: `sc` directly; the transparent face
   via the **AIK shim injecting the vid** → `HTTPS_PROXY` is a **bare loopback** (no vid, no key; key
   = AIK PoP). Per-op switch = `--vault` (stateless, still `ag ∈ authorized`); whole-ambient switch =
   relaunch; **no state file**. Addressing SSOT = `design/vault-addressing.md` (see its 2026-08-20
   note). Verified 2026-08-20: the explicit broker face already runs bare
-  (`SAFECLAW_BROKER_URL = http://127.0.0.1:<port>`, vid only in `SAFECLAW_VAULT_ID`).
+  (`SPROTT_BROKER_URL = http://127.0.0.1:<port>`, vid only in `SPROTT_VAULT_ID`).
 
 ### 12.7 Retire (after the dual-auth window)
 - `install_prompt` carrying a `pair_token` → the prompt carries only the commands; the code comes
@@ -469,14 +469,14 @@ you are guaranteed to be running the new binary.** Two mechanisms, plus one hone
 stable `403 {code:'SC_UPGRADE_REQUIRED', min_version, upgrade:'sc upgrade', message}`. Keys on the
 device tier, so browser sessions (no `sc_` key) and agent-tier keys pass through untouched;
 `verifyApiKey` is prefix-cached so the resolve is near-free even though the handler re-resolves.
-**Absent `x-safeclaw-version` counts as old** (`versionLt(undefined,…)=true`), which catches
+**Absent `x-sprott-version` counts as old** (`versionLt(undefined,…)=true`), which catches
 pre-header 0.9.x daemons. This is a SUPERSET of the old fmt2-only `teamSyncGate` (kept only as the
 hook for a format that needs an EVEN HIGHER floor than the global one; today equal ⇒ no-op).
   - **Why one chokepoint, not per-handler:** every daemon→cloud call funnels through
     `tryHandleVaultRoute` (relay.mjs forwards here), so one gate covers all daemon routes and any
     future one for free — "unified pipeline, not a patch."
   - **Coverage verified (core):** every current daemon→cloud request on a gated route carries
-    `x-safeclaw-version` (all sync/op-relay/audit via `egress_proxy::client`, SSE via
+    `x-sprott-version` (all sync/op-relay/audit via `egress_proxy::client`, SSE via
     `client_streaming`; CLI + loopback calls hit the LOCAL daemon, not the cloud gate). ⇒ no
     false-positive on a current daemon. Header value = `CARGO_PKG_VERSION` (bare), correct for the
     floor since `versionLt` ignores the `-rc` suffix (an rc of 0.10 is allowed).
@@ -576,7 +576,7 @@ the cut. A gradual/opt-in migration. Touching vault data or UIK/passkeys during 
 
 ### 13.4 Compat this unlocks (delete after the cut)
 `compat-sunset.md` rows **#1** (dual-window agent-id keying), **#2** (hop-A legacy Basic api-key),
-**#3** (hop-B legacy device bearer), **#6** (`~/.safeclaw/device-key`), **#7** (`SC_DEVICE_SIG_AUDIT`).
+**#3** (hop-B legacy device bearer), **#6** (`~/.sprott/device-key`), **#7** (`SC_DEVICE_SIG_AUDIT`).
 Row **#5** (NoUik/fmt1) is a separate *vault-format* census with its own self-heal (task B1b); row
 **#4** (config-sig) is the 甲 cutover — both out of scope here.
 

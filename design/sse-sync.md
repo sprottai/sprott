@@ -216,7 +216,7 @@ consec-err client rebuild (long-poll shape); agent-hash 30s loop and op_relay 2s
 short-poll untouched in v1.
 
 **Config:** `sync_stream = "auto" | "off"` in config.toml (optional key, absent =
-auto) + `SAFECLAW_SYNC_STREAM` env override. "off" → never connect, pure long-poll.
+auto) + `SPROTT_SYNC_STREAM` env override. "off" → never connect, pure long-poll.
 ★★ Runtime semantics stated honestly: the switch is read at every (re)connect, so
 flipping to "off" bites on the next reconnect (≤15 min under the Railway cap);
 restart the daemon for immediate effect. Env var is the robust override (an old

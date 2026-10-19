@@ -221,7 +221,7 @@ default floors, deny-override resolution, `ttl` — is in
 ## 6. Routing
 
 - A connection is **not addressed by URL** — the **phantom**
-  `__sc__<connection_id>__[<role>__]` carries the intent, and the traffic goes
+  `__sprott__<connection_id>__[<role>__]` carries the intent, and the traffic goes
   through the local HTTPS proxy (`/use` / `/stream` endpoints are retired). See
   [credential-broker.md](credential-broker.md).
 - The proxy resolves **phantom → `connection_id` → its secret(s)**, validates the
