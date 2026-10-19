@@ -273,6 +273,69 @@ mod tests {
         assert!(asset_name().unwrap().starts_with("sprott-"));
     }
 
+    /// install.sh's own layout lines, run over each starting layout: `sprott`
+    /// ends up the file, `sc` and `safeclaw` links to it; a `safeclaw` that is
+    /// someone else's file is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn install_sh_makes_sprott_the_file_and_links_sc_and_safeclaw() {
+        let install = include_str!("../../install.sh");
+        let start = install.find("mv \"${DOWNLOAD}\" \"${DEST}/sprott\"").unwrap();
+        let end = start + install[start..].find("\nfi\n").unwrap() + 4;
+        let layout = &install[start..end];
+
+        type Seed = fn(&std::path::Path);
+        let layouts: [(&str, Seed, bool); 4] = [
+            ("fresh", |_| {}, true),
+            ("1.4", |d| std::fs::write(d.join("sc"), "old").unwrap(), true),
+            (
+                "1.5",
+                |d| {
+                    std::fs::write(d.join("sc"), "old").unwrap();
+                    std::os::unix::fs::symlink("sc", d.join("sprott")).unwrap();
+                    std::os::unix::fs::symlink("sc", d.join("safeclaw")).unwrap();
+                },
+                true,
+            ),
+            (
+                "foreign safeclaw",
+                |d| std::fs::write(d.join("safeclaw"), "theirs").unwrap(),
+                false,
+            ),
+        ];
+        for (name, seed, ours) in layouts {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
+            seed(d);
+            std::fs::write(d.join(".dl"), "new").unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-ec")
+                .arg(layout)
+                .env("DEST", d)
+                .env("DOWNLOAD", d.join(".dl"))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{name}: {out:?}");
+            let meta = std::fs::symlink_metadata(d.join("sprott")).unwrap();
+            assert!(meta.file_type().is_file(), "{name}: sprott is the file");
+            assert_eq!(std::fs::read_to_string(d.join("sprott")).unwrap(), "new", "{name}");
+            assert_eq!(
+                std::fs::read_link(d.join("sc")).unwrap(),
+                std::path::Path::new("sprott"),
+                "{name}"
+            );
+            if ours {
+                assert_eq!(
+                    std::fs::read_link(d.join("safeclaw")).unwrap(),
+                    std::path::Path::new("sprott"),
+                    "{name}"
+                );
+            } else {
+                assert_eq!(std::fs::read_to_string(d.join("safeclaw")).unwrap(), "theirs");
+            }
+        }
+    }
+
     #[test]
     fn a_dev_pairing_is_dev_on_either_console_host() {
         for (origin, dev) in [

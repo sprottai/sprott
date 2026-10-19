@@ -3,28 +3,29 @@
 #
 # What it does, in order (read it before you run it):
 #   * Downloads the prebuilt `sprott` binary for this platform from the
-#     project's GitHub Releases (the latest release, or SAFECLAW_VERSION).
+#     project's GitHub Releases (the latest release, or SPROTT_VERSION).
 #   * Verifies it against the release's SHA256SUMS and refuses to install on any
 #     mismatch or missing checksum.
-#   * Installs it to ~/.local/bin (or SAFECLAW_BIN_DIR) as `sprott`, with `sc`
-#     and `safeclaw` as the same command. No sudo, no shell config changes, no
+#   * Installs it to ~/.local/bin (or SPROTT_BIN_DIR) as `sprott`, with `sc`
+#     and `safeclaw` as links to it. No sudo, no shell config changes, no
 #     telemetry.
 #   * Installs the Sprott agent skill with `sprott skill install` (skip with
-#     --no-skill or SAFECLAW_NO_SKILL=1).
+#     --no-skill or SPROTT_NO_SKILL=1). On a machine set up before 2.0, that
+#     first command moves ~/.safeclaw to ~/.sprott and restarts the daemon.
 #   * When an AI agent runs it, continues with `sprott setup`; skip this with
-#     SAFECLAW_NO_SETUP=1. Otherwise, prints one next step.
+#     SPROTT_NO_SETUP=1. Otherwise, prints one next step.
 set -eu
 
 REPO="sprottai/sprott"
-if [ -n "${SAFECLAW_VERSION:-}" ]; then
-  BASE="https://github.com/${REPO}/releases/download/${SAFECLAW_VERSION}"
-  RELEASE="${SAFECLAW_VERSION}"
+if [ -n "${SPROTT_VERSION:-}" ]; then
+  BASE="https://github.com/${REPO}/releases/download/${SPROTT_VERSION}"
+  RELEASE="${SPROTT_VERSION}"
 else
   BASE="https://github.com/${REPO}/releases/latest/download"
   RELEASE="latest release"
 fi
 
-NO_SKILL="${SAFECLAW_NO_SKILL:-0}"
+NO_SKILL="${SPROTT_NO_SKILL:-0}"
 for ARG in "$@"; do
   case "${ARG}" in
     --no-skill) NO_SKILL=1 ;;
@@ -42,9 +43,9 @@ case "${OS}/${ARCH}" in
   *) echo "Unsupported platform: ${OS}/${ARCH}" >&2; exit 1 ;;
 esac
 
-DEST="${SAFECLAW_BIN_DIR:-$HOME/.local/bin}"
+DEST="${SPROTT_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "${DEST}"
-DOWNLOAD="${DEST}/.sc-download.$$"
+DOWNLOAD="${DEST}/.sprott-download.$$"
 trap 'rm -f "${DOWNLOAD}"' EXIT HUP INT TERM
 
 echo "Downloading ${ASSET} from ${REPO} (${RELEASE})..."
@@ -77,15 +78,15 @@ fi
 echo "Checksum OK."
 
 chmod +x "${DOWNLOAD}"
-# The file keeps the name `sc` that every earlier install and `sc upgrade`
-# used; `sprott` (the command everything prints) and `safeclaw` link to it, so
-# an upgrade through any name replaces the one file. An existing `safeclaw` is
-# left alone.
-mv "${DOWNLOAD}" "${DEST}/sc"
+# `sprott` is the file; `sc` and `safeclaw` link to it, so an upgrade through
+# any name replaces the one file. Before 2.0 the file was `sc` (with `sprott`
+# a link to it): the link replaces it, and a running 1.x daemon keeps its open
+# copy until the move stops it. A `safeclaw` that is not a link is left alone.
+mv "${DOWNLOAD}" "${DEST}/sprott"
 trap - EXIT HUP INT TERM
-ln -sf sc "${DEST}/sprott"
-if [ ! -e "${DEST}/safeclaw" ] && [ ! -L "${DEST}/safeclaw" ]; then
-  ln -s sc "${DEST}/safeclaw"
+ln -sf sprott "${DEST}/sc"
+if [ ! -e "${DEST}/safeclaw" ] || [ -L "${DEST}/safeclaw" ]; then
+  ln -sf sprott "${DEST}/safeclaw"
 fi
 
 if [ "${NO_SKILL}" != "1" ]; then
@@ -101,12 +102,12 @@ case ":${PATH}:" in
   *":${DEST}:"*) ;;
   *) echo "Add it to PATH: export PATH=\"${DEST}:\$PATH\"" ;;
 esac
-if [ "${SAFECLAW_CHANNEL:-}" = "dev" ]; then
+if [ "${SPROTT_CHANNEL:-}" = "dev" ]; then
   PROFILE_ARG=" --profile dev"
 else
   PROFILE_ARG=""
 fi
-if [ "${SAFECLAW_NO_SETUP:-0}" != "1" ] &&
+if [ "${SPROTT_NO_SETUP:-0}" != "1" ] &&
   "${DEST}/sprott" setup --detect-agent >/dev/null 2>&1; then
   echo "Setting up Sprott for this agent:"
   exec "${DEST}/sprott" setup${PROFILE_ARG}
