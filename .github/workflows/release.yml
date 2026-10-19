@@ -31,16 +31,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: safeclaw-linux-x86_64
+            artifact: sprott-linux-x86_64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: safeclaw-linux-aarch64
+            artifact: sprott-linux-aarch64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: safeclaw-macos-x86_64
+            artifact: sprott-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: safeclaw-macos-aarch64
+            artifact: sprott-macos-aarch64
 
     steps:
       # We build the PRIVATE overlay crate; its Cargo.toml pins the public core by
@@ -135,20 +135,20 @@ jobs:
       # per-release asset the console fetches — never drifts from this build.
       - name: Render service catalog (registry.json)
         run: |
-          chmod +x artifacts/safeclaw-linux-x86_64
-          ./artifacts/safeclaw-linux-x86_64 registry --json > artifacts/registry.json
+          chmod +x artifacts/sprott-linux-x86_64
+          ./artifacts/sprott-linux-x86_64 registry --json > artifacts/registry.json
           echo "registry.json services: $(grep -c '\"id\"' artifacts/registry.json)"
 
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
-          sha256sum safeclaw-* > SHA256SUMS
+          sha256sum sprott-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: 'artifacts/safeclaw-*'
+          subject-path: 'artifacts/sprott-*'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

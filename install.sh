@@ -35,10 +35,10 @@ done
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "${OS}/${ARCH}" in
-  Linux/x86_64)   ASSET="safeclaw-linux-x86_64" ;;
-  Linux/aarch64)  ASSET="safeclaw-linux-aarch64" ;;
-  Darwin/x86_64)  ASSET="safeclaw-macos-x86_64" ;;
-  Darwin/arm64)   ASSET="safeclaw-macos-aarch64" ;;
+  Linux/x86_64)   ASSET="sprott-linux-x86_64" ;;
+  Linux/aarch64)  ASSET="sprott-linux-aarch64" ;;
+  Darwin/x86_64)  ASSET="sprott-macos-x86_64" ;;
+  Darwin/arm64)   ASSET="sprott-macos-aarch64" ;;
   *) echo "Unsupported platform: ${OS}/${ARCH}" >&2; exit 1 ;;
 esac
 

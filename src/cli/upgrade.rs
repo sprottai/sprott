@@ -36,17 +36,18 @@ fn latest_base() -> String {
     format!("https://github.com/{}/releases/latest/download", REPO)
 }
 
-/// Map the build target to the release asset name (matches install.sh + CI).
-/// The names keep the `safeclaw-` prefix: every installed `sc upgrade`, back to
-/// the first release, downloads exactly these.
-fn asset_name() -> Result<&'static str, String> {
-    Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "safeclaw-linux-x86_64",
-        ("linux", "aarch64") => "safeclaw-linux-aarch64",
-        ("macos", "x86_64") => "safeclaw-macos-x86_64",
-        ("macos", "aarch64") => "safeclaw-macos-aarch64",
+/// Map the build target to the release asset name (matches install.sh + CI):
+/// `sprott-<os>-<arch>`. Releases from 2.0 on publish only these; a 1.x
+/// `sc upgrade` finds no checksum for its old name and changes nothing.
+fn asset_name() -> Result<String, String> {
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
+        ("macos", "aarch64") => "macos-aarch64",
         (os, arch) => return Err(format!("unsupported platform {}/{}", os, arch)),
-    })
+    };
+    Ok(format!("{}-{}", crate::names::ASSET_PREFIX, platform))
 }
 
 /// Decide the release channel and WHY, before any network call. Explicit flags
@@ -252,23 +253,24 @@ mod tests {
         assert_eq!(newest_tag(&serde_json::json!([])), None);
     }
 
-    /// Every installed `sc upgrade` looks for these exact asset names, so
-    /// install.sh and the release workflow must keep publishing them.
+    /// `sprott upgrade` looks for these exact asset names, so install.sh and
+    /// the release workflow must publish them, and only them.
     #[test]
     fn asset_names_match_install_sh_and_the_release_workflow() {
         let install = include_str!("../../install.sh");
         let workflow = include_str!("../../.github/workflows/release.yml");
         for asset in [
-            "safeclaw-linux-x86_64",
-            "safeclaw-linux-aarch64",
-            "safeclaw-macos-x86_64",
-            "safeclaw-macos-aarch64",
+            "sprott-linux-x86_64",
+            "sprott-linux-aarch64",
+            "sprott-macos-x86_64",
+            "sprott-macos-aarch64",
         ] {
             assert!(install.contains(&format!("ASSET=\"{asset}\"")), "{asset}");
             assert!(workflow.contains(&format!("artifact: {asset}")), "{asset}");
         }
-        assert!(workflow.contains("sha256sum safeclaw-* > SHA256SUMS"));
-        assert!(asset_name().unwrap().starts_with("safeclaw-"));
+        assert!(workflow.contains("sha256sum sprott-* > SHA256SUMS"));
+        assert_eq!(workflow.matches("artifact: ").count(), 4, "four assets, no aliases");
+        assert!(asset_name().unwrap().starts_with("sprott-"));
     }
 
     #[test]
@@ -345,7 +347,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         .text()
         .await
         .map_err(|e| format!("read SHA256SUMS: {}", e))?;
-    let expected = expected_hash(&sums, asset)
+    let expected = expected_hash(&sums, &asset)
         .ok_or_else(|| format!("no checksum for {} in the latest release", asset))?;
 
     // 2. Download the asset.
@@ -374,7 +376,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     }
 
     // 4. No-op when the verified download equals the running binary. Follow
-    //    symlinks to the real file: `sc` and `safeclaw` may be links to
+    //    symlinks to the real file: `sc` and the other alias are links to
     //    `sprott`, and macOS reports the invoked (link) path, so replacing that
     //    path would turn one alias into a separate copy and leave the rest old.
     let current = std::env::current_exe().map_err(|e| format!("locate current binary: {}", e))?;
@@ -396,7 +398,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     let dir = current
         .parent()
         .ok_or_else(|| "current binary has no parent dir".to_string())?;
-    let tmp = dir.join(format!(".sc-upgrade-{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(".sprott-upgrade-{}.tmp", std::process::id()));
     std::fs::write(&tmp, &bytes).map_err(|e| {
         format!(
             "write {} (need write access to {}): {}",
@@ -436,9 +438,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         Some(v) => eprintln!(
             "Upgraded sprott {} → {} ({}).",
             crate::build_version(),
-            v.strip_prefix("sprott ")
-                .or_else(|| v.strip_prefix("safeclaw "))
-                .unwrap_or(v),
+            v.strip_prefix("sprott ").unwrap_or(v),
             &actual[..12]
         ),
         None => eprintln!("Upgraded {} ({}).", current.display(), &actual[..12]),
