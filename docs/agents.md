@@ -37,7 +37,7 @@ one identity file per agent, and don't re-mint when the env already exists.
 
 Discover connections through the registry, place phantoms, route commands
 through `sprott run`, wait on approvals (`sprott op wait`). The full behavioral
-contract fits in one file, [the skill](https://github.com/sprottai/sprott/blob/main/skills/safeclaw/SKILL.md), and
+contract fits in one file, [the skill](https://github.com/sprottai/sprott/blob/main/skills/sprott/SKILL.md), and
 one habit: **phantoms, not values** ([`sprott run` and phantoms](sc-run.md)).
 
 ## What an agent can't do

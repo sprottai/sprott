@@ -1,7 +1,7 @@
 //! `GET /skill.md` — 302 redirect to the canonical skill on GitHub.
 //!
 //! The skill is the client-side usage guide for agents. Its single source of
-//! truth is `skills/safeclaw/SKILL.md` in the OSS repo, served raw by GitHub.
+//! truth is `skills/sprott/SKILL.md` in the OSS repo, served raw by GitHub.
 //! The CLI also embeds the version-matched copy for `sc skill install`; this
 //! redirect is the browsable current copy on `main`.
 //!
@@ -19,7 +19,7 @@ use axum::{
 /// deployment-agnostic, so it doesn't need to be version-pinned to a tag).
 fn skill_raw_url() -> String {
     format!(
-        "https://raw.githubusercontent.com/{}/main/skills/safeclaw/SKILL.md",
+        "https://raw.githubusercontent.com/{}/main/skills/sprott/SKILL.md",
         crate::GITHUB_REPO
     )
 }

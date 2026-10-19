@@ -8,7 +8,16 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{SkillInstallArgs, SkillRemoveArgs, SkillSubcommand};
 
-const SKILL: &str = include_str!("../../skills/safeclaw/SKILL.md");
+const SKILL: &str = include_str!("../../skills/sprott/SKILL.md");
+
+/// The skill's directory name under `~/.agents/skills` and `~/.claude/skills`.
+const NAME: &str = "sprott";
+
+/// Before 1.5 the skill was named `safeclaw`, with this author in its frontmatter
+/// (also when `npx skills add` installed it). An install removes that copy, so an
+/// upgrade leaves one skill; anything else at that path is someone else's.
+const LEGACY_NAME: &str = "safeclaw";
+const LEGACY_AUTHOR: &str = "getsafeclaw";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Manifest {
@@ -23,6 +32,8 @@ pub struct InstallReport {
     pub paths: Vec<PathBuf>,
     pub modified: bool,
     pub notes: Vec<String>,
+    /// The pre-1.5 `safeclaw` copies this install removed.
+    pub removed: Vec<PathBuf>,
 }
 
 pub fn run(sub: SkillSubcommand) -> Result<(), String> {
@@ -31,6 +42,9 @@ pub fn run(sub: SkillSubcommand) -> Result<(), String> {
             let report = install(force)?;
             for path in &report.paths {
                 println!("Installed: {}", path.display());
+            }
+            for path in &report.removed {
+                println!("Removed: {}", path.display());
             }
             for note in &report.notes {
                 println!("{}", note);
@@ -62,7 +76,7 @@ pub fn install(force: bool) -> Result<InstallReport, String> {
 }
 
 fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
-    let skill_dir = home.join(".agents/skills/safeclaw");
+    let skill_dir = home.join(".agents/skills").join(NAME);
     let skill_path = skill_dir.join("SKILL.md");
     let manifest_path = home.join(".safeclaw/skill-manifest.json");
     let old_manifest = read_manifest(&manifest_path)?;
@@ -80,6 +94,7 @@ fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
         paths: Vec::new(),
         modified: was_modified && !force,
         notes: Vec::new(),
+        removed: Vec::new(),
     };
     if was_modified && !force {
         report.paths.push(skill_path.clone());
@@ -88,6 +103,7 @@ fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
             skill_path.display()
         ));
         ensure_claude_link(home, &skill_dir, old_manifest.as_ref(), &mut report, false)?;
+        remove_legacy(home, &mut report);
         return Ok(report);
     }
 
@@ -115,6 +131,7 @@ fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
     let body = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| format!("serialize skill manifest: {}", e))?;
     atomic_write(&manifest_path, &body)?;
+    remove_legacy(home, &mut report);
     Ok(report)
 }
 
@@ -134,7 +151,7 @@ fn ensure_claude_link(
     let skills_dir = claude.join("skills");
     fs::create_dir_all(&skills_dir)
         .map_err(|e| format!("create {}: {}", skills_dir.display(), e))?;
-    let link = skills_dir.join("safeclaw");
+    let link = skills_dir.join(NAME);
     match fs::symlink_metadata(&link) {
         Ok(meta) if meta.file_type().is_symlink() => {
             if link_points_to(&link, skill_dir) {
@@ -169,6 +186,65 @@ fn ensure_claude_link(
     }
 }
 
+/// Remove the pre-1.5 `safeclaw` skill where its SKILL.md is Sprott's: a symlink
+/// is unlinked (its target stays); in a directory only SKILL.md is deleted, and
+/// the directory too when nothing else is in it. The Claude path goes first,
+/// because it is usually a symlink into the shared one. A failure is a note:
+/// the new skill is already installed.
+fn remove_legacy(home: &Path, report: &mut InstallReport) {
+    for path in [
+        home.join(".claude/skills").join(LEGACY_NAME),
+        home.join(".agents/skills").join(LEGACY_NAME),
+    ] {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let skill = path.join("SKILL.md");
+        if !is_legacy_skill(&skill) {
+            continue;
+        }
+        let (target, result) = if meta.file_type().is_symlink() {
+            (path.clone(), fs::remove_file(&path))
+        } else if meta.is_dir() {
+            (skill.clone(), fs::remove_file(&skill))
+        } else {
+            continue;
+        };
+        match result {
+            Ok(()) => {
+                if target == skill {
+                    let _ = fs::remove_dir(&path);
+                }
+                report.removed.push(target);
+            }
+            Err(e) => report
+                .notes
+                .push(format!("Could not remove {}: {}", target.display(), e)),
+        }
+    }
+}
+
+/// True when the frontmatter is the old skill's: `name: safeclaw` by `getsafeclaw`.
+fn is_legacy_skill(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(body) = text.strip_prefix("---\n") else {
+        return false;
+    };
+    let Some(end) = body.find("\n---") else {
+        return false;
+    };
+    let value = |key: &str| {
+        body[..end].lines().find_map(|line| {
+            let rest = line.trim().strip_prefix(key)?.strip_prefix(':')?;
+            Some(rest.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        })
+    };
+    value("name").as_deref() == Some(LEGACY_NAME)
+        && value("author").as_deref() == Some(LEGACY_AUTHOR)
+}
+
 fn link_points_to(link: &Path, target: &Path) -> bool {
     let Ok(raw) = fs::read_link(link) else {
         return false;
@@ -194,7 +270,7 @@ fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
     let Some(manifest) = read_manifest(&manifest_path)? else {
         return Ok(Vec::new());
     };
-    let skill_dir = home.join(".agents/skills/safeclaw");
+    let skill_dir = home.join(".agents/skills").join(NAME);
     let skill_path = skill_dir.join("SKILL.md");
     if skill_path.exists() {
         let hash = sha256(
@@ -210,7 +286,7 @@ fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
     }
 
     let mut removed = Vec::new();
-    let link = home.join(".claude/skills/safeclaw");
+    let link = home.join(".claude/skills").join(NAME);
     if manifest.claude_symlink && link_points_to(&link, &skill_dir) {
         fs::remove_file(&link).map_err(|e| format!("remove {}: {}", link.display(), e))?;
         removed.push(link);
@@ -293,8 +369,8 @@ mod tests {
 
         let first = install_at(home.path(), false).unwrap();
         assert!(!first.modified);
-        let skill = home.path().join(".agents/skills/safeclaw/SKILL.md");
-        let link = home.path().join(".claude/skills/safeclaw");
+        let skill = home.path().join(".agents/skills/sprott/SKILL.md");
+        let link = home.path().join(".claude/skills/sprott");
         assert_eq!(fs::read_to_string(&skill).unwrap(), SKILL);
         assert!(link_points_to(&link, skill.parent().unwrap()));
 
@@ -313,10 +389,53 @@ mod tests {
         assert!(fs::symlink_metadata(&link).is_err());
 
         let conflicted_home = tempfile::tempdir().unwrap();
-        let conflict = conflicted_home.path().join(".claude/skills/safeclaw");
+        let conflict = conflicted_home.path().join(".claude/skills/sprott");
         fs::create_dir_all(&conflict).unwrap();
         let report = install_at(conflicted_home.path(), false).unwrap();
         assert!(conflict.is_dir(), "an existing real directory is left alone");
         assert!(report.notes.iter().any(|note| note.contains("not Sprott's symlink")));
+    }
+
+    const LEGACY: &str =
+        "---\nname: safeclaw\ndescription: x\nmetadata:\n  author: getsafeclaw\n---\n\n# SafeClaw\n";
+
+    #[test]
+    fn install_removes_our_pre_1_5_safeclaw_skill_only() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy_dir = home.path().join(".agents/skills/safeclaw");
+        let legacy_link = home.path().join(".claude/skills/safeclaw");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::create_dir_all(legacy_link.parent().unwrap()).unwrap();
+        fs::write(legacy_dir.join("SKILL.md"), LEGACY).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&legacy_dir, &legacy_link).unwrap();
+
+        let report = install_at(home.path(), false).unwrap();
+        assert!(fs::symlink_metadata(&legacy_link).is_err(), "our symlink is removed");
+        assert!(!legacy_dir.exists(), "our copy is removed");
+        assert_eq!(report.removed.len(), 2);
+        let skill = home.path().join(".agents/skills/sprott/SKILL.md");
+        assert_eq!(fs::read_to_string(&skill).unwrap(), SKILL);
+        assert!(link_points_to(&home.path().join(".claude/skills/sprott"), skill.parent().unwrap()));
+
+        // Another file in our old directory stays, and so does the directory.
+        let kept = tempfile::tempdir().unwrap();
+        let dir = kept.path().join(".agents/skills/safeclaw");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), LEGACY).unwrap();
+        fs::write(dir.join("notes.md"), "mine\n").unwrap();
+        install_at(kept.path(), false).unwrap();
+        assert!(!dir.join("SKILL.md").exists());
+        assert!(dir.join("notes.md").exists());
+
+        // A skill named safeclaw by someone else is not ours.
+        let foreign = tempfile::tempdir().unwrap();
+        let other = foreign.path().join(".agents/skills/safeclaw/SKILL.md");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        let theirs = "---\nname: safeclaw\ndescription: another project\n---\n";
+        fs::write(&other, theirs).unwrap();
+        let report = install_at(foreign.path(), false).unwrap();
+        assert!(report.removed.is_empty());
+        assert_eq!(fs::read_to_string(&other).unwrap(), theirs);
     }
 }

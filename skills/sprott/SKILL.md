@@ -1,5 +1,5 @@
 ---
-name: safeclaw
+name: sprott
 description: Brokers API keys, tokens and OAuth credentials for AI agents so the agent never holds the secret, and installs or sets up Sprott. Use when a task calls an external API, CLI or service that needs a credential, when a request fails with 401 or 403 or a required *_TOKEN or *_API_KEY is missing, or when the user asks to install, set up or use Sprott.
 compatibility: Requires the `sprott` CLI on macOS or Linux, paired to a Sprott account. The Setup section installs it.
 metadata:

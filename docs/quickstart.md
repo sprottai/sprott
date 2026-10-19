@@ -9,7 +9,7 @@ curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
 The installer uses no sudo, verifies the download's SHA256, puts `sprott` in
-`~/.local/bin`, and installs the skill at `skills/safeclaw/SKILL.md`. When run by
+`~/.local/bin`, and installs the skill at `~/.agents/skills/sprott/SKILL.md`. When run by
 an agent, it continues straight into `sprott setup`; in a terminal it prints one
 next step. It also installs the skill with `sprott skill install`. Official sources
 are [sprott.ai](https://sprott.ai) and

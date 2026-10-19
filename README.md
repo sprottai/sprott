@@ -108,7 +108,7 @@ Full walkthrough: [docs/quickstart.md](docs/quickstart.md).
 
 ## Teach your agent
 
-Agents learn Sprott from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sprott skill install` and `sprott upgrade` installs it again. Without `sprott`, an agent can add it with `npx skills add sprottai/sprott`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sprott get`; see [docs/sc-run.md](docs/sc-run.md).
+Agents learn Sprott from [skills/sprott/SKILL.md](skills/sprott/SKILL.md), in Agent Skills format. The installer adds it with `sprott skill install` and `sprott upgrade` installs it again. Without `sprott`, an agent can add it with `npx skills add sprottai/sprott`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sprott get`; see [docs/sc-run.md](docs/sc-run.md).
 
 ## CLI
 
