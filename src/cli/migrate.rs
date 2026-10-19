@@ -437,9 +437,8 @@ fn phase1(ctx: &Ctx) -> Result<(), Fail> {
         }
     }
     // 5 (before the stop, see above). It travels with the rename.
-    write_json(&marker, &moving).map_err(|e| {
-        Fail::Refused(format!("Sprott 2.0 could not move ~/.safeclaw: {e}"))
-    })?;
+    write_json(&marker, &moving)
+        .map_err(|e| Fail::Refused(format!("Sprott 2.0 could not move ~/.safeclaw: {e}")))?;
 
     // 3. Stop it the way it was started.
     let mut stopped_unit = false;
@@ -454,9 +453,8 @@ fn phase1(ctx: &Ctx) -> Result<(), Fail> {
     }
 
     // 4. Wait for silence.
-    let silent = ctx.wait_until(|| {
-        !ctx.sys.answers(&control) && !pid.is_some_and(|p| ctx.sys.pid_live(p))
-    });
+    let silent =
+        ctx.wait_until(|| !ctx.sys.answers(&control) && !pid.is_some_and(|p| ctx.sys.pid_live(p)));
     let undo = |ctx: &Ctx| {
         if moving.was_running {
             if stopped_unit {
@@ -552,6 +550,14 @@ fn phase2(ctx: &Ctx) -> Result<Report, Phase2> {
     };
     ctx.checkpoint(Step::Service)?;
 
+    // A detached daemon stays detached, even beside a unit file 1.x wrote
+    // before it found no user systemd.
+    let service = if moving.manager == Manager::Detached {
+        None
+    } else {
+        service
+    };
+
     // 10. Run state.
     let mut not_started = false;
     if ctx.start_daemon && (moving.was_running || serving) && !ctx.sys.answers(&control) {
@@ -581,6 +587,9 @@ fn phase2(ctx: &Ctx) -> Result<Report, Phase2> {
 
 fn start_daemon(ctx: &Ctx, service: Option<Platform>, moving: &Moving) {
     match (service, moving.manager) {
+        (_, Manager::Detached) => {
+            let _ = ctx.sys.spawn_detached(&ctx.exe);
+        }
         (Some(Platform::Systemd), _) => {
             let _ = ctx.sys.systemctl(&["start", names::SYSTEMD_UNIT]);
         }
@@ -605,7 +614,7 @@ fn start_daemon(ctx: &Ctx, service: Option<Platform>, moving: &Moving) {
                 .sys
                 .launchctl(&["bootstrap", &domain, &plist.to_string_lossy()]);
         }
-        (_, Manager::Detached | Manager::None) => {
+        (_, Manager::None) => {
             let _ = ctx.sys.spawn_detached(&ctx.exe);
         }
     }
@@ -620,6 +629,16 @@ fn swap_unit(
     let old = ctx.unit_dir.join(OLD_UNIT);
     let new = ctx.unit_dir.join(names::SYSTEMD_UNIT);
     let backup = data.join(PRE_2).join(OLD_UNIT);
+    // A systemctl failure stops phase 2 (the next command retries) only where
+    // systemd ran the daemon. 1.x `sc up` writes the unit before it finds no
+    // user systemd and falls back to a detached daemon; there it cannot work.
+    let in_use = moving.manager == Manager::Systemd || moving.was_enabled;
+    let systemctl = |args: &[&str]| -> Result<(), Phase2> {
+        match ctx.sys.systemctl(args) {
+            Err(e) if in_use => Err(e.into()),
+            _ => Ok(()),
+        }
+    };
     match fs::read_to_string(&old) {
         Ok(text) if !text.contains(OLD_UNIT_MARKER) => {
             left.push(format!(
@@ -641,21 +660,21 @@ fn swap_unit(
             let unit = crate::cli::service::systemd_unit(&ctx.exe.to_string_lossy(), &env);
             write_atomic(&new, unit.as_bytes(), 0o600)?;
             ctx.checkpoint(Step::UnitWritten)?;
-            ctx.sys.systemctl(&["disable", "--now", OLD_UNIT])?;
+            systemctl(&["disable", "--now", OLD_UNIT])?;
             // Moved, not copied: it may hold a secret (Environment= lines).
             move_file(&old, &backup)?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("read {}: {e}", old.display()).into()),
     }
-    let swapped = backup.exists()
-        && fs::read_to_string(&new).is_ok_and(|t| t.contains(NEW_UNIT_MARKER));
+    let swapped =
+        backup.exists() && fs::read_to_string(&new).is_ok_and(|t| t.contains(NEW_UNIT_MARKER));
     if !swapped {
         return Ok(None);
     }
-    ctx.sys.systemctl(&["daemon-reload"])?;
+    systemctl(&["daemon-reload"])?;
     if moving.was_enabled {
-        ctx.sys.systemctl(&["enable", names::SYSTEMD_UNIT])?;
+        systemctl(&["enable", names::SYSTEMD_UNIT])?;
     }
     Ok(Some(Platform::Systemd))
 }
@@ -698,8 +717,8 @@ fn swap_plist(ctx: &Ctx, data: &Path, left: &mut Vec<String>) -> Result<Option<P
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("read {}: {e}", old.display()).into()),
     }
-    let swapped = backup.exists()
-        && fs::read_to_string(&new).is_ok_and(|t| t.contains(NEW_PLIST_MARKER));
+    let swapped =
+        backup.exists() && fs::read_to_string(&new).is_ok_and(|t| t.contains(NEW_PLIST_MARKER));
     Ok(swapped.then_some(Platform::Launchd))
 }
 
@@ -1077,8 +1096,13 @@ fn control_authority(dir: &Path) -> String {
         .and_then(|s| url::Url::parse(s).ok())
         .and_then(|u| {
             let host = u.host_str()?.to_string();
-            matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]")
-                .then(|| format!("{}:{}", host, u.port().unwrap_or(crate::config::CONTROL_PORT)))
+            matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]").then(|| {
+                format!(
+                    "{}:{}",
+                    host,
+                    u.port().unwrap_or(crate::config::CONTROL_PORT)
+                )
+            })
         })
         .unwrap_or(default)
 }
@@ -1223,12 +1247,19 @@ impl Lock {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let file = opts
-            .open(&path)
-            .map_err(|e| format!("Sprott 2.0 could not move ~/.safeclaw: open {}: {e}", path.display()))?;
+        let file = opts.open(&path).map_err(|e| {
+            format!(
+                "Sprott 2.0 could not move ~/.safeclaw: open {}: {e}",
+                path.display()
+            )
+        })?;
         #[cfg(unix)]
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-            .map_err(|e| format!("Sprott 2.0 could not move ~/.safeclaw: lock {}: {e}", path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).map_err(|e| {
+            format!(
+                "Sprott 2.0 could not move ~/.safeclaw: lock {}: {e}",
+                path.display()
+            )
+        })?;
         Ok(Lock { _file: file, path })
     }
 

@@ -87,7 +87,10 @@ fn crypto_domain_strings_are_frozen() {
     let mut files = Vec::new();
     walk(&root().join("src"), &mut files);
     let mut found: Vec<(String, String)> = Vec::new();
-    for f in files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")) {
+    for f in files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+    {
         let text = std::fs::read_to_string(f).unwrap();
         for c in lit.captures_iter(&text) {
             found.push((rel(f), c[1].to_string()));
@@ -99,7 +102,10 @@ fn crypto_domain_strings_are_frozen() {
         .map(|(f, s)| (f.to_string(), s.to_string()))
         .collect();
     want.sort();
-    assert_eq!(found, want, "a cryptographic domain string changed, moved or appeared");
+    assert_eq!(
+        found, want,
+        "a cryptographic domain string changed, moved or appeared"
+    );
 
     // The constants, by value.
     use crate::identity as id;
@@ -121,14 +127,29 @@ fn crypto_domain_strings_are_frozen() {
         (id::DS_PRINCIPAL_HEAD, "safeclaw/v1/principal-head"),
         (crate::pairing::DS_PAIR, "safeclaw/v1/pair"),
         (crate::pairing::DS_PAIR_KEYS, "safeclaw/v1/pair/keys"),
-        (crate::pairing::DS_PAIR_KEYS_SET, "safeclaw/v1/pair/keys-set"),
+        (
+            crate::pairing::DS_PAIR_KEYS_SET,
+            "safeclaw/v1/pair/keys-set",
+        ),
         (crate::pairing::DS_PAIR_OWNER, "safeclaw/v1/pair/owner"),
         (crate::approval::store::INTENT_TAG, "safeclaw/v1/intent"),
         (crate::crypto::batch::BATCH_TAG, "safeclaw/v1/batch-approve"),
-        (crate::crypto::binding::DOMAIN_STANDARD, "safeclaw/v1/binding"),
-        (crate::crypto::binding::DOMAIN_SETUP, "safeclaw/v1/binding-setup"),
-        (crate::crypto::envelope::GRANT_SEAL_INFO_PREFIX, "safeclaw/v1/grant-seal"),
-        (crate::crypto::envelope::GRANT_K_SEAL_INFO_PREFIX, "safeclaw/v1/grant-k-seal"),
+        (
+            crate::crypto::binding::DOMAIN_STANDARD,
+            "safeclaw/v1/binding",
+        ),
+        (
+            crate::crypto::binding::DOMAIN_SETUP,
+            "safeclaw/v1/binding-setup",
+        ),
+        (
+            crate::crypto::envelope::GRANT_SEAL_INFO_PREFIX,
+            "safeclaw/v1/grant-seal",
+        ),
+        (
+            crate::crypto::envelope::GRANT_K_SEAL_INFO_PREFIX,
+            "safeclaw/v1/grant-k-seal",
+        ),
         (crate::cli::webauthn::PRF_EVAL_SALT, "safeclaw-prf-v1"),
     ] {
         assert_eq!(c, s.as_bytes(), "{s}");
@@ -147,18 +168,26 @@ fn crypto_domain_strings_are_frozen() {
             .lines()
             .filter(|l| l.trim_start().starts_with("redirect_uri") && l.contains(":8765/"))
         {
-            assert!(line.contains(&format!("\"{LOOPBACK_REDIRECT}\"")), "{id}: {line}");
+            assert!(
+                line.contains(&format!("\"{LOOPBACK_REDIRECT}\"")),
+                "{id}: {line}"
+            );
             with_redirect += 1;
         }
     }
-    assert!(with_redirect >= 9, "the Google services name the loopback redirect");
+    assert!(
+        with_redirect >= 9,
+        "the Google services name the loopback redirect"
+    );
 }
 
 /// Files the binary embeds or the site and installer serve.
 fn shipped_files() -> Vec<PathBuf> {
     let r = root();
     let mut out = Vec::new();
-    for dir in ["src", "services", "skills", "docs", "static", "demo", "examples", "fuzz"] {
+    for dir in [
+        "src", "services", "skills", "docs", "static", "demo", "examples", "fuzz",
+    ] {
         walk(&r.join(dir), &mut out);
     }
     for f in [
@@ -172,9 +201,11 @@ fn shipped_files() -> Vec<PathBuf> {
     }
     out.retain(|p| {
         let rel = rel(p);
-        let text_like = ["rs", "toml", "md", "sh", "yml", "json", "svg", "tape", "txt", "html"]
-            .iter()
-            .any(|e| p.extension().is_some_and(|x| x == *e))
+        let text_like = [
+            "rs", "toml", "md", "sh", "yml", "json", "svg", "tape", "txt", "html",
+        ]
+        .iter()
+        .any(|e| p.extension().is_some_and(|x| x == *e))
             || p.file_name().is_some_and(|n| n == "install.sh");
         text_like
             // Not compiled (build.rs skips `_`-prefixed service dirs).
@@ -238,7 +269,9 @@ fn matching_brace_end(s: &str) -> usize {
                 i += 1;
             }
             b'r' if matches!(b.get(i + 1), Some(b'#') | Some(b'"'))
-                && !b.get(i.wrapping_sub(1)).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') =>
+                && !b
+                    .get(i.wrapping_sub(1))
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') =>
             {
                 let mut j = i + 1;
                 let mut hashes = 0;
@@ -295,7 +328,10 @@ fn matching_brace_end(s: &str) -> usize {
 fn test_modules_are_skipped_with_braces_in_strings() {
     let src = "fn a() {}\n#[cfg(test)]\nmod tests {\n    const S: &str = \"{\";\n    const R: &str = r#\"}\"#;\n    const C: char = '}';\n    fn f<'a>(x: &'a str) {} // }\n}\nfn b() {}\n";
     let out = without_test_modules(src);
-    assert_eq!(out.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>(), ["fn a() {}", "fn b() {}"]);
+    assert_eq!(
+        out.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
+        ["fn a() {}", "fn b() {}"]
+    );
 }
 
 #[test]

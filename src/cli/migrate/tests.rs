@@ -16,6 +16,8 @@ struct World {
     new_running: bool,
     /// The old daemon ignores every stop.
     stubborn: bool,
+    /// No user systemd: every systemctl call fails.
+    no_bus: bool,
     detached_pid: Option<u32>,
     calls: Vec<String>,
 }
@@ -60,6 +62,9 @@ impl Sys for FakeSys {
     fn systemctl(&self, args: &[&str]) -> Result<(), String> {
         let mut w = self.0.lock().unwrap();
         w.calls.push(format!("systemctl {}", args.join(" ")));
+        if w.no_bus {
+            return Err("Failed to connect to bus: No medium found".to_string());
+        }
         match args {
             ["stop", u] if *u == OLD_UNIT => {
                 if !w.stubborn {
@@ -197,7 +202,10 @@ fn seed_15(h: &Home) {
             "{{\"phase\":\"done\",\"state\":\"ok\",\"message\":\"See {home}/.safeclaw/setup/background.log\",\"pid\":1,\"updated_at\":2}}"
         ),
     );
-    put(&old.join("state/egress-proxy"), "http://proxy.example:3128\n");
+    put(
+        &old.join("state/egress-proxy"),
+        "http://proxy.example:3128\n",
+    );
     put(&old.join("crypto/sc_sk.bin"), "key");
 }
 
@@ -324,8 +332,14 @@ fn a_fresh_home_is_left_alone() {
     let h = Home::new("u");
     let sys = FakeSys::default();
     assert!(nothing_to_do(&h.home));
-    assert_eq!(run(&h.ctx(&sys, Platform::Systemd)).unwrap(), Outcome::Nothing);
-    assert!(snapshot(&h.home).is_empty(), "nothing created, not even the lock");
+    assert_eq!(
+        run(&h.ctx(&sys, Platform::Systemd)).unwrap(),
+        Outcome::Nothing
+    );
+    assert!(
+        snapshot(&h.home).is_empty(),
+        "nothing created, not even the lock"
+    );
     assert!(sys.calls().is_empty());
 }
 
@@ -350,7 +364,10 @@ fn a_running_systemd_install_moves_and_comes_back_as_sprott_service() {
     );
     assert!(!h.old().exists());
     assert!(!data.join(MOVING).exists());
-    assert!(!h.home.join(LOCK).exists(), "the lock goes once the move is done");
+    assert!(
+        !h.home.join(LOCK).exists(),
+        "the lock goes once the move is done"
+    );
 
     // agent.env files: keys renamed, the leading path rewritten, quoted again.
     let codex = format!(
@@ -384,7 +401,12 @@ fn a_running_systemd_install_moves_and_comes_back_as_sprott_service() {
         );
     }
     // Everything else moved unchanged (the egress proxy setting included).
-    for rel in ["config.toml", "agents/codex/identity", "state/egress-proxy", "crypto/sc_sk.bin"] {
+    for rel in [
+        "config.toml",
+        "agents/codex/identity",
+        "state/egress-proxy",
+        "crypto/sc_sk.bin",
+    ] {
         assert_eq!(fs::read(data.join(rel)).unwrap(), before[rel], "{rel}");
     }
 
@@ -403,11 +425,18 @@ fn a_running_systemd_install_moves_and_comes_back_as_sprott_service() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(h.unit_dir.join("sprott.service")).unwrap().permissions().mode();
+        let mode = fs::metadata(h.unit_dir.join("sprott.service"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
     assert!(!h.unit_dir.join(OLD_UNIT).exists());
-    assert_eq!(read(&data.join(PRE_2).join(OLD_UNIT)), unit, "moved, not copied");
+    assert_eq!(
+        read(&data.join(PRE_2).join(OLD_UNIT)),
+        unit,
+        "moved, not copied"
+    );
 
     assert_eq!(
         sys.calls(),
@@ -439,7 +468,10 @@ fn a_running_systemd_install_moves_and_comes_back_as_sprott_service() {
 
     // Done once: the next command finds nothing to do.
     assert!(nothing_to_do(&h.home));
-    assert_eq!(run(&h.ctx(&sys, Platform::Systemd)).unwrap(), Outcome::Nothing);
+    assert_eq!(
+        run(&h.ctx(&sys, Platform::Systemd)).unwrap(),
+        Outcome::Nothing
+    );
     assert_eq!(sys.calls().len(), 5);
 }
 
@@ -462,8 +494,18 @@ fn rewritten_agent_env_files_still_load_in_sh() {
                 .env_remove("SAFECLAW_AGENT_IDENTITY")
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
-            let agent = file.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
+            assert!(
+                out.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let agent = file
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
             assert_eq!(
                 String::from_utf8_lossy(&out.stdout),
                 format!(
@@ -481,7 +523,10 @@ fn agent_env_line_forms() {
     let home = Path::new("/home/a");
     let changed = |s: &str| EnvLine::Changed(s.to_string());
     for (line, want) in [
-        ("SAFECLAW_BROKER_URL=http://127.0.0.1:23294", changed("SPROTT_BROKER_URL=http://127.0.0.1:23294")),
+        (
+            "SAFECLAW_BROKER_URL=http://127.0.0.1:23294",
+            changed("SPROTT_BROKER_URL=http://127.0.0.1:23294"),
+        ),
         (
             "SAFECLAW_AGENT_IDENTITY=/home/a/.safeclaw/agents/x/identity",
             changed("SPROTT_AGENT_IDENTITY=/home/a/.sprott/agents/x/identity"),
@@ -495,7 +540,10 @@ fn agent_env_line_forms() {
             changed("SPROTT_AGENT_IDENTITY='~/.sprott/agents/x/identity'"),
         ),
         // A path that only looks like ours keeps its value; the key still moves.
-        ("SAFECLAW_DATA=/home/a/.safeclawx", changed("SPROTT_DATA=/home/a/.safeclawx")),
+        (
+            "SAFECLAW_DATA=/home/a/.safeclawx",
+            changed("SPROTT_DATA=/home/a/.safeclawx"),
+        ),
         ("OTHER=1", EnvLine::Same),
         ("# a comment", EnvLine::Same),
         ("", EnvLine::Same),
@@ -509,16 +557,25 @@ fn agent_env_line_forms() {
     }
     let spaced = Path::new("/Users/Mia Li");
     assert_eq!(
-        rewrite_env_line("SAFECLAW_AGENT_IDENTITY='/Users/Mia Li/.safeclaw/agents/x/identity'", spaced),
+        rewrite_env_line(
+            "SAFECLAW_AGENT_IDENTITY='/Users/Mia Li/.safeclaw/agents/x/identity'",
+            spaced
+        ),
         changed("SPROTT_AGENT_IDENTITY='/Users/Mia Li/.sprott/agents/x/identity'")
     );
     let quote = Path::new("/home/o'b");
     assert_eq!(
-        rewrite_env_line("SAFECLAW_AGENT_IDENTITY='/home/o'\\''b/.safeclaw/agents/x/identity'", quote),
+        rewrite_env_line(
+            "SAFECLAW_AGENT_IDENTITY='/home/o'\\''b/.safeclaw/agents/x/identity'",
+            quote
+        ),
         changed("SPROTT_AGENT_IDENTITY='/home/o'\\''b/.sprott/agents/x/identity'")
     );
     // A broken quote is not a form we write.
-    assert_eq!(rewrite_env_line("SAFECLAW_X='/home/a/.safeclaw/x", home), EnvLine::Left);
+    assert_eq!(
+        rewrite_env_line("SAFECLAW_X='/home/a/.safeclaw/x", home),
+        EnvLine::Left
+    );
 }
 
 #[test]
@@ -573,7 +630,10 @@ fn a_daemon_that_will_not_stop_refuses_and_moves_nothing() {
     assert!(!h.new_dir().exists());
     assert_eq!(
         sys.calls(),
-        ["systemctl stop safeclaw.service", "systemctl start safeclaw.service"],
+        [
+            "systemctl stop safeclaw.service",
+            "systemctl start safeclaw.service"
+        ],
         "what step 3 stopped is started again"
     );
     assert!(serve_must_wait(&h.home));
@@ -634,13 +694,21 @@ fn a_kill_at_any_step_is_finished_by_the_next_command() {
         assert!(matches!(run(&ctx), Err(Fail::Crashed)), "{step:?}");
 
         // Before the rename `serve` waits; after it, `serve` serves.
-        let expect = if step == Step::Stopped { State::A } else { State::B };
+        let expect = if step == Step::Stopped {
+            State::A
+        } else {
+            State::B
+        };
         assert_eq!(detect(&h.home), expect, "{step:?}");
         assert_eq!(serve_must_wait(&h.home), step == Step::Stopped, "{step:?}");
 
         ctx.crash_after = None;
         moved(run(&ctx));
-        assert_eq!(normalized(&h), want, "{step:?}: same end state as an uninterrupted move");
+        assert_eq!(
+            normalized(&h),
+            want,
+            "{step:?}: same end state as an uninterrupted move"
+        );
         assert_eq!(
             sys.count("systemctl start sprott.service"),
             1,
@@ -663,8 +731,12 @@ fn the_old_unit_serving_after_a_crash_is_swapped_in_one_bounce() {
     ctx.crash_after = None;
     moved(run(&ctx));
     let calls = sys.calls();
-    let disable = calls.iter().position(|c| c == "systemctl disable --now safeclaw.service");
-    let start = calls.iter().position(|c| c == "systemctl start sprott.service");
+    let disable = calls
+        .iter()
+        .position(|c| c == "systemctl disable --now safeclaw.service");
+    let start = calls
+        .iter()
+        .position(|c| c == "systemctl start sprott.service");
     assert!(disable.is_some() && start > disable, "{calls:?}");
 }
 
@@ -698,7 +770,10 @@ fn two_commands_at_once_move_once() {
         vec![a.join().unwrap(), b.join().unwrap()]
     });
     assert_eq!(
-        outcomes.iter().filter(|o| matches!(o, Outcome::Moved(_))).count(),
+        outcomes
+            .iter()
+            .filter(|o| matches!(o, Outcome::Moved(_)))
+            .count(),
         1,
         "{outcomes:?}"
     );
@@ -746,8 +821,55 @@ fn a_detached_daemon_is_stopped_by_its_pid_and_started_detached() {
     sys.0.lock().unwrap().detached_pid = Some(4242);
     let report = moved(run(&h.ctx(&sys, Platform::Systemd)));
     assert_eq!(report_lines(&report), ["Moved ~/.safeclaw to ~/.sprott."]);
-    assert_eq!(sys.calls(), ["kill 4242", "spawn /opt/sprott/bin/sprott serve"]);
+    assert_eq!(
+        sys.calls(),
+        ["kill 4242", "spawn /opt/sprott/bin/sprott serve"]
+    );
     assert_eq!(read(&h.new_dir().join("daemon.pid")), "4242\n");
+}
+
+/// A test container: 1.x `sc up` wrote safeclaw.service, found no user
+/// systemd and ran the daemon detached. The move finishes and restarts it
+/// detached.
+#[test]
+fn a_detached_daemon_beside_a_unit_file_without_user_systemd() {
+    let h = Home::new("u");
+    seed_15(&h);
+    seed_unit(&h, &old_unit_text(&h), false);
+    put(&h.old().join("daemon.pid"), "4242\n");
+    let sys = FakeSys::running();
+    {
+        let mut w = sys.0.lock().unwrap();
+        w.detached_pid = Some(4242);
+        w.no_bus = true;
+    }
+    let report = moved(run(&h.ctx(&sys, Platform::Systemd)));
+    assert_eq!(report_lines(&report), ["Moved ~/.safeclaw to ~/.sprott."]);
+    assert!(h.unit_dir.join("sprott.service").exists());
+    assert!(h.new_dir().join(PRE_2).join(OLD_UNIT).exists());
+    assert!(h.new_dir().join(RECORD).exists());
+    assert_eq!(sys.count("spawn /opt/sprott/bin/sprott serve"), 1);
+    assert_eq!(sys.count("systemctl start sprott.service"), 0);
+}
+
+/// Where systemd ran the daemon, a systemctl failure (a sandbox without the
+/// user bus) leaves the move unfinished for the next command.
+#[test]
+fn a_systemd_daemon_without_the_bus_finishes_later() {
+    let h = Home::new("u");
+    seed_15(&h);
+    seed_unit(&h, &old_unit_text(&h), true);
+    let sys = FakeSys::default();
+    sys.0.lock().unwrap().no_bus = true;
+    match run(&h.ctx(&sys, Platform::Systemd)) {
+        Ok(Outcome::Unfinished(e)) => assert!(e.contains("bus"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(detect(&h.home), State::B);
+    sys.0.lock().unwrap().no_bus = false;
+    let report = moved(run(&h.ctx(&sys, Platform::Systemd)));
+    assert_eq!(report.service, Some(Platform::Systemd));
+    assert_eq!(sys.count("systemctl enable sprott.service"), 1);
 }
 
 #[test]
@@ -767,7 +889,10 @@ fn a_hand_written_unit_is_left_and_reported() {
     assert!(!h.unit_dir.join("sprott.service").exists());
     assert_eq!(
         sys.calls(),
-        ["systemctl stop safeclaw.service", "systemctl start safeclaw.service"]
+        [
+            "systemctl stop safeclaw.service",
+            "systemctl start safeclaw.service"
+        ]
     );
     assert!(findings(&h.home, &h.unit_dir, &h.agents).iter().any(|f| f
         .starts_with("~/.config/systemd/user/safeclaw.service is a service file from before 2.0")));
@@ -803,14 +928,24 @@ fn a_launchd_install_moves_to_ai_sprott_daemon() {
             "/opt/sprott/bin/sprott",
             &[
                 ("SPROTT_PORT".to_string(), "24000".to_string()),
-                ("SPROTT_CA_PATH".to_string(), format!("{home}/.sprott/state/ca&.pem")),
+                (
+                    "SPROTT_CA_PATH".to_string(),
+                    format!("{home}/.sprott/state/ca&.pem")
+                ),
             ],
             &format!("{home}/.sprott/daemon.log"),
         )
     );
     assert!(!h.agents.join("pro.safeclaw.daemon.plist").exists());
-    assert_eq!(read(&h.new_dir().join(PRE_2).join("pro.safeclaw.daemon.plist")), old_plist);
-    let new_plist = h.agents.join("ai.sprott.daemon.plist").display().to_string();
+    assert_eq!(
+        read(&h.new_dir().join(PRE_2).join("pro.safeclaw.daemon.plist")),
+        old_plist
+    );
+    let new_plist = h
+        .agents
+        .join("ai.sprott.daemon.plist")
+        .display()
+        .to_string();
     assert_eq!(
         sys.calls(),
         [
@@ -831,12 +966,25 @@ fn the_control_port_comes_from_the_old_config() {
     let h = Home::new("u");
     let dir = h.old();
     assert_eq!(control_authority(&dir), "127.0.0.1:23293");
-    put(&dir.join("config.toml"), "daemon = \"http://127.0.0.1:24000\"\n");
+    put(
+        &dir.join("config.toml"),
+        "daemon = \"http://127.0.0.1:24000\"\n",
+    );
     assert_eq!(control_authority(&dir), "127.0.0.1:24000");
-    put(&dir.join("config.toml"), "custodian = \"http://localhost:24001/\"\n");
+    put(
+        &dir.join("config.toml"),
+        "custodian = \"http://localhost:24001/\"\n",
+    );
     assert_eq!(control_authority(&dir), "localhost:24001");
-    put(&dir.join("config.toml"), "daemon = \"https://vault.example.com\"\n");
-    assert_eq!(control_authority(&dir), "127.0.0.1:23293", "only a local daemon is ours to stop");
+    put(
+        &dir.join("config.toml"),
+        "daemon = \"https://vault.example.com\"\n",
+    );
+    assert_eq!(
+        control_authority(&dir),
+        "127.0.0.1:23293",
+        "only a local daemon is ours to stop"
+    );
 }
 
 #[test]
@@ -846,7 +994,10 @@ fn a_finished_move_with_a_recreated_old_dir_is_reported_not_read() {
     moved(run(&h.ctx(&sys, Platform::Systemd)));
     fs::create_dir(h.old()).unwrap();
     assert_eq!(detect(&h.home), State::C);
-    assert_eq!(run(&h.ctx(&sys, Platform::Systemd)).unwrap(), Outcome::Nothing);
+    assert_eq!(
+        run(&h.ctx(&sys, Platform::Systemd)).unwrap(),
+        Outcome::Nothing
+    );
     assert!(findings(&h.home, &h.unit_dir, &h.agents)
         .iter()
         .any(|f| f.starts_with("~/.safeclaw exists again beside ~/.sprott")));
