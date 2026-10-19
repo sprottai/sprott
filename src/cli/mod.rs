@@ -25,6 +25,7 @@ pub mod logging;
 pub mod login;
 pub mod logout;
 pub mod ls;
+pub mod migrate;
 pub mod neterr;
 pub mod pair_flow;
 pub mod op;

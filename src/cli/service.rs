@@ -176,7 +176,11 @@ fn launchd_converge(plist_arg: &str) -> Result<(), String> {
 pub(crate) fn service_binary() -> Result<PathBuf, String> {
     let bin =
         std::env::current_exe().map_err(|e| format!("can't find current binary path: {}", e))?;
-    Ok(fs::canonicalize(&bin).unwrap_or(bin))
+    Ok(canonical(bin))
+}
+
+fn canonical(bin: PathBuf) -> PathBuf {
+    fs::canonicalize(&bin).unwrap_or(bin)
 }
 
 /// The systemd user unit `sprott up` writes: our marker, `env_lines`
@@ -717,6 +721,23 @@ async fn start_detached() -> Result<(), String> {
         let _ = fs::remove_file(&pid_path);
     }
 
+    let binary = std::env::current_exe().map_err(|e| format!("locate current binary: {}", e))?;
+    let log_path = spawn_detached_serve(&binary)?;
+    if wait_for_daemon().await {
+        eprintln!("✓ daemon running in a detached process (log: {})", log_path.display());
+        Ok(())
+    } else {
+        Err(format!(
+            "detached daemon did not answer on its control port; see {}",
+            log_path.display()
+        ))
+    }
+}
+
+/// Start `<binary> serve` in its own session, logging to `~/.sprott/daemon.log`,
+/// and record its pid in `~/.sprott/daemon.pid`. Returns the log path. Does not
+/// wait for the control port.
+pub(crate) fn spawn_detached_serve(binary: &std::path::Path) -> Result<PathBuf, String> {
     let log_path = detached_log_path()?;
     if let Some(parent) = log_path.parent() {
         crate::cli::human_action::ensure_private_dir(parent)?;
@@ -740,7 +761,6 @@ async fn start_detached() -> Result<(), String> {
     let stderr = stdout
         .try_clone()
         .map_err(|e| format!("open {} for stderr: {}", log_path.display(), e))?;
-    let binary = std::env::current_exe().map_err(|e| format!("locate current binary: {}", e))?;
     let mut command = ProcCommand::new(binary);
     command
         .arg("serve")
@@ -756,15 +776,7 @@ async fn start_detached() -> Result<(), String> {
         let _ = child.kill();
         return Err(e);
     }
-    if wait_for_daemon().await {
-        eprintln!("✓ daemon running in a detached process (log: {})", log_path.display());
-        Ok(())
-    } else {
-        Err(format!(
-            "detached daemon did not answer on its control port; see {}",
-            log_path.display()
-        ))
-    }
+    Ok(log_path)
 }
 
 fn stop_detached() -> Result<(), String> {
@@ -923,6 +935,22 @@ mod tests {
             systemd_env_line("SPROTT_X", "a \"b\""),
             "Environment=\"SPROTT_X=a \\\"b\\\"\""
         );
+    }
+
+    /// `sc` and `safeclaw` are links to `sprott`; the unit names the file.
+    #[cfg(unix)]
+    #[test]
+    fn the_unit_binary_is_the_file_not_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("sprott");
+        fs::write(&real, b"bin").unwrap();
+        std::os::unix::fs::symlink("sprott", dir.path().join("sc")).unwrap();
+        assert_eq!(
+            canonical(dir.path().join("sc")),
+            fs::canonicalize(&real).unwrap()
+        );
+        let missing = dir.path().join("gone");
+        assert_eq!(canonical(missing.clone()), missing);
     }
 
     #[test]
