@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sprott CLI installer: github.com/getsafeclaw/safeclaw (open source).
+# Sprott CLI installer: github.com/sprottai/sprott (open source).
 #
 # What it does, in order (read it before you run it):
 #   * Downloads the prebuilt `sprott` binary for this platform from the
@@ -15,7 +15,7 @@
 #     SAFECLAW_NO_SETUP=1. Otherwise, prints one next step.
 set -eu
 
-REPO="getsafeclaw/safeclaw"
+REPO="sprottai/sprott"
 if [ -n "${SAFECLAW_VERSION:-}" ]; then
   BASE="https://github.com/${REPO}/releases/download/${SAFECLAW_VERSION}"
   RELEASE="${SAFECLAW_VERSION}"

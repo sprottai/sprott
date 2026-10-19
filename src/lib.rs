@@ -2,7 +2,7 @@
 /// downloads and hosts the skill the daemon's `/skill.md` points at. The one
 /// place to change when the repo moves (install.sh and the release workflow
 /// carry their own copy).
-pub const GITHUB_REPO: &str = "getsafeclaw/safeclaw";
+pub const GITHUB_REPO: &str = "sprottai/sprott";
 
 /// The version string every user-facing surface prints (`sprott version`,
 /// `/health`, doctor, upgrade). Release CI stamps the git tag into the build

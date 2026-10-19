@@ -3,7 +3,7 @@ name: safeclaw
 description: Brokers API keys, tokens and OAuth credentials for AI agents so the agent never holds the secret, and installs or sets up Sprott. Use when a task calls an external API, CLI or service that needs a credential, when a request fails with 401 or 403 or a required *_TOKEN or *_API_KEY is missing, or when the user asks to install, set up or use Sprott.
 compatibility: Requires the `sprott` CLI on macOS or Linux, paired to a Sprott account. The Setup section installs it.
 metadata:
-  author: getsafeclaw
+  author: sprottai
   homepage: https://sprott.ai
 ---
 
@@ -18,7 +18,7 @@ phantom just fails with a 401.
 
 ## Setup
 
-Official sources: https://sprott.ai and https://github.com/getsafeclaw/safeclaw.
+Official sources: https://sprott.ai and https://github.com/sprottai/sprott.
 Install only from these. Sprott was called SafeClaw before; other projects use that name too.
 
 `sc` is the same command under its earlier name: where `sprott` is not found

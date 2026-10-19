@@ -14,10 +14,10 @@ curl -fsSL https://sprott.ai/install.sh | sh
 
 Paste it to your AI agent, or run it in a terminal. It installs `sprott` and the agent skill. When an agent runs it, the installer continues straight into `sprott setup`; in a terminal it prints the next step.
 
-Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/getsafeclaw/safeclaw.
+Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/sprottai/sprott.
 
 <p align="center">
-  <a href="https://github.com/getsafeclaw/safeclaw/releases"><img src="https://img.shields.io/github/v/release/getsafeclaw/safeclaw?label=release&color=2ea44f" alt="release"></a>
+  <a href="https://github.com/sprottai/sprott/releases"><img src="https://img.shields.io/github/v/release/sprottai/sprott?label=release&color=2ea44f" alt="release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue" alt="license"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555" alt="platforms">
 </p>
@@ -76,7 +76,7 @@ curl -fsSL https://sprott.ai/install.sh | sh
 
 It installs `sprott` in `~/.local/bin`, verifies the download's SHA256, and installs the agent skill. When run by an agent, it continues straight into `sprott setup`; in a terminal it prints the next step. It uses no sudo.
 
-Each release also carries a sigstore build-provenance attestation: `gh attestation verify ~/.local/bin/sprott --repo getsafeclaw/safeclaw`.
+Each release also carries a sigstore build-provenance attestation: `gh attestation verify ~/.local/bin/sprott --repo sprottai/sprott`.
 
 **2. Set up the agent.** An agent installer continues here automatically. Otherwise run:
 
@@ -108,7 +108,7 @@ Full walkthrough: [docs/quickstart.md](docs/quickstart.md).
 
 ## Teach your agent
 
-Agents learn Sprott from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sprott skill install` and `sprott upgrade` installs it again. Without `sprott`, an agent can add it with `npx skills add getsafeclaw/safeclaw`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sprott get`; see [docs/sc-run.md](docs/sc-run.md).
+Agents learn Sprott from [skills/safeclaw/SKILL.md](skills/safeclaw/SKILL.md), in Agent Skills format. The installer adds it with `sprott skill install` and `sprott upgrade` installs it again. Without `sprott`, an agent can add it with `npx skills add sprottai/sprott`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sprott get`; see [docs/sc-run.md](docs/sc-run.md).
 
 ## CLI
 

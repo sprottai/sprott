@@ -34,7 +34,7 @@ release also carries a sigstore build-provenance attestation. To verify a
 binary yourself:
 
 ```bash
-gh attestation verify ~/.local/bin/sprott --repo getsafeclaw/safeclaw
+gh attestation verify ~/.local/bin/sprott --repo sprottai/sprott
 ```
 
 ## macOS

@@ -8,7 +8,7 @@ description = "Sprott daemon — multi-vault passkey-gated credential vault for 
 # (offering a substitute commercial product/service); converts to Apache-2.0
 # two years after each release. See LICENSE.
 license-file = "LICENSE"
-repository = "https://github.com/getsafeclaw/safeclaw"
+repository = "https://github.com/sprottai/sprott"
 
 # Three bin targets share the same main.rs:
 #   `sprott`   - the command name everything prints

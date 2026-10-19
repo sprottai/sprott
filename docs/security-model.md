@@ -1,7 +1,7 @@
 # Security model: where your keys actually live
 
 This page answers the security questions about Sprott's credential broker. The cryptographic detail behind each one is in
-[PROTOCOL.md](https://github.com/getsafeclaw/safeclaw/blob/main/design/protocol.md).
+[PROTOCOL.md](https://github.com/sprottai/sprott/blob/main/design/protocol.md).
 
 ## Where is the plaintext?
 

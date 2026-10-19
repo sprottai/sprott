@@ -13,7 +13,7 @@ The installer uses no sudo, verifies the download's SHA256, puts `sprott` in
 an agent, it continues straight into `sprott setup`; in a terminal it prints one
 next step. It also installs the skill with `sprott skill install`. Official sources
 are [sprott.ai](https://sprott.ai) and
-[github.com/getsafeclaw/safeclaw](https://github.com/getsafeclaw/safeclaw).
+[github.com/sprottai/sprott](https://github.com/sprottai/sprott).
 Supported platforms: [Platform support](reference/platform-support.md).
 
 ## 2. Run setup

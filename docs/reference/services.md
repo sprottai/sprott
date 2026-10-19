@@ -1,7 +1,7 @@
 # Service TOML reference (v4)
 
 This page explains how to write a Sprott service definition. Design rationale lives in
-[credential-broker.md](https://github.com/getsafeclaw/safeclaw/blob/main/design/credential-broker.md); this page is the authoring
+[credential-broker.md](https://github.com/sprottai/sprott/blob/main/design/credential-broker.md); this page is the authoring
 reference only.
 
 A service is a folder `services/{id}/`: flat, so the filesystem itself

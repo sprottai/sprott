@@ -4,18 +4,18 @@ This page explains how an agent gets the Sprott skill, runs setup, loads its ide
 
 ## The skill
 
-The skill lives at [`skills/safeclaw/SKILL.md`](https://github.com/getsafeclaw/safeclaw/blob/main/skills/safeclaw/SKILL.md) in Agent Skills format. It is the source of truth for discovery, phantom placement, `sprott run`, approvals, and setup.
+The skill lives at [`skills/safeclaw/SKILL.md`](https://github.com/sprottai/sprott/blob/main/skills/safeclaw/SKILL.md) in Agent Skills format. It is the source of truth for discovery, phantom placement, `sprott run`, approvals, and setup.
 
 The installer adds it with `sprott skill install`. `sprott upgrade` runs the skill
 install again, so the installed copy stays current. An agent without `sprott` can
 add it with:
 
 ```bash
-npx skills add getsafeclaw/safeclaw
+npx skills add sprottai/sprott
 ```
 
 Install only from [sprott.ai](https://sprott.ai) or
-[github.com/getsafeclaw/safeclaw](https://github.com/getsafeclaw/safeclaw).
+[github.com/sprottai/sprott](https://github.com/sprottai/sprott).
 
 ## Set up
 
