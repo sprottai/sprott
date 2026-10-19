@@ -7,7 +7,7 @@
 //! it pins that owner as `account_uik`. Then:
 //!
 //!   1. Persist `device_key` (a `sc_device_<rand>` token) to
-//!      `~/.safeclaw/device-key` (mode 0600): the daemon→cloud credential,
+//!      `~/.sprott/device-key` (mode 0600): the daemon→cloud credential,
 //!      distinct from any agent credential. The agent never sees it.
 //!   2. Persist the cloud coordinates and the verified owner (`account_uik` +
 //!      its key) in config.
@@ -206,7 +206,7 @@ pub async fn pair_and_persist(args: LoginArgs, allow_account_switch: bool) -> Re
 
     // ── Device identity (DIK): reuse this machine's keypair or mint a fresh one
     // (identity wave §5). Stable across re-logins so a device keeps one `dev_…`
-    // id. The private SEED stays on disk (0600, `~/.safeclaw/device/identity`);
+    // id. The private SEED stays on disk (0600, `~/.sprott/device/identity`);
     // only the PUBLIC key is registered with the cloud (authorized-devices set),
     // additive to the legacy device-key bearer that still authenticates
     // daemon↔cloud during the dual-auth window (§7).
@@ -285,7 +285,7 @@ pub(crate) fn persist_device_approval(
             .map_err(|e| format!("clear the previous account's local state: {}", e))?;
     }
 
-    // ── Persist the device-key to ~/.safeclaw/device-key (0600) ──────────
+    // ── Persist the device-key to ~/.sprott/device-key (0600) ──────────
     let key_path = device_key_path()?;
     write_device_key(&key_path, &parsed.device_key)?;
 
@@ -409,15 +409,15 @@ fn is_localhost_http(url: &str) -> bool {
     host == "localhost" || host == "127.0.0.1"
 }
 
-/// `~/.safeclaw/device-key` — the cloud-side device key (Token 2,
+/// `~/.sprott/device-key` — the cloud-side device key (Token 2,
 /// a `sc_device_...` token) persisted after `sc login`. Distinct from
-/// `~/.safeclaw/api-key` (the local agent→daemon broker key, Token 1):
+/// `~/.sprott/api-key` (the local agent→daemon broker key, Token 1):
 /// this one is used by the daemon itself to authenticate against the SaaS
 /// op-relay once Slice C wires daemon→cloud registration. The agent never
 /// sees it.
 fn device_key_path() -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
-    Ok(home.join(".safeclaw").join("device-key"))
+    let dir = crate::names::data_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
+    Ok(dir.join("device-key"))
 }
 
 fn write_device_key(path: &std::path::Path, device_key: &str) -> Result<(), String> {

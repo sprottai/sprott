@@ -7,12 +7,12 @@
 //!   - **macOS:** a LaunchAgent at
 //!     `~/Library/LaunchAgents/pro.safeclaw.daemon.plist`, driven by
 //!     `launchctl` (RunAtLoad + KeepAlive = the systemd unit's start +
-//!     `Restart=on-failure`). Logs go to `~/.safeclaw/daemon.log`.
+//!     `Restart=on-failure`). Logs go to `~/.sprott/daemon.log`.
 //! Other platforms fall back to `sc serve` (foreground).
 //!
 //! Why user-level (not system-level)?
 //! - No sudo required — the daemon runs as the same user that called `sc start`.
-//! - Vault state lives under `$HOME/.safeclaw/`, owned by the same user.
+//! - Vault state lives under `$HOME/.sprott/`, owned by the same user.
 //! - Encapsulates "this user's Sprott daemon" cleanly. Multi-user hosts
 //!   work too, each user gets their own daemon.
 //!
@@ -59,8 +59,8 @@ fn launchd_plist_path() -> Result<std::path::PathBuf, String> {
 
 #[cfg(target_os = "macos")]
 fn launchd_log_path() -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().ok_or("no home dir")?;
-    Ok(home.join(".safeclaw").join("daemon.log"))
+    let dir = crate::names::data_dir().ok_or("no home dir")?;
+    Ok(dir.join("daemon.log"))
 }
 
 /// Escape a string for inclusion in plist XML text (paths / env values).
@@ -183,7 +183,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     let mut env_lines = Vec::new();
     for (k, v) in std::env::vars() {
         // Don't leak the agent-facing SAFECLAW_API_KEY into the daemon's
-        // env — the daemon reads its api-key from the FILE `~/.safeclaw/api-key`
+        // env — the daemon reads its api-key from the FILE `~/.sprott/api-key`
         // (provisioned below), and a stray/foreign value in the operator's
         // shell must not be adopted as the broker key.
         if k.starts_with("SAFECLAW_")
@@ -345,7 +345,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     let plist_path = launchd_plist_path()?;
     let dir = plist_path.parent().ok_or("bad LaunchAgents path")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
-    // Ensure the log's parent (~/.safeclaw) exists so launchd can open it.
+    // Ensure the log's parent (~/.sprott) exists so launchd can open it.
     if let Some(logdir) = log_path.parent() {
         std::fs::create_dir_all(logdir)
             .map_err(|e| format!("create {}: {}", logdir.display(), e))?;
@@ -622,13 +622,13 @@ pub fn unit_installed() -> bool {
 }
 
 fn detached_pid_path() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("cannot locate home dir")?;
-    Ok(home.join(".safeclaw").join("daemon.pid"))
+    let dir = crate::names::data_dir().ok_or("cannot locate home dir")?;
+    Ok(dir.join("daemon.pid"))
 }
 
 fn detached_log_path() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("cannot locate home dir")?;
-    Ok(home.join(".safeclaw").join("daemon.log"))
+    let dir = crate::names::data_dir().ok_or("cannot locate home dir")?;
+    Ok(dir.join("daemon.log"))
 }
 
 fn read_detached_pid() -> Option<u32> {

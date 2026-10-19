@@ -190,7 +190,7 @@ pub async fn run(json: bool) -> Result<(), String> {
                     report.push(
                         Mark::Warn,
                         format!(
-                            "vault data: {} record(s) could not be read and were skipped (details in ~/.safeclaw/daemon.log)",
+                            "vault data: {} record(s) could not be read and were skipped (details in ~/.sprott/daemon.log)",
                             unreadable
                         ),
                     );

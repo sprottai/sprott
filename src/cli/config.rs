@@ -1,5 +1,5 @@
 //! `sc config set/get/unset/ls` — persistent CLI preferences in
-//! `~/.safeclaw/config.toml` `[settings]`.
+//! `~/.sprott/config.toml` `[settings]`.
 //!
 //! Resolution chain for any setting:
 //!   1. CLI flag (per-invocation)

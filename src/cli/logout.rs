@@ -1,6 +1,6 @@
 //! `sc logout` — unpair this machine: the inverse of `sc login`.
 //!
-//! `sc login` writes three things: the `~/.safeclaw/device-key` (this host's
+//! `sc login` writes three things: the `~/.sprott/device-key` (this host's
 //! cloud credential), the active pairing in `config.toml` (custodian, vault,
 //! cloud_backend, frontend_origin), and the `known_vaults` history. `logout`
 //! undoes all of it and stops the daemon, so a re-pair starts clean and the
@@ -54,8 +54,8 @@ pub async fn run(args: LogoutArgs) -> Result<(), String> {
     wipe_local_account_state()?;
 
     // 3. Remove the device-key file (this host's identity to the cloud).
-    if let Some(home) = dirs::home_dir() {
-        let p = home.join(".safeclaw").join("device-key");
+    if let Some(dir) = crate::names::data_dir() {
+        let p = dir.join("device-key");
         if p.exists() {
             std::fs::remove_file(&p).map_err(|e| format!("remove {}: {}", p.display(), e))?;
         }

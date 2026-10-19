@@ -67,7 +67,11 @@ pub fn run(sub: SkillSubcommand) -> Result<(), String> {
 
 pub fn manifest_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("cannot locate home dir")?;
-    Ok(home.join(".safeclaw").join("skill-manifest.json"))
+    Ok(manifest_path_in(&home))
+}
+
+fn manifest_path_in(home: &Path) -> PathBuf {
+    crate::names::data_dir_in(home).join("skill-manifest.json")
 }
 
 pub fn install(force: bool) -> Result<InstallReport, String> {
@@ -78,7 +82,7 @@ pub fn install(force: bool) -> Result<InstallReport, String> {
 fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
     let skill_dir = home.join(".agents/skills").join(NAME);
     let skill_path = skill_dir.join("SKILL.md");
-    let manifest_path = home.join(".safeclaw/skill-manifest.json");
+    let manifest_path = manifest_path_in(home);
     let old_manifest = read_manifest(&manifest_path)?;
     let new_hash = sha256(SKILL.as_bytes());
     let current_hash = fs::read(&skill_path).ok().map(|b| sha256(&b));
@@ -266,7 +270,7 @@ pub fn remove(force: bool) -> Result<Vec<PathBuf>, String> {
 }
 
 fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
-    let manifest_path = home.join(".safeclaw/skill-manifest.json");
+    let manifest_path = manifest_path_in(home);
     let Some(manifest) = read_manifest(&manifest_path)? else {
         return Ok(Vec::new());
     };

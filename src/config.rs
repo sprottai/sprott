@@ -120,7 +120,7 @@ pub enum Command {
     /// daemon-side state (irreversible, passkey-gated). Short: `sprott v`.
     #[command(alias = "v")]
     Vault(VaultArgs),
-    /// Read/write persistent CLI preferences in `~/.safeclaw/config.toml`.
+    /// Read/write persistent CLI preferences in `~/.sprott/config.toml`.
     /// Settings here are the lowest-priority fallback in the resolution
     /// chain (flag > env > config > default). Subs: set / get / unset /
     /// ls.
@@ -156,13 +156,13 @@ pub enum Command {
     Upgrade(UpgradeArgs),
     /// Pair this host to your Sprott account: prints a short code and an
     /// approval link; you approve in the browser, then this host gets its
-    /// cloud-side daemon credential. Writes `~/.safeclaw/device-key` (0600). Run once per host (re-run to repair/re-pair).
+    /// cloud-side daemon credential. Writes `~/.sprott/device-key` (0600). Run once per host (re-run to repair/re-pair).
     /// `sprott login` then brings the daemon up and unlocks for you; `sprott up` is the
     /// everyday "make sure it's running" afterwards.
     Login(LoginArgs),
     /// Unpair this host: the inverse of `sprott login`. Stops the daemon, clears the
     /// local pairing (active vault, cloud backend, known vaults), removes the
-    /// `~/.safeclaw/device-key`, and revokes that device-key cloud-side (its
+    /// `~/.sprott/device-key`, and revokes that device-key cloud-side (its
     /// plaintext is gone locally, so the server row is dead weight otherwise).
     /// `--keep-remote` skips the cloud revoke. Your agent's `SAFECLAW_*` shell
     /// env is yours to remove (we can't edit your profile).
@@ -841,7 +841,7 @@ pub struct LogArgs {
 #[derive(Debug, Args)]
 pub struct ServeArgs {
     /// Top-level state directory. Vaults live at <state-dir>/vaults/<id>/.
-    /// Defaults to `~/.safeclaw/state` (parity with `~/.safeclaw/{crypto,
+    /// Defaults to `~/.sprott/state` (parity with `~/.sprott/{crypto,
     /// config.toml,services}`). The old `./state` default was cwd-relative,
     /// which silently created a fresh empty state dir when the daemon was
     /// launched from an arbitrary working directory (e.g. a systemd unit
@@ -913,7 +913,7 @@ pub struct ServeArgs {
 }
 
 /// `sprott status` takes no flags — the daemon (control root) comes from
-/// `~/.safeclaw/config.toml`; the active vault is `--vault` else
+/// `~/.sprott/config.toml`; the active vault is `--vault` else
 /// `$SAFECLAW_VAULT_ID` (env pin) else the config default (§5).
 #[derive(Debug, Args)]
 pub struct StatusArgs {}
@@ -1110,7 +1110,7 @@ impl Config {
         // rp_id then defaults to the origin's host (scheme, path and :port
         // stripped; "localhost" if it does not parse).
         let relying_party = relying_party_for(&origin, explicit, args.rp_id);
-        // state_dir default = ~/.safeclaw/state (see `default_state_dir`).
+        // state_dir default = ~/.sprott/state (see `default_state_dir`).
         let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
         Self {
             state_dir,
@@ -1127,7 +1127,7 @@ impl Config {
 }
 
 /// The daemon's state directory, resolved the SAME way `from_serve_args` does:
-/// `$SAFECLAW_STATE_DIR` else `~/.safeclaw/state` (single `~/.safeclaw` tree so
+/// `$SAFECLAW_STATE_DIR` else `~/.sprott/state` (single `~/.sprott` tree so
 /// the whole footprint is one dir to chmod/back up; cwd-relative `./state` only
 /// if the home dir is somehow unknown). Short-lived CLI verbs that need the
 /// resident CA path (`sprott run`, `sprott status`) share this so they never drift from
@@ -1136,8 +1136,8 @@ pub fn default_state_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("SAFECLAW_STATE_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::home_dir()
-        .map(|h| h.join(".safeclaw").join("state"))
+    crate::names::data_dir()
+        .map(|d| d.join("state"))
         .unwrap_or_else(|| PathBuf::from("./state"))
 }
 

@@ -36,6 +36,7 @@ pub mod error;
 mod generated_services;
 pub mod identity;
 pub mod identity_file;
+pub mod names;
 pub mod passkey;
 pub mod pairing;
 pub mod principal_ledger;

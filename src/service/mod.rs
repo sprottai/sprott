@@ -862,7 +862,7 @@ impl ServiceRegistry {
     /// never mixed across layers):
     /// 1. Compiled-in defaults (always loaded as base)
     /// 2. $SAFECLAW_DATA/services/ (runtime override for dev/deployment)
-    /// 3. ~/.safeclaw/services/ (user-installed services, highest priority)
+    /// 3. ~/.sprott/services/ (user-installed services, highest priority)
     pub fn load() -> Self {
         let mut services = HashMap::new();
         // id → the policy.toml text its admitted definition carries, so an
@@ -878,7 +878,7 @@ impl ServiceRegistry {
             Self::admit_dir(files, &mut services, &mut policy_texts);
         }
 
-        // Layer 3: ~/.safeclaw/services/ (user-installed, overrides everything)
+        // Layer 3: ~/.sprott/services/ (user-installed, overrides everything)
         Self::load_user_services(&mut services, &mut policy_texts);
 
         tracing::info!("Loaded {} service definitions", services.len());
@@ -1047,7 +1047,7 @@ impl ServiceRegistry {
         }
     }
 
-    /// Load user-installed services from ~/.safeclaw/services/.
+    /// Load user-installed services from ~/.sprott/services/.
     /// Skips directories with a `.disabled` marker file.
     fn load_user_services(
         services: &mut HashMap<String, ServiceDef>,
@@ -1175,7 +1175,7 @@ impl ServiceRegistry {
     /// whether it's fatal).
     /// Ports the on-demand OAuth auto-catch listener may bind: the loopback
     /// targets announced by LOCALLY-INSTALLED service defs (compiled-in +
-    /// `$SAFECLAW_DATA` + `~/.safeclaw/services`) plus the canonical default —
+    /// `$SAFECLAW_DATA` + `~/.sprott/services`) plus the canonical default —
     /// today `{8765, 1455}` (google-suite default + openai_codex's registered
     /// callback). This is the SECURITY BOUNDARY for which ports a connect can
     /// open: vault-synced custom defs (`aux.services`) are deliberately NOT
@@ -1273,9 +1273,9 @@ impl ServiceRegistry {
 
 // ── User service directory ───────────────────────────────────────────────────
 
-/// Returns ~/.safeclaw/services/ path, or None if home dir can't be resolved.
+/// Returns ~/.sprott/services/ path, or None if home dir can't be resolved.
 pub fn user_services_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".safeclaw").join("services"))
+    crate::names::data_dir().map(|d| d.join("services"))
 }
 
 #[cfg(test)]

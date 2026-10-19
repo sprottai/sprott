@@ -583,8 +583,8 @@ async fn self_wipe_and_logout(state: &Arc<AppState>) -> ! {
     }
     // 2. Delete the device-key (this host's cloud credential): once gone, the bearer
     //    can never be matched again.
-    if let Some(home) = dirs::home_dir() {
-        let _ = std::fs::remove_file(home.join(".safeclaw").join("device-key"));
+    if let Some(dir) = crate::names::data_dir() {
+        let _ = std::fs::remove_file(dir.join("device-key"));
     }
     // 3. Clear the pairing from config + known-vaults (mirrors `sc logout`).
     if let Err(e) = crate::cli::active::clear_pairing() {

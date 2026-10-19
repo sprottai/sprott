@@ -65,7 +65,7 @@ pub async fn do_browser_gesture(
     cb_port: Option<u16>,
 ) -> Result<GestureResult, String> {
     // Resolution: flag (already includes SAFECLAW_CB_PORT via clap)
-    //   → ~/.safeclaw/config.toml [settings] cb_port → None (random).
+    //   → ~/.sprott/config.toml [settings] cb_port → None (random).
     let cb_port_from_flag = cb_port;
     let cb_port = cb_port.or_else(crate::cli::active::settings_cb_port);
     let cb_port_from_config = cb_port_from_flag.is_none() && cb_port.is_some();

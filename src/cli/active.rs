@@ -1,4 +1,4 @@
-//! CLI-side config (`~/.safeclaw/config.toml`) + the single derivation point
+//! CLI-side config (`~/.sprott/config.toml`) + the single derivation point
 //! for every daemon URL the CLI uses.
 //!
 //! The DEVICE atoms live here: `daemon` (the daemon the human's `sc` talks to)
@@ -18,7 +18,7 @@
 //! `custodian`; `#[serde(alias = "custodian")]` keeps those loading (pre-launch
 //! is wipe+re-enroll, so the alias is belt-and-suspenders, not a migration).
 //! The vault-history catalog lives in its own file
-//! (`~/.safeclaw/known_vaults.toml`, ssh known_hosts-style — append-growing,
+//! (`~/.sprott/known_vaults.toml`, ssh known_hosts-style — append-growing,
 //! harmless to delete), separate from the active selection.
 
 use std::fs;
@@ -36,7 +36,7 @@ pub struct CliConfig {
     #[serde(default)]
     pub vault: Option<String>,
     /// LEGACY location of the vault-history catalog — now lives in
-    /// `~/.safeclaw/known_vaults.toml` (see [`known_vaults`]). Still read (and
+    /// `~/.sprott/known_vaults.toml` (see [`known_vaults`]). Still read (and
     /// merged) so pre-split configs keep working; the first catalog WRITE
     /// migrates entries over and clears this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -157,8 +157,8 @@ pub struct KnownVault {
 }
 
 pub fn config_path() -> Result<PathBuf, String> {
-    let base = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
-    Ok(base.join(".safeclaw").join("config.toml"))
+    let base = crate::names::data_dir().ok_or_else(|| "no home dir".to_string())?;
+    Ok(base.join("config.toml"))
 }
 
 pub fn load() -> Result<CliConfig, String> {
@@ -192,8 +192,8 @@ pub fn save(cfg: &CliConfig) -> Result<PathBuf, String> {
 // ── known-vaults catalog (own file, design wave §E) ─────────────────────────
 
 pub fn known_vaults_path() -> Result<PathBuf, String> {
-    let base = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
-    Ok(base.join(".safeclaw").join("known_vaults.toml"))
+    let base = crate::names::data_dir().ok_or_else(|| "no home dir".to_string())?;
+    Ok(base.join("known_vaults.toml"))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

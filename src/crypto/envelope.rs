@@ -11,7 +11,7 @@
 //!   AEAD: ChaCha20-Poly1305
 //!
 //! Storage:
-//!   `~/.safeclaw/crypto/sc_sk.bin` — raw 32-byte X25519 scalar
+//!   `~/.sprott/crypto/sc_sk.bin` — raw 32-byte X25519 scalar
 //!
 //! Lifecycle: generated once on first daemon start, persists across restarts.
 //! Loss = clients pinning the old `sc_pk` see a fingerprint mismatch on next
@@ -150,8 +150,8 @@ impl ScKeyPair {
 }
 
 fn sk_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Internal("no home dir".into()))?;
-    Ok(home.join(".safeclaw").join("crypto").join("sc_sk.bin"))
+    let dir = crate::names::data_dir().ok_or_else(|| AppError::Internal("no home dir".into()))?;
+    Ok(dir.join("crypto").join("sc_sk.bin"))
 }
 
 #[cfg(test)]

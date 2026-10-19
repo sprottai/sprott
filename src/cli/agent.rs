@@ -304,8 +304,8 @@ mod env_value_tests {
     #[test]
     fn a_path_with_a_space_is_quoted_once() {
         assert_eq!(
-            super::env_value("/home/a/.safeclaw/agents/claude/identity"),
-            "/home/a/.safeclaw/agents/claude/identity"
+            super::env_value("/home/a/.sprott/agents/claude/identity"),
+            "/home/a/.sprott/agents/claude/identity"
         );
         assert_eq!(super::env_value("/Users/Jo Lee/x"), "'/Users/Jo Lee/x'");
         assert_eq!(super::env_value("/it's"), "'/it'\\''s'");
