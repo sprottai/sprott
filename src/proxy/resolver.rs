@@ -56,7 +56,11 @@ fn is_valid_segment(s: &str) -> bool {
 /// (triple underscore) is rejected — the delimiter is exactly `__` and ids never
 /// contain it.
 pub fn parse_phantom(token: &str) -> Option<Phantom> {
-    let body = token.strip_prefix(PHANTOM_PREFIX)?.strip_suffix("__")?;
+    parse_with(PHANTOM_PREFIX, token)
+}
+
+fn parse_with(prefix: &str, token: &str) -> Option<Phantom> {
+    let body = token.strip_prefix(prefix)?.strip_suffix("__")?;
     if body.is_empty() || body.contains("___") {
         return None;
     }
@@ -74,6 +78,41 @@ pub fn parse_phantom(token: &str) -> Option<Phantom> {
         }),
         _ => None,
     }
+}
+
+// ── pre-2.0 phantoms (2.0.x only; delete in 2.1, design/compat-sunset.md) ──
+
+/// The phantom prefix before 2.0. Read only to name its replacement.
+const OLD_PHANTOM_PREFIX: &str = "__sc__";
+
+static OLD_PHANTOM_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!("{}{}", regex::escape(OLD_PHANTOM_PREFIX), PHANTOM_BODY_RE))
+        .expect("old phantom regex is valid")
+});
+
+/// The first phantom from before 2.0 in `input` and its 2.0 spelling, e.g.
+/// `("__sc__github__", "__sprott__github__")`. The 2.0 scan runs first and
+/// every span it matches is masked, so a valid 2.0 phantom that contains an
+/// old-looking one (connection `sc`, role `token`: `__sprott__sc__token__`)
+/// is never read as old.
+pub fn old_phantom(input: &str) -> Option<(String, String)> {
+    if !input.contains(OLD_PHANTOM_PREFIX) {
+        return None;
+    }
+    let mut masked = input.as_bytes().to_vec();
+    for m in PHANTOM_RE.find_iter(input) {
+        // A match is ASCII, so blanking its bytes keeps the text UTF-8.
+        masked[m.range()].fill(b' ');
+    }
+    let masked = String::from_utf8(masked).ok()?;
+    OLD_PHANTOM_RE.find_iter(&masked).find_map(|m| {
+        let old = parse_with(OLD_PHANTOM_PREFIX, m.as_str())?;
+        let new = match &old.role {
+            None => format!("{PHANTOM_PREFIX}{}__", old.conn),
+            Some(role) => format!("{PHANTOM_PREFIX}{}__{}__", old.conn, role),
+        };
+        Some((old.raw, new))
+    })
 }
 
 /// True iff `input` contains at least one phantom. Cheap pre-check that avoids
@@ -234,6 +273,40 @@ mod tests {
         assert!(!contains_phantom("nothing here"));
         assert!(!contains_phantom("Bearer sk-live-realtoken"));
         assert!(contains_phantom("Bearer __sprott__stripe_key__"));
+    }
+
+    // ── pre-2.0 phantoms ────────────────────────────────────────────────────
+    #[test]
+    fn an_old_phantom_is_named_with_its_replacement() {
+        assert_eq!(
+            old_phantom("https://x:__sc__github__@github.com/o/r"),
+            Some(("__sc__github__".to_string(), "__sprott__github__".to_string()))
+        );
+        assert_eq!(
+            old_phantom("Bearer __sc__bb__api_token__"),
+            Some((
+                "__sc__bb__api_token__".to_string(),
+                "__sprott__bb__api_token__".to_string()
+            ))
+        );
+        assert_eq!(old_phantom("Bearer sk-live-real"), None);
+        assert_eq!(old_phantom("__sc__GitHub__"), None, "not the grammar");
+        // Old phantoms are not phantoms any more.
+        assert!(collect_phantoms("Bearer __sc__github__").is_empty());
+    }
+
+    #[test]
+    fn a_new_phantom_that_contains_an_old_looking_one_is_not_old() {
+        // Connection `sc`, role `token`.
+        let s = "Bearer __sprott__sc__token__";
+        assert_eq!(collect_phantoms(s), vec![p("sc", Some("token"))]);
+        assert_eq!(old_phantom(s), None);
+        assert_eq!(old_phantom("__sprott__sc__x__:__sprott__sc__"), None);
+        // An old one beside a new one is still found.
+        assert_eq!(
+            old_phantom("__sprott__sc__token__ __sc__github__").map(|(o, _)| o),
+            Some("__sc__github__".to_string())
+        );
     }
 
     // ── substitution sites ──────────────────────────────────────────────────

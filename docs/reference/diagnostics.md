@@ -60,6 +60,7 @@ Sprott because it is the hop that observed them.
 | `no_vault` | 403 | configure | config | no vault bound to the request |
 | `oauth_mint` | 502 | retry | upstream | token mint failed at the provider |
 | `phantom_plain_http` | 400 | fix_request | request | phantom requires HTTPS |
+| `phantom_renamed` | 400 | fix_request | request | a phantom from before Sprott 2.0 (`__sc__<conn>__`); the message names its replacement (`__sprott__<conn>__`). 2.0.x only |
 | `policy_denied` | 403 | none | policy | blocked by an explicit `deny` rule |
 | `refresh_forbidden` | 403 | fix_request | policy | refresh tokens never leave the vault |
 | `secret_encoding` | 500 | none | internal | resolved credential not valid UTF-8 |

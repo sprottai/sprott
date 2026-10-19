@@ -39,15 +39,16 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     let proxy_url = agent_proxy_url(&vid);
     // Friendly hint (user's request): a shell with NEITHER an AIK identity nor a
     // legacy api-key can't authenticate credential substitution, so it will 407.
-    // Say so once, up front. An AIK agent (SPROTT_AGENT_IDENTITY) takes the shim
-    // path below and needs no key, so the note must recognize it too, or a keyless
-    // agent that is fully set up gets a misleading warning.
+    // Say so once, up front, and name the file to load. An AIK agent
+    // (SPROTT_AGENT_IDENTITY) takes the shim path below and needs no key, so the
+    // note must recognize it too, or a keyless agent that is fully set up gets a
+    // misleading warning. A shell from before 2.0 carries SAFECLAW_* names,
+    // which are not read; this note is what it sees.
     if !args.export_env && !agent_has_key() && load_agent_signer().is_none() {
-        eprintln!(
-            "note: this shell carries no Sprott agent identity, so credential substitution \
-             will 407. Load your agent env (SPROTT_AGENT_IDENTITY, or a legacy SPROTT_API_KEY) \
-             and retry. This is not a daemon or port problem; non-credential traffic is unaffected."
-        );
+        let env_file = crate::names::data_dir()
+            .map(|d| agent_env_hint(&d))
+            .unwrap_or_else(|| AGENT_ENV_PLACEHOLDER.to_string());
+        eprintln!("{}", no_identity_note(&env_file));
     }
 
     if !args.export_env {
@@ -203,6 +204,47 @@ fn agent_proxy_url(vid: &str) -> String {
     proxy_url_for_vault(&api_face_root(&cfg), vid, key.as_deref())
 }
 
+const AGENT_ENV_PLACEHOLDER: &str = "~/.sprott/agents/<name>/agent.env";
+
+/// The note `sprott run` prints when the shell carries no agent identity.
+fn no_identity_note(env_file: &str) -> String {
+    format!(
+        "note: this shell carries no Sprott agent identity, so credential substitution will 407. \
+         Load your agent env, then retry: set -a; . {env_file}; set +a (it sets \
+         SPROTT_AGENT_IDENTITY). This is not a daemon or port problem; non-credential traffic \
+         is unaffected."
+    )
+}
+
+/// `~/.sprott/agents/<name>/agent.env`, with `<name>` filled in (shell-quoted)
+/// when exactly one agent directory under `data_dir` has an agent.env.
+fn agent_env_hint(data_dir: &Path) -> String {
+    let names: Vec<String> = std::fs::read_dir(data_dir.join("agents"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().join("agent.env").is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    match names.as_slice() {
+        [name] => {
+            let word = if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                name.clone()
+            } else {
+                format!("'{}'", name.replace('\'', "'\\''"))
+            };
+            format!("~/{}/agents/{}/agent.env", crate::names::DATA_DIR, word)
+        }
+        _ => AGENT_ENV_PLACEHOLDER.to_string(),
+    }
+}
+
 /// Does this shell carry an agent identity? Its `$SPROTT_API_KEY`.
 fn agent_has_key() -> bool {
     std::env::var("SPROTT_API_KEY")
@@ -314,4 +356,42 @@ fn exec_child(cmd: &[String], bundle: &[(String, String)]) -> Result<(), String>
     }
     let status = c.status().map_err(|e| format!("spawn {}: {}", prog, e))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_note_names_the_agent_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(agent_env_hint(dir.path()), "~/.sprott/agents/<name>/agent.env");
+
+        let put = |name: &str| {
+            let d = dir.path().join("agents").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("agent.env"), "SPROTT_BROKER_URL=x\n").unwrap();
+        };
+        put("Claude Code (VM)");
+        assert_eq!(
+            agent_env_hint(dir.path()),
+            "~/.sprott/agents/'Claude Code (VM)'/agent.env"
+        );
+        put("codex");
+        assert_eq!(
+            agent_env_hint(dir.path()),
+            "~/.sprott/agents/<name>/agent.env",
+            "two agents: the placeholder"
+        );
+
+        let note = no_identity_note("~/.sprott/agents/codex/agent.env");
+        assert_eq!(
+            note,
+            "note: this shell carries no Sprott agent identity, so credential substitution will 407. \
+             Load your agent env, then retry: set -a; . ~/.sprott/agents/codex/agent.env; set +a \
+             (it sets SPROTT_AGENT_IDENTITY). This is not a daemon or port problem; \
+             non-credential traffic is unaffected."
+        );
+        assert!(!note.contains("SAFECLAW"));
+    }
 }

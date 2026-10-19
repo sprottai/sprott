@@ -165,7 +165,7 @@ impl HttpHandler for BrokerHandler {
                 .into();
         }
 
-        self.pipeline(ctx, req).await
+        self.pipeline(ctx.client_addr.ip(), req).await
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
@@ -202,13 +202,12 @@ impl BrokerHandler {
         self.agent_id.clone()
     }
 
-    async fn pipeline(&mut self, ctx: &HttpContext, req: Request<Body>) -> RequestOrResponse {
+    async fn pipeline(&mut self, ip: IpAddr, req: Request<Body>) -> RequestOrResponse {
         let is_https = req.uri().scheme_str() == Some("https");
         let dest_host = match req.uri().host() {
             Some(h) => h.to_ascii_lowercase(),
             None => return req.into(), // origin-form / no authority: not ours
         };
-        let ip = ctx.client_addr.ip();
 
         let (mut parts, body) = req.into_parts();
         // `orig_body` is the un-scanned streaming body; `body_bytes` is the
@@ -236,8 +235,26 @@ impl BrokerHandler {
             }
         }
         // Authorization: Basic <b64> — decode before matching.
-        if let Some(decoded) = basic_auth_decoded(&parts.headers) {
-            merge_phantoms(&mut phantoms, resolver::collect_phantoms(&decoded));
+        let basic = basic_auth_decoded(&parts.headers);
+        if let Some(decoded) = &basic {
+            merge_phantoms(&mut phantoms, resolver::collect_phantoms(decoded));
+        }
+
+        // A phantom from before 2.0 (`__sc__…__`) is no phantom any more: left
+        // alone it would leave unauthenticated and come back as a bare 401.
+        // Refuse it and name its replacement. Scanned on the original URL,
+        // headers and decoded Basic auth, outside every 2.0 phantom (2.0.x
+        // only; delete in 2.1).
+        let old = std::iter::once(pq.as_str())
+            .chain(parts.headers.values().filter_map(|v| v.to_str().ok()))
+            .chain(basic.as_deref())
+            .find_map(resolver::old_phantom);
+        if let Some((old, new)) = old {
+            return err_response(
+                ScCode::PhantomRenamed,
+                &format!("{old} is the phantom name from before Sprott 2.0; use {new}"),
+            )
+            .into();
         }
 
         // ── unified body boundary (P1) ───────────────────────────────────────
@@ -1742,6 +1759,93 @@ fn write_forward_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    fn test_handler() -> BrokerHandler {
+        let cfg = crate::config::Config {
+            state_dir: std::path::PathBuf::from(format!(
+                "/tmp/sprott-test-h1-{}",
+                std::process::id()
+            )),
+            port: 0,
+            proxy_port: 0,
+            listen: "127.0.0.1".into(),
+            origin: "http://localhost".into(),
+            relying_party: crate::passkey::webauthn::RelyingParty::exact(
+                "http://localhost",
+                "localhost",
+            ),
+            admin_key: None,
+            relay_url: None,
+            body_cap: crate::config::DEFAULT_BODY_CAP,
+        };
+        let state = AppState::new(cfg);
+        state.open_ledger_for_tests(&[]);
+        BrokerHandler::new(Arc::new(state))
+    }
+
+    async fn refusal_code(req: Request<Body>) -> Option<String> {
+        match test_handler().pipeline(LOOPBACK, req).await {
+            RequestOrResponse::Response(r) => r
+                .headers()
+                .get("x-sprott-error")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            RequestOrResponse::Request(_) => None,
+        }
+    }
+
+    /// H1: a phantom from before 2.0 in the URL, a header or decoded Basic
+    /// auth is refused with its replacement named, never forwarded.
+    #[tokio::test]
+    async fn an_old_phantom_is_refused_and_named() {
+        let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
+        for req in [
+            Request::builder()
+                .uri("https://github.com/o/r.git/info/refs")
+                .header("authorization", format!("Basic {}", b64(b"x:__sc__github__")))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("https://api.telegram.org/bot__sc__telegram__/getMe")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("https://api.stripe.com/v1/charges")
+                .header("authorization", "Bearer __sc__stripe__")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let RequestOrResponse::Response(resp) = test_handler().pipeline(LOOPBACK, req).await
+            else {
+                panic!("forwarded");
+            };
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(resp.headers()["x-sprott-error"], "phantom_renamed");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(
+                body.starts_with("Sprott: phantom_renamed: __sc__")
+                    && body.contains(" is the phantom name from before Sprott 2.0; use __sprott__"),
+                "{body}"
+            );
+        }
+    }
+
+    /// A 2.0 phantom for connection `sc` contains `__sc__token__`; it is a
+    /// phantom, not an old one.
+    #[tokio::test]
+    async fn a_new_phantom_for_connection_sc_is_not_refused_as_old() {
+        let req = Request::builder()
+            .uri("https://api.example.com/v1")
+            .header("authorization", "Bearer __sprott__sc__token__")
+            .body(Body::empty())
+            .unwrap();
+        let code = refusal_code(req).await;
+        assert_ne!(code.as_deref(), Some("phantom_renamed"), "{code:?}");
+        assert_eq!(code.as_deref(), Some("agent_key"), "it reaches the agent check");
+    }
 
     #[test]
     fn an_unknown_connection_names_a_changed_key_only_when_flagged() {
