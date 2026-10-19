@@ -43,6 +43,8 @@ pub mod principal_ledger;
 pub mod protocol;
 pub mod proxy;
 pub mod relay;
+#[cfg(test)]
+mod rename_guard;
 pub mod server;
 pub mod service;
 pub mod state;

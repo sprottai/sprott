@@ -129,7 +129,7 @@ pub async fn run(json: bool) -> Result<(), String> {
         }
     }
 
-    // The 2.0 move from ~/.safeclaw: anything it left for a person to finish.
+    // The 2.0 move (cli/migrate.rs): anything it left for a person to finish.
     for finding in crate::cli::migrate::doctor_findings() {
         report.push(Mark::Warn, finding);
     }

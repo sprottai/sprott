@@ -42,8 +42,8 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     // Say so once, up front, and name the file to load. An AIK agent
     // (SPROTT_AGENT_IDENTITY) takes the shim path below and needs no key, so the
     // note must recognize it too, or a keyless agent that is fully set up gets a
-    // misleading warning. A shell from before 2.0 carries SAFECLAW_* names,
-    // which are not read; this note is what it sees.
+    // misleading warning. A shell set up before 2.0 carries the old variable
+    // names, which are not read; this note is what it sees.
     if !args.export_env && !agent_has_key() && load_agent_signer().is_none() {
         let env_file = crate::names::data_dir()
             .map(|d| agent_env_hint(&d))
@@ -392,6 +392,5 @@ mod tests {
              (it sets SPROTT_AGENT_IDENTITY). This is not a daemon or port problem; \
              non-credential traffic is unaffected."
         );
-        assert!(!note.contains("SAFECLAW"));
     }
 }

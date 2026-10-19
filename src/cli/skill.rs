@@ -16,8 +16,8 @@ const NAME: &str = "sprott";
 /// Before 1.5 the skill was named `safeclaw`, with this author in its frontmatter
 /// (also when `npx skills add` installed it). An install removes that copy, so an
 /// upgrade leaves one skill; anything else at that path is someone else's.
-const LEGACY_NAME: &str = "safeclaw";
-const LEGACY_AUTHOR: &str = "getsafeclaw";
+const LEGACY_NAME: &str = "safeclaw"; // rename:keep (the pre-1.5 skill this install removes)
+const LEGACY_AUTHOR: &str = "getsafeclaw"; // rename:keep
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Manifest {
@@ -228,7 +228,7 @@ fn remove_legacy(home: &Path, report: &mut InstallReport) {
     }
 }
 
-/// True when the frontmatter is the old skill's: `name: safeclaw` by `getsafeclaw`.
+/// True when the frontmatter is the old skill's: `name: safeclaw` by `getsafeclaw`. rename:keep
 fn is_legacy_skill(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;

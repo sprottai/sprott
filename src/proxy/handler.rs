@@ -240,7 +240,7 @@ impl BrokerHandler {
             merge_phantoms(&mut phantoms, resolver::collect_phantoms(decoded));
         }
 
-        // A phantom from before 2.0 (`__sc__…__`) is no phantom any more: left
+        // A phantom from before 2.0 (`__sc__…__`) is no phantom any more: left (rename:keep)
         // alone it would leave unauthenticated and come back as a bare 401.
         // Refuse it and name its replacement. Scanned on the original URL,
         // headers and decoded Basic auth, outside every 2.0 phantom (2.0.x

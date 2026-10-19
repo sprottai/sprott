@@ -131,5 +131,5 @@ user taps their passkey. Upgrade when a command asks for it or the user agrees, 
 run `sprott unlock` and send the unlock link.
 
 A machine still on Sprott 1.x moves to 2.0 by running the installer above (its
-`sc upgrade` fails and changes nothing). The installer moves `~/.safeclaw` to
-`~/.sprott`; reload your agent env from there.
+`sc upgrade` fails and changes nothing).
+The installer moves `~/.safeclaw` to `~/.sprott`; reload your agent env from there.

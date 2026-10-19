@@ -100,7 +100,7 @@ pub enum ScCode {
     NoVault,
     OauthMint,
     PhantomPlainHttp,
-    /// A phantom from before Sprott 2.0 (`__sc__…__`) in a request to a
+    /// A phantom from before Sprott 2.0 (`__sc__…__`) in a request to a (rename:keep)
     /// brokered host; the message names its `__sprott__…__` replacement
     /// (2.0.x only).
     PhantomRenamed,

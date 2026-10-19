@@ -34,7 +34,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
     let verbose = matches.get_count("verbose");
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
-    // 2.0: a 1.x `~/.safeclaw` moves to `~/.sprott` before anything reads it.
+    // 2.0: a 1.x `~/.safeclaw` moves to `~/.sprott` before anything reads it. (rename:keep)
     // A refused move stops the command, so nothing creates `~/.sprott` while the
     // old directory still waits. `version`, `git-credential` and `serve` never
     // move (cli/migrate.rs).
@@ -346,7 +346,7 @@ async fn run_daemon(
     verbose: u8,
     hooks: Arc<dyn TeamHooks>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // First, before anything touches the disk: while a 1.x `~/.safeclaw` waits
+    // First, before anything touches the disk: while a 1.x `~/.safeclaw` waits (rename:keep)
     // to be moved, a daemon would create `~/.sprott` with fresh keys and the
     // move could never run. Exit 0, so neither systemd's Restart=on-failure nor
     // launchd's KeepAlive{SuccessfulExit=false} loops on it.

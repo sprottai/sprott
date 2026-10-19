@@ -83,7 +83,7 @@ fn parse_with(prefix: &str, token: &str) -> Option<Phantom> {
 // ── pre-2.0 phantoms (2.0.x only; delete in 2.1, design/compat-sunset.md) ──
 
 /// The phantom prefix before 2.0. Read only to name its replacement.
-const OLD_PHANTOM_PREFIX: &str = "__sc__";
+const OLD_PHANTOM_PREFIX: &str = "__sc__"; // rename:keep (H1)
 
 static OLD_PHANTOM_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!("{}{}", regex::escape(OLD_PHANTOM_PREFIX), PHANTOM_BODY_RE))
@@ -91,9 +91,9 @@ static OLD_PHANTOM_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// The first phantom from before 2.0 in `input` and its 2.0 spelling, e.g.
-/// `("__sc__github__", "__sprott__github__")`. The 2.0 scan runs first and
+/// `("__sc__github__", "__sprott__github__")`. The 2.0 scan runs first and (rename:keep)
 /// every span it matches is masked, so a valid 2.0 phantom that contains an
-/// old-looking one (connection `sc`, role `token`: `__sprott__sc__token__`)
+/// old-looking one (connection `sc`, role `token`: `__sprott__sc__token__`) (rename:keep)
 /// is never read as old.
 pub fn old_phantom(input: &str) -> Option<(String, String)> {
     if !input.contains(OLD_PHANTOM_PREFIX) {

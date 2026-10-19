@@ -36,8 +36,8 @@ pub fn data_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| data_dir_in(&h))
 }
 
-/// Unit tests never write into a developer's real `~/.sprott`: a `~/.sprott`
-/// made beside a waiting `~/.safeclaw` would block the 2.0 move (state D).
+/// Unit tests never write into a developer's real `~/.sprott`: one made beside
+/// a 1.x data dir that waits to be moved would block the 2.0 move (state D).
 /// `$HOME` is used only when a test pointed it into the temp dir.
 #[cfg(test)]
 fn test_home() -> PathBuf {
