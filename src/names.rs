@@ -30,5 +30,20 @@ pub fn data_dir_in(home: &Path) -> PathBuf {
 
 /// `~/.sprott`, or `None` when there is no home directory.
 pub fn data_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    return Some(data_dir_in(&test_home()));
+    #[cfg(not(test))]
     dirs::home_dir().map(|h| data_dir_in(&h))
+}
+
+/// Unit tests never write into a developer's real `~/.sprott`: a `~/.sprott`
+/// made beside a waiting `~/.safeclaw` would block the 2.0 move (state D).
+/// `$HOME` is used only when a test pointed it into the temp dir.
+#[cfg(test)]
+fn test_home() -> PathBuf {
+    let tmp = std::env::temp_dir();
+    match dirs::home_dir() {
+        Some(h) if h.starts_with(&tmp) => h,
+        _ => tmp.join(format!("sprott-test-home-{}", std::process::id())),
+    }
 }

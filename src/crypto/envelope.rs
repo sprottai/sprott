@@ -100,6 +100,10 @@ pub struct ScKeyPair {
 impl ScKeyPair {
     /// Load from disk, or generate + persist if missing. Idempotent.
     pub fn load_or_generate() -> Result<Self> {
+        // One caller at a time per process: the key file is created with
+        // `create_new`, so two states built in parallel (tests) would race.
+        static LOAD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = LOAD.lock().unwrap_or_else(|e| e.into_inner());
         let path = sk_path()?;
         if path.exists() {
             let bytes =
