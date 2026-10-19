@@ -155,7 +155,7 @@ pub async fn pair(client: &reqwest::Client, req: &PairRequest<'_>) -> Result<Pai
         let status = resp.status();
         let detail = resp.text().await.unwrap_or_default();
         return Err(format!(
-            "could not start pairing ({}). sc may be too old for this server. Run sc upgrade and try again.",
+            "could not start pairing ({}). This version may be too old for this server. Run `sprott upgrade` and try again.",
             http_detail(status, &detail)
         ));
     }
@@ -495,7 +495,7 @@ mod tests {
             ],
             cloud: "https://x",
             origin: "https://app.x",
-            restart: "sc setup",
+            restart: "sprott setup",
         };
         let k_owner = [3u8; 32];
         let device_input =
@@ -559,7 +559,7 @@ mod tests {
             entries,
             cloud: "https://x",
             origin: "https://app.x",
-            restart: "sc setup",
+            restart: "sprott setup",
         };
         assert!(validate_request(&base(vec![PairPrincipal {
             kind: "device",

@@ -159,7 +159,7 @@ fn render(cmd: &clap::Command) -> String {
 
     let mut out = String::new();
     out.push_str("Sprott: passkey-gated credential broker\n\n");
-    out.push_str("Usage: sc <command> [options]\n");
+    out.push_str("Usage: sprott <command> [options]\n");
 
     for (heading, rows) in SECTIONS {
         let present: Vec<&(&str, &str)> = rows
@@ -191,7 +191,7 @@ fn render(cmd: &clap::Command) -> String {
 
     out.push_str("\nOptions:\n");
     out.push_str(&format!(
-        "  {:<pad$}Print help (and `sc <command> --help` per command)\n",
+        "  {:<pad$}Print help (and `sprott <command> --help` per command)\n",
         "-h, --help"
     ));
     out.push_str(&format!("  {:<pad$}Print version\n", "-V, --version"));

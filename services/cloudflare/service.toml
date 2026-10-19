@@ -2,7 +2,7 @@ setup = """
 Cloudflare's v4 API takes a bearer API token, and account-scoped endpoints
 (/accounts/<id>/...) also need your Account ID - the token page shows both, so
 paste both here. The proxy substitutes each at egress; neither enters the agent:
-  sc run -- curl \\
+  sprott run -- curl \\
     "https://api.cloudflare.com/client/v4/accounts/__sc__cloudflare__cloudflare_account_id__/tokens/verify" \\
     -H "Authorization: Bearer __sc__cloudflare__cloudflare_api_token__"
 Covers the whole v4 API (DNS, Workers, R2, ...) - scope the token to what you

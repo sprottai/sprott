@@ -2,7 +2,7 @@ setup = """
 Linear's GraphQL API takes the personal API key directly in the Authorization
 header (no "Bearer" prefix). Put the phantom there; the proxy substitutes it at
 egress, the key never enters the agent:
-  sc run -- curl https://api.linear.app/graphql \\
+  sprott run -- curl https://api.linear.app/graphql \\
     -H "Authorization: __sc__linear__" \\
     -H "Content-Type: application/json" \\
     -d '{"query":"{ viewer { name } }"}'

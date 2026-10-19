@@ -1786,7 +1786,7 @@ client_id = "public-client"
     fn setup_block_parses_plain_prose() {
         let toml_str = r#"
 setup = """
-Put the phantom in the URL: sc run -- git clone https://x:__sc__github__@github.com/o/r
+Put the phantom in the URL: sprott run -- git clone https://x:__sc__github__@github.com/o/r
 """
 
 [service]
@@ -1797,7 +1797,7 @@ secrets = ["GITHUB_TOKEN"]
 "#;
         let def = def(toml_str);
         let setup = def.setup.as_deref().unwrap();
-        assert!(setup.contains("sc run --"));
+        assert!(setup.contains("sprott run --"));
     }
 
     // ── [oauth2] inline resolution ────────────────────────────────────────────

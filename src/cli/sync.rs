@@ -37,7 +37,7 @@ pub async fn run(_args: SyncArgs) -> Result<(), String> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         eprintln!(
-            "safeclaw sync: ok ({})",
+            "sprott sync: ok ({})",
             sync_summary(pulled, key_changed)
         );
         if key_changed {
@@ -127,7 +127,7 @@ fn report_connects(connects: Option<&serde_json::Value>) {
             .unwrap_or("the provider");
         eprintln!(
             "  {}: couldn't reach {host} (network/proxy?); will retry. \
-             Behind a proxy? `sc proxy set <url>`.",
+             Behind a proxy? `sprott proxy set <url>`.",
             unreached.join(", ")
         );
     }

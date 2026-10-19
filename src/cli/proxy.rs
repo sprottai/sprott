@@ -60,14 +60,14 @@ fn get() -> Result<(), String> {
                 let shell = shell.to_string_lossy();
                 if shell != url {
                     eprintln!(
-                        "note: your shell HTTPS_PROXY ({shell}) overrides this for `sc` \
+                        "note: your shell HTTPS_PROXY ({shell}) overrides this for `sprott` \
                          itself; the daemon uses the value above."
                     );
                 }
             }
             Ok(())
         }
-        None => Err("no egress proxy configured (set one with `sc proxy set <url>`)".to_string()),
+        None => Err("no egress proxy configured (set one with `sprott proxy set <url>`)".to_string()),
     }
 }
 
@@ -78,7 +78,7 @@ fn get() -> Result<(), String> {
 /// already persisted); we just tell the user how it'll take effect.
 async fn apply_live() -> Result<(), String> {
     if !service::unit_installed() {
-        eprintln!("  (no daemon installed yet; it'll take effect on `sc up`.)");
+        eprintln!("  (no daemon installed yet; it'll take effect on `sprott up`.)");
         return Ok(());
     }
     let cfg = active::load().unwrap_or_default();
@@ -100,13 +100,13 @@ async fn apply_live() -> Result<(), String> {
         }
         Ok(r) => {
             eprintln!(
-                "  (daemon returned HTTP {}; restart to apply: `sc restart`)",
+                "  (daemon returned HTTP {}; restart to apply: `sprott restart`)",
                 r.status()
             );
             Ok(())
         }
         Err(_) => {
-            eprintln!("  (daemon not reachable; it'll take effect on next `sc up`.)");
+            eprintln!("  (daemon not reachable; it'll take effect on next `sprott up`.)");
             Ok(())
         }
     }

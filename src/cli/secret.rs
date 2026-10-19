@@ -61,7 +61,7 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
     if let BrokerIntent::Host(hosts) = &intent {
         if !valid_conn_id(&conn) {
             return Err(format!(
-                "can't derive a connection id from '{}'; use `sc connection add <name> --host {} --from-literal {}=<value>` instead",
+                "can't derive a connection id from '{}'; use `sprott connection add <name> --host {} --from-literal {}=<value>` instead",
                 key,
                 hosts.first().map(String::as_str).unwrap_or("<domain>"),
                 key
@@ -168,7 +168,7 @@ fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde
             {
                 eprintln!("  removed the prior host anchor for '{}'", conn);
             }
-            eprintln!("  stored · no host anchored. Agent cannot use this item (`sc secret get` reveals it for a human)");
+            eprintln!("  stored · no host anchored. Agent cannot use this item (`sprott secret get` reveals it for a human)");
         }
         BrokerIntent::Host(hosts) => {
             eprintln!(
@@ -179,7 +179,7 @@ fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde
             );
         }
     }
-    eprintln!("safeclaw set: {} written", key);
+    eprintln!("sprott set: {} written", key);
 }
 
 /// Decide the broker binding for `sc set`. Host is a REQUIRED answer (spec §11):

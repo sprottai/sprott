@@ -1279,7 +1279,7 @@ pub struct Reconciled {
 /// for every such case, local write or sync.
 pub fn unreadable_refusal(record: &str) -> String {
     format!(
-        "{}: this item was changed with a vault key this device does not have; your change to it was not applied: run `sc sync` after the vault owner's console finishes, then re-run it",
+        "{}: this item was changed with a vault key this device does not have; your change to it was not applied: run `sprott sync` after the vault owner's console finishes, then re-run it",
         record
     )
 }

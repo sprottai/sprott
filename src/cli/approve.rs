@@ -383,7 +383,7 @@ async fn remote_approve(
             // live, so don't claim it expired.
             Err(format!(
                 "stopped waiting after {}s. If you haven't approved it yet the link is still \
-                 live; approve it then re-run, or `sc op wait {}` to keep waiting. link: {}",
+                 live; approve it then re-run, or `sprott op wait {}` to keep waiting. link: {}",
                 REMOTE_APPROVE_TIMEOUT_SECS, op_id, url
             ))
         }
@@ -501,13 +501,13 @@ async fn local_ceremony(
     if keyset.uik.is_none() {
         return Err(
             "this vault has no identity key on this machine, so it can't be approved here; \
-             approve it in the Sprott console (pair this machine with `sc login`)"
+             approve it in the Sprott console (pair this machine with `sprott login`)"
                 .into(),
         );
     }
     let sc_pk = fetch_sc_pk(custodian).await?;
 
-    eprintln!("safeclaw {}: touch passkey…", lower_first(label));
+    eprintln!("sprott {}: touch passkey…", lower_first(label));
     let result = do_browser_gesture(
         custodian,
         op_id,
@@ -611,7 +611,7 @@ pub(crate) fn build_local_grant(
         .map(|c| c.wrapped_key.clone())
         .ok_or(
             "this passkey's identity key isn't held on this machine; approve in the Sprott \
-             console (pair this machine with `sc login`)",
+             console (pair this machine with `sprott login`)",
         )?;
     let root = crate::crypto::vault_key::unwrap_uik_root(w_c, cred_id_raw, &wrapped_root)
         .map_err(|e| format!("open your identity key: {}", e))?;

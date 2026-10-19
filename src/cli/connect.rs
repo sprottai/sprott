@@ -73,14 +73,14 @@ fn resolve_conn_id(args: &mut ConnectArgs) -> Result<String, String> {
             ));
         }
         if id != raw {
-            eprintln!("safeclaw connect: using id '{}' (from '{}')", id, raw);
+            eprintln!("sprott connect: using id '{}' (from '{}')", id, raw);
         }
         return Ok(id);
     }
 
     if !std::io::stdin().is_terminal() {
         return Err(
-            "provide a connection id: `sc connection add <id> --host <domain> --from-literal KEY=VALUE` (or `--service <id>`)".into(),
+            "provide a connection id: `sprott connection add <id> --host <domain> --from-literal KEY=VALUE` (or `--service <id>`)".into(),
         );
     }
 
@@ -110,7 +110,7 @@ fn resolve_conn_id(args: &mut ConnectArgs) -> Result<String, String> {
     // caller already passed `--service`). Blank = a raw connection.
     if args.service.is_none() {
         let svc = prompt_line(
-            "Back with a catalog service? id from `sc registry`, or blank for a raw connection: ",
+            "Back with a catalog service? id from `sprott registry`, or blank for a raw connection: ",
         )?;
         let svc = svc.trim();
         if !svc.is_empty() {
@@ -142,7 +142,7 @@ pub async fn run_ls(json: bool) -> Result<(), String> {
 
     if conns.is_empty() {
         println!(
-            "no connections; add one with `sc connection add <id> --host <domain> --from-literal KEY=VALUE`"
+            "no connections; add one with `sprott connection add <id> --host <domain> --from-literal KEY=VALUE`"
         );
         return Ok(());
     }
@@ -371,7 +371,7 @@ pub async fn run_rm(args: ConnectionRmArgs) -> Result<(), String> {
     }
     for key in strs("kept_untracked") {
         eprintln!(
-            "  kept: {} (this connection was added before Sprott recorded which secrets a connection writes, so the key may predate it; `sc secret rm {}` deletes it)",
+            "  kept: {} (this connection was added before Sprott recorded which secrets a connection writes, so the key may predate it; `sprott secret rm {}` deletes it)",
             key, key
         );
     }
@@ -486,7 +486,7 @@ async fn run_service_backed(
     let reg = ServiceRegistry::load();
     let def = reg.get(service).ok_or_else(|| {
         format!(
-            "unknown service '{}'. See `sc registry`; per-vault custom services are connected in the console",
+            "unknown service '{}'. See `sprott registry`; per-vault custom services are connected in the console",
             service
         )
     })?;
@@ -618,7 +618,7 @@ async fn run_service_backed(
         .map(|p| p.join(", "))
         .unwrap_or_else(|| service_hosts.join(", "));
     eprintln!(
-        "safeclaw connect: '{}' → {} ({})",
+        "sprott connect: '{}' → {} ({})",
         name, service, host_line
     );
     for ph in &phantoms {
@@ -1045,7 +1045,7 @@ pub(crate) fn prompt_line(prompt: &str) -> Result<String, String> {
 /// Report the advertised phantom(s) for a raw connection: sole → short form,
 /// several → role-qualified (matches the resolver's form-A grammar).
 fn report_phantoms(name: &str, hosts: &[String], secret_keys: &[String]) {
-    eprintln!("safeclaw connect: '{}' → {}", name, hosts.join(", "));
+    eprintln!("sprott connect: '{}' → {}", name, hosts.join(", "));
     let phantoms = crate::core::host::phantoms_for_raw(name, secret_keys);
     for ph in phantoms.values() {
         eprintln!("  phantom: {}", ph);

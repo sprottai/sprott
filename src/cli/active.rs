@@ -770,11 +770,11 @@ pub fn resolve_active(vault_override: Option<&str>) -> Result<(String, String), 
     // vault and point at re-pairing instead of the generic "no vault" error.
     if let Some(dead) = cfg.vault_deleted_upstream.as_deref() {
         return Err(format!(
-            "vault {} was deleted on the web; run `sc vault ls` to pick another, or `sc login` to pair again",
+            "vault {} was deleted on the web; run `sprott vault ls` to pick another, or `sprott login` to pair again",
             dead
         ));
     }
-    Err("no vault selected: run `sc vault ls`, then pass `--vault <name>` or run `sc vault use <name>`".to_string())
+    Err("no vault selected: run `sprott vault ls`, then pass `--vault <name>` or run `sprott vault use <name>`".to_string())
 }
 
 /// Client-side mirror of the daemon's vault-id rule (`op::validate_vault_id`:
@@ -792,7 +792,7 @@ fn validate_vault_id_arg(v: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "'{}' is not a vault id (ids use letters, digits, '-' and '_'). Run `sc vault ls` and pass the id from the `/v/<id>` part of the URL",
+            "'{}' is not a vault id (ids use letters, digits, '-' and '_'). Run `sprott vault ls` and pass the id from the `/v/<id>` part of the URL",
             v
         ))
     }
@@ -852,7 +852,7 @@ pub fn resolve_vault_token(token: &str, cfg: &CliConfig) -> Result<(String, Stri
         return Ok((daemon, token.to_string()));
     }
     Err(format!(
-        "no vault matches '{}'. Run `sc vault ls` and pass its id, a unique id prefix, or its exact name (quote a name with spaces)",
+        "no vault matches '{}'. Run `sprott vault ls` and pass its id, a unique id prefix, or its exact name (quote a name with spaces)",
         token
     ))
 }
@@ -911,7 +911,7 @@ mod tests {
         assert!(validate_vault_id_arg("http://x/v/id").is_err());
         let msg = validate_vault_id_arg("test vault2").unwrap_err();
         assert!(
-            msg.contains("sc vault ls"),
+            msg.contains("sprott vault ls"),
             "error must point at vault ls: {msg}"
         );
     }

@@ -63,8 +63,8 @@ async fn warn_if_stale_after_restart() {
                 Some(v) => {
                     eprintln!(
                         "⚠ The running daemon is still {v}, but this build is {want}. The upgrade\n  \
-                         did not take: the service is launching a different `sc`. Fix it with:\n    \
-                         sc down && sc up"
+                         did not take: the service is launching a different `sprott`. Fix it with:\n    \
+                         sprott down && sprott up"
                     );
                     return;
                 }

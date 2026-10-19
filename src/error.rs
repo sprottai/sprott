@@ -392,35 +392,35 @@ impl ScCode {
 /// The ONE canonical remediation line for a locked vault — every surface
 /// (control 423, proxy 423, CLI) says exactly this, so the agent sees one
 /// consistent state and relays one consistent fix.
-pub const VAULT_LOCKED_MSG: &str = "vault locked. Run `sc unlock`, then retry";
+pub const VAULT_LOCKED_MSG: &str = "vault locked. Run `sprott unlock`, then retry";
 
 pub const VAULT_ACCESS_REVOKED_MSG: &str =
     "This device can no longer use this vault: its account was removed from it.";
 
-pub const VAULT_KEY_CHANGED_MSG: &str = "This connection may have been added after the vault's members changed and its key was replaced. This device doesn't have the new key yet. Run `sc unlock`.";
+pub const VAULT_KEY_CHANGED_MSG: &str = "This connection may have been added after the vault's members changed and its key was replaced. This device doesn't have the new key yet. Run `sprott unlock`.";
 
-pub const VAULT_KEY_CHANGED_STATUS_MSG: &str = "key changed: this vault's members changed (someone was removed), so it has a new key. Run `sc unlock` once to see what was added since; existing credentials keep working.";
+pub const VAULT_KEY_CHANGED_STATUS_MSG: &str = "key changed: this vault's members changed (someone was removed), so it has a new key. Run `sprott unlock` once to see what was added since; existing credentials keep working.";
 
 /// The ONE remediation line for [`ScCode::DeviceNotAdmitted`] (the console
 /// says the same sentence).
-pub const DEVICE_NOT_ADMITTED_MSG: &str = "This device needs to be paired again: run `sc login`.";
+pub const DEVICE_NOT_ADMITTED_MSG: &str = "This device needs to be paired again: run `sprott login`.";
 
 pub const DEVICE_ACCOUNT_MISSING_MSG: &str =
-    "This device is no longer paired with a Sprott account. Run `sc login` to pair it again.";
+    "This device is no longer paired with a Sprott account. Run `sprott login` to pair it again.";
 
 /// The ONE remediation line for [`ScCode::AgentNotAdmitted`].
-pub const AGENT_NOT_ADMITTED_MSG: &str = "This agent isn't admitted to the Sprott account this machine is signed in to (never approved, or removed). Run `sc agent add` to set it up again.";
+pub const AGENT_NOT_ADMITTED_MSG: &str = "This agent isn't admitted to the Sprott account this machine is signed in to (never approved, or removed). Run `sprott agent add` to set it up again.";
 
 /// The ONE remediation line for [`ScCode::LedgerStale`].
-pub const LEDGER_STALE_MSG: &str = "locked: Sprott could not reach your account for 7 days. Check this machine's network; vaults unlock again once it reconnects (`sc up`).";
+pub const LEDGER_STALE_MSG: &str = "locked: Sprott could not reach your account for 7 days. Check this machine's network; vaults unlock again once it reconnects (`sprott up`).";
 
 /// The ONE remediation line for [`ScCode::LedgerDeviceRevoked`].
 pub const LEDGER_DEVICE_REVOKED_MSG: &str =
-    "This device was removed from your Sprott account. Run `sc login` to pair it again.";
+    "This device was removed from your Sprott account. Run `sprott login` to pair it again.";
 
 /// The remediation line for [`ScCode::AgentNotInAccount`] (raised by the cloud
 /// op relay; the daemon answers [`ScCode::AgentNotAdmitted`]).
-pub const AGENT_NOT_IN_ACCOUNT_MSG: &str = "This agent isn't registered to the Sprott account this machine is signed in to. Run `sc agent add` to set it up.";
+pub const AGENT_NOT_IN_ACCOUNT_MSG: &str = "This agent isn't registered to the Sprott account this machine is signed in to. Run `sprott agent add` to set it up.";
 
 /// RFC 9457 `application/problem+json` body for a code + detail message.
 /// Extension members: `code` / `action` / `cause` (see [`ScCode::row`]),
@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(ScCode::VaultKeyChanged.row().3, "unlock");
         assert_eq!(
             VAULT_KEY_CHANGED_MSG,
-            "This connection may have been added after the vault's members changed and its key was replaced. This device doesn't have the new key yet. Run `sc unlock`."
+            "This connection may have been added after the vault's members changed and its key was replaced. This device doesn't have the new key yet. Run `sprott unlock`."
         );
     }
 
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(code.as_str(), "agent_not_admitted");
         assert_eq!(code.status(), 403);
         assert_eq!(code.row().3, "configure");
-        assert!(detail.contains("`sc agent add`"));
+        assert!(detail.contains("`sprott agent add`"));
         assert!(
             !detail.contains('\n') && !detail.contains('\u{2014}'),
             "one line, no em dash"

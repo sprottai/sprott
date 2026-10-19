@@ -1,7 +1,7 @@
 setup = """
 Vercel's REST API takes a bearer token. Put the phantom in the header; the proxy
 substitutes it at egress, the token never enters the agent:
-  sc run -- curl https://api.vercel.com/v2/user \\
+  sprott run -- curl https://api.vercel.com/v2/user \\
     -H "Authorization: Bearer __sc__vercel__"
 Multi-account: switch the phantom value (__sc__vercel_work__).
 """

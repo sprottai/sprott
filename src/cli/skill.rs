@@ -84,7 +84,7 @@ fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
     if was_modified && !force {
         report.paths.push(skill_path.clone());
         report.notes.push(format!(
-            "Left the modified skill at {} unchanged. Use `sc skill install --force` to replace it.",
+            "Left the modified skill at {} unchanged. Use `sprott skill install --force` to replace it.",
             skill_path.display()
         ));
         ensure_claude_link(home, &skill_dir, old_manifest.as_ref(), &mut report, false)?;
@@ -203,7 +203,7 @@ fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
         );
         if hash != manifest.sha256 && !force {
             return Err(format!(
-                "{} was modified after Sprott installed it; re-run `sc skill remove --force` to remove it",
+                "{} was modified after Sprott installed it; re-run `sprott skill remove --force` to remove it",
                 skill_path.display()
             ));
         }

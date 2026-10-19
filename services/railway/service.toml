@@ -1,7 +1,7 @@
 setup = """
 Railway's API is a single GraphQL endpoint. Put the phantom in the bearer header;
 the proxy substitutes it at egress, the token never enters the agent:
-  sc run -- curl https://backboard.railway.com/graphql/v2 \\
+  sprott run -- curl https://backboard.railway.com/graphql/v2 \\
     -H "Authorization: Bearer __sc__railway__" \\
     -H "Content-Type: application/json" \\
     -d '{"query":"query { me { name } }"}'

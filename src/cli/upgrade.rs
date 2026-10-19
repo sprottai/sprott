@@ -1,4 +1,4 @@
-//! `sc upgrade` — built-in self-update.
+//! `sprott upgrade` — built-in self-update.
 //!
 //! Mirrors `install.sh`: downloads the prebuilt binary for this platform from
 //! the project's LATEST GitHub Release, verifies its sha256 against the
@@ -383,7 +383,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     let current_hash = std::fs::read(&current).ok().map(|b| sha256_hex(&b));
     if current_hash.as_deref() == Some(actual.as_str()) && !args.force {
         eprintln!(
-            "Already up to date — safeclaw {} ({}).",
+            "Already up to date: sprott {} ({}).",
             crate::build_version(),
             &actual[..12]
         );
@@ -435,9 +435,11 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         .filter(|s| !s.is_empty());
     match &new_version {
         Some(v) => eprintln!(
-            "Upgraded safeclaw {} → {} ({}).",
+            "Upgraded sprott {} → {} ({}).",
             crate::build_version(),
-            v.strip_prefix("safeclaw ").unwrap_or(v),
+            v.strip_prefix("sprott ")
+                .or_else(|| v.strip_prefix("safeclaw "))
+                .unwrap_or(v),
             &actual[..12]
         ),
         None => eprintln!("Upgraded {} ({}).", current.display(), &actual[..12]),
@@ -480,15 +482,15 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
             {
                 use std::os::unix::process::CommandExt;
                 let err = std::process::Command::new(&current).arg("restart").exec();
-                eprintln!("  couldn't hand off to the new binary ({err}); run `sc up`.");
+                eprintln!("  couldn't hand off to the new binary ({err}); run `sprott up`.");
             }
             #[cfg(not(unix))]
-            eprintln!("  Restart it with `sc up`.");
+            eprintln!("  Restart it with `sprott up`.");
         } else {
-            eprintln!("  couldn't probe the new binary; restart it with `sc up`.");
+            eprintln!("  couldn't probe the new binary; restart it with `sprott up`.");
         }
     } else {
-        eprintln!("  Start it with `sc up`.");
+        eprintln!("  Start it with `sprott up`.");
     }
     Ok(())
 }

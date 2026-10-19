@@ -88,7 +88,7 @@ pub async fn run(json: bool) -> Result<(), String> {
     report.push(
         Mark::Ok,
         format!(
-            "safeclaw {} ({}/{})",
+            "sprott {} ({}/{})",
             crate::build_version(),
             std::env::consts::OS,
             std::env::consts::ARCH,
@@ -135,7 +135,7 @@ pub async fn run(json: bool) -> Result<(), String> {
         Ok(p) => report.push(
             Mark::Warn,
             format!(
-                "config: {} (missing; run `safeclaw vault create`)",
+                "config: {} (missing; run `sprott vault create`)",
                 p.display()
             ),
         ),
@@ -253,7 +253,7 @@ pub async fn run(json: bool) -> Result<(), String> {
             _ => report.push(
                 Mark::Ok,
                 "agent identity: none in this shell (fine for a human shell; an \
-                 agent gets one from `sc agent add`)",
+                 agent gets one from `sprott agent add`)",
             ),
         },
     }
@@ -270,9 +270,9 @@ pub async fn run(json: bool) -> Result<(), String> {
             ),
             Some(url) => {
                 let source = if file.as_deref() == Some(url.as_str()) {
-                    "from `sc proxy set`"
+                    "from `sprott proxy set`"
                 } else {
-                    "from shell HTTPS_PROXY (overrides `sc proxy set`)"
+                    "from shell HTTPS_PROXY (overrides `sprott proxy set`)"
                 };
                 report.push(
                     Mark::Ok,
@@ -310,7 +310,7 @@ pub async fn run(json: bool) -> Result<(), String> {
             }
             None => report.push(
                 Mark::Warn,
-                "cloud backend: not paired. Run `sc login`",
+                "cloud backend: not paired. Run `sprott login`",
             ),
         },
         // A config-load failure already surfaced as a `fail` row above.

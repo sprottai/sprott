@@ -161,11 +161,11 @@ pub async fn run(args: LoginArgs) -> Result<(), String> {
     eprintln!("Starting Sprott…");
     if let Err(e) = bring_up(true).await {
         if let Some(e) = e.strip_prefix("auto-start: ") {
-            eprintln!("  couldn't auto-start the daemon ({e}); run sc up to finish.");
+            eprintln!("  couldn't auto-start the daemon ({e}); run sprott up to finish.");
         } else if let Some(e) = e.strip_prefix("auto-unlock: ") {
-            eprintln!("  couldn't auto-unlock ({e}); run sc up to finish.");
+            eprintln!("  couldn't auto-unlock ({e}); run sprott up to finish.");
         } else {
-            eprintln!("  couldn't finish bring-up ({e}); run sc up to finish.");
+            eprintln!("  couldn't finish bring-up ({e}); run sprott up to finish.");
         }
     }
     Ok(())
@@ -228,7 +228,7 @@ pub async fn pair_and_persist(args: LoginArgs, allow_account_switch: bool) -> Re
             }],
             cloud: &custodian,
             origin: &origin,
-            restart: "sc login",
+            restart: "sprott login",
         },
     )
     .await?;

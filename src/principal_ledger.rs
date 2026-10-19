@@ -596,7 +596,7 @@ async fn self_wipe_and_logout(state: &Arc<AppState>) -> ! {
     // 4. Stop serving. With K evicted, blobs wiped, and the pairing gone, the daemon
     //    must not keep running; process exit is the in-process equivalent of the CLI
     //    `sc logout` stopping it.
-    tracing::warn!("principal ledger: local state wiped; daemon exiting (re-pair with `sc login`)");
+    tracing::warn!("principal ledger: local state wiped; daemon exiting (re-pair with `sprott login`)");
     std::process::exit(0);
 }
 
@@ -743,11 +743,11 @@ pub async fn principal_ledger_loop(state: Arc<AppState>) {
             DeviceGate::Revoked => self_wipe_and_logout(&state).await,
             DeviceGate::NotAdmitted => tracing::warn!(
                 code = "device_not_admitted",
-                "principal ledger: this device is not admitted to the account; run `sc login`"
+                "principal ledger: this device is not admitted to the account; run `sprott login`"
             ),
             DeviceGate::AccountMissing => tracing::warn!(
                 code = "device_not_admitted",
-                "principal ledger: this device is no longer paired with a Sprott account; run `sc login`"
+                "principal ledger: this device is no longer paired with a Sprott account; run `sprott login`"
             ),
             DeviceGate::Stale => tracing::warn!(
                 code = "ledger_stale",
@@ -842,7 +842,7 @@ pub async fn authorize_agent(
 
 /// The refusal for a request with no verified agent identity.
 pub const NO_AGENT_IDENTITY_MSG: &str = "this request carries no Sprott agent identity. Run the \
-     agent through `sc run`, or set it up with `sc agent add`";
+     agent through `sprott run`, or set it up with `sprott agent add`";
 
 #[cfg(test)]
 mod tests {

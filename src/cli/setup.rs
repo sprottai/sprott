@@ -47,7 +47,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
             emit_error(
                 json_output,
                 "A short agent name is required.",
-                "sc setup --name <a short name for this agent, e.g. claude-code>",
+                "sprott setup --name <a short name for this agent, e.g. claude-code>",
             );
             return Err(2);
         }
@@ -120,7 +120,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
                 emit_error(
                     json_output,
                     &format!("The Sprott skill could not be installed: {}", e),
-                    "sc skill install",
+                    "sprott skill install",
                 );
                 return Err(1);
             }
@@ -185,7 +185,7 @@ async fn preconditions(
                         paired.trim_end_matches('/'),
                         selected
                     ),
-                    format!("sc login --profile {}", selected),
+                    format!("sprott login --profile {}", selected),
                     1,
                 ));
             }
@@ -571,21 +571,21 @@ async fn pair_missing_and_persist(name: &str, profile: Option<&str>) -> Result<(
         cfg.cloud_backend
             .clone()
             .filter(|value| !value.is_empty())
-            .ok_or("this device isn't paired. Run sc login first")?
+            .ok_or("this device isn't paired. Run sprott login first")?
     };
     let cloud = cloud.trim_end_matches('/').to_string();
     let origin = if need_device {
         crate::cli::active::console_origin_for_backend(&cloud)
     } else {
         crate::cli::active::console_origin()
-            .ok_or("this machine isn't paired to Sprott yet. Run sc login first")?
+            .ok_or("this machine isn't paired to Sprott yet. Run sprott login first")?
     };
     let pinned = if need_device {
         None
     } else {
         Some(
             crate::cli::active::account_uik_pub()
-                .ok_or("this machine's pairing predates verified pairing. Run sc login first")?,
+                .ok_or("this machine's pairing predates verified pairing. Run sprott login first")?,
         )
     };
 
@@ -649,7 +649,7 @@ async fn pair_missing_and_persist(name: &str, profile: Option<&str>) -> Result<(
             entries,
             cloud: &cloud,
             origin: &origin,
-            restart: "sc setup",
+            restart: "sprott setup",
         },
     )
     .await?;
@@ -832,7 +832,7 @@ fn base_command(context: &Context) -> String {
 }
 
 fn setup_command(name: &str, profile: Option<&str>) -> String {
-    let mut command = format!("sc setup --name {}", shell_word(name));
+    let mut command = format!("sprott setup --name {}", shell_word(name));
     if let Some(profile) = profile {
         command.push_str(&format!(" --profile {}", shell_word(profile)));
     }
@@ -842,11 +842,11 @@ fn setup_command(name: &str, profile: Option<&str>) -> String {
 fn setup_vault_guidance(known_vault_count: usize) -> Option<(String, String)> {
     match known_vault_count {
         0 => None,
-        1 => Some(("The vault is locked.".to_string(), "sc unlock".to_string())),
+        1 => Some(("The vault is locked.".to_string(), "sprott unlock".to_string())),
         _ => Some((
-            "The vaults are locked. List them with sc vault ls, then run sc unlock --vault <name>."
+            "The vaults are locked. List them with sprott vault ls, then run sprott unlock --vault <name>."
                 .to_string(),
-            "sc vault ls".to_string(),
+            "sprott vault ls".to_string(),
         )),
     }
 }
@@ -980,7 +980,7 @@ fn emit_done(
         for note in notes {
             println!("{}", note);
         }
-        println!("To run sc as {}, load its environment:", name);
+        println!("To run sprott as {}, load its environment:", name);
         println!("  {}", load_env);
         if let Some((message, next_step)) = vault_guidance {
             println!("{}", message);
@@ -1127,7 +1127,7 @@ mod setup_tests {
         );
         let (message, fix) = name_mismatch_details("codex", &status).unwrap();
         assert_eq!(message, "Setup for agent 'other' is in progress.");
-        assert_eq!(fix, "sc setup --name other --profile dev --wait");
+        assert_eq!(fix, "sprott setup --name other --profile dev --wait");
     }
 
     #[test]
@@ -1157,7 +1157,7 @@ mod setup_tests {
         assert_eq!(effective_profile(&explicit, &status), Some("prod"));
         assert_eq!(
             next_command(&context, effective_profile(&context, &status)),
-            "sc setup --name codex --profile dev --wait"
+            "sprott setup --name codex --profile dev --wait"
         );
     }
 
@@ -1167,14 +1167,14 @@ mod setup_tests {
 
         let (message, next) = setup_vault_guidance(1).unwrap();
         assert_eq!(message, "The vault is locked.");
-        assert_eq!(next, "sc unlock");
+        assert_eq!(next, "sprott unlock");
 
         let (message, next) = setup_vault_guidance(2).unwrap();
         assert_eq!(
             message,
-            "The vaults are locked. List them with sc vault ls, then run sc unlock --vault <name>."
+            "The vaults are locked. List them with sprott vault ls, then run sprott unlock --vault <name>."
         );
-        assert_eq!(next, "sc vault ls");
+        assert_eq!(next, "sprott vault ls");
     }
 }
 
