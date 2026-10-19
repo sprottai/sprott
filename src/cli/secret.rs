@@ -151,10 +151,10 @@ fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde
                 eprintln!("  stored · host binding unchanged (none anchored; the agent can't use it until you set a host)");
             } else {
                 eprintln!(
-                    "  connection '{}' → {} (unchanged) · phantom __sc__{}__",
+                    "  connection '{}' → {} (unchanged) · phantom {}",
                     conn,
                     hosts.join(", "),
-                    conn
+                    crate::core::host::short_phantom(conn)
                 );
             }
         }
@@ -172,10 +172,10 @@ fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde
         }
         BrokerIntent::Host(hosts) => {
             eprintln!(
-                "  connection '{}' → {} · phantom __sc__{}__",
+                "  connection '{}' → {} · phantom {}",
                 conn,
                 hosts.join(", "),
-                conn
+                crate::core::host::short_phantom(conn)
             );
         }
     }

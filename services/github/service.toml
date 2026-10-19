@@ -2,9 +2,9 @@ setup = """
 git over HTTPS (SSH is outside the broker): put the phantom in the URL as the
 credential — token in the password slot, any dummy user — so no pre-existing git
 credential helper can shadow it:
-  sprott run -- git clone https://x-access-token:__sc__github__@github.com/<owner>/<repo>
+  sprott run -- git clone https://x-access-token:__sprott__github__@github.com/<owner>/<repo>
 Same shape for remote add / push / fetch. Multi-account: switch the phantom value
-(__sc__github_work__).
+(__sprott__github_work__).
 """
 
 [service]

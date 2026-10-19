@@ -315,7 +315,7 @@ impl BrokerHandler {
                 host = %dest_host,
                 "routed to an anchored host but the request carries no phantom — \
                  forwarded unauthenticated; include the connection's phantom \
-                 (e.g. __sc__<conn>__) if brokering was intended"
+                 (e.g. __sprott__<conn>__) if brokering was intended"
             );
             let body = body_bytes
                 .map(Body::from)
@@ -471,7 +471,7 @@ impl BrokerHandler {
         // Resolve the connection record. An explicit aux.connections entry wins;
         // otherwise, if <conn> names a known service (compiled or custom) we
         // synthesize its DEFAULT connection (conn == service, hosts derived from
-        // the service) so a default-connection phantom `__sc__<service>__`
+        // the service) so a default-connection phantom `__sprott__<service>__`
         // resolves and the resident default-connection credential — bootstrapped
         // into the cache under the service id — is reachable. Only a genuinely
         // unknown id fails closed.
@@ -546,7 +546,7 @@ impl BrokerHandler {
         // instead of falling back to the connection id.
         //
         // No def (raw connection): the request's own phantom names the role. A
-        // role-qualified `__sc__<conn>__<role>__` on a multi-secret raw
+        // role-qualified `__sprott__<conn>__<role>__` on a multi-secret raw
         // connection MUST flow into the op target — without it the approval
         // resolved a secret named after the CONNECTION, 400'd at apply, and the
         // relay then recorded the op rejected: the user's real approval read
@@ -843,7 +843,7 @@ impl BrokerHandler {
         // position. `substitute` leaves a phantom it can't fill verbatim, so
         // re-scan the wire-bound URL + headers (incl. decoded Basic). A survivor
         // means a header/URL phantom the resolver declined; block it rather than
-        // let the literal `__sc__…__` reach upstream (which returns a bare 401 the
+        // let the literal `__sprott__…__` reach upstream (which returns a bare 401 the
         // agent misreads as a dead credential). The body is intentionally NOT
         // scanned: a phantom there is inert placeholder text, never a secret.
         let leaked_phantom = {
@@ -1347,7 +1347,7 @@ fn wait_hint(approve_url: &str, op_id: &str) -> String {
 enum ResolveErr {
     /// The credential isn't in the session cache — needs a passkey (→ portal).
     NeedsApproval,
-    /// Bare `__sc__conn__` on a connection exposing several secrets.
+    /// Bare `__sprott__conn__` on a connection exposing several secrets.
     Ambiguous,
     /// An oauth2 `exposes` role the mint doesn't surface yet.
     Exposes(String),
@@ -1995,7 +1995,7 @@ mod tests {
     #[test]
     fn rewrite_headers_strips_proxy_auth_and_injects_basic() {
         let mut values = HashMap::new();
-        values.insert("__sc__github__".to_string(), "ghp_REAL".to_string());
+        values.insert("__sprott__github__".to_string(), "ghp_REAL".to_string());
         let mut h = HeaderMap::new();
         h.insert(
             header::PROXY_AUTHORIZATION,
@@ -2003,7 +2003,7 @@ mod tests {
         );
         h.insert(
             header::AUTHORIZATION,
-            format!("Basic {}", b64(b"x:__sc__github__"))
+            format!("Basic {}", b64(b"x:__sprott__github__"))
                 .parse()
                 .unwrap(),
         );
@@ -2022,15 +2022,15 @@ mod tests {
 
     #[test]
     fn rewrite_headers_substitutes_basic_username_position() {
-        // git clone https://__sc__github__@github.com → Basic b64("phantom:") —
+        // git clone https://__sprott__github__@github.com → Basic b64("phantom:") —
         // the phantom rides the USERNAME slot (password empty). Regression pair
         // to the password-position test above.
         let mut values = HashMap::new();
-        values.insert("__sc__github__".to_string(), "ghp_REAL".to_string());
+        values.insert("__sprott__github__".to_string(), "ghp_REAL".to_string());
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
-            format!("Basic {}", b64(b"__sc__github__:"))
+            format!("Basic {}", b64(b"__sprott__github__:"))
                 .parse()
                 .unwrap(),
         );
@@ -2067,11 +2067,11 @@ mod tests {
     #[test]
     fn rewrite_headers_substitutes_bearer_phantom() {
         let mut values = HashMap::new();
-        values.insert("__sc__stripe_key__".to_string(), "sk_live_X".to_string());
+        values.insert("__sprott__stripe_key__".to_string(), "sk_live_X".to_string());
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
-            "Bearer __sc__stripe_key__".parse().unwrap(),
+            "Bearer __sprott__stripe_key__".parse().unwrap(),
         );
         let out = rewrite_headers(&h, &values, false);
         assert_eq!(

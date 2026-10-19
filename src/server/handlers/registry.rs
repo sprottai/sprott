@@ -732,7 +732,7 @@ refresh_token = "REFRESH_TOKEN"
     fn render_setup_is_plain_passthrough() {
         let toml = r#"
 setup = """
-Put the phantom in the URL: sprott run -- git clone https://x:__sc__github__@github.com/o/r
+Put the phantom in the URL: sprott run -- git clone https://x:__sprott__github__@github.com/o/r
 """
 
 [service]
@@ -851,7 +851,7 @@ secrets = ["GITHUB_TOKEN"]
         let empty: HashSet<String> = HashSet::new();
         let row = build_connection("stripe_key", &conn, None, &present, &empty, false);
         assert!(row.connected);
-        assert_eq!(row.phantoms, vec!["__sc__stripe_key__".to_string()]);
+        assert_eq!(row.phantoms, vec!["__sprott__stripe_key__".to_string()]);
         assert_eq!(row.secrets, Some(vec!["STRIPE_KEY".to_string()]));
         assert_eq!(row.service, None);
 

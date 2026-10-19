@@ -2,8 +2,8 @@ setup = """
 Netlify's API takes a bearer personal access token. Put the phantom in the
 header; the proxy substitutes it at egress, the token never enters the agent:
   sprott run -- curl https://api.netlify.com/api/v1/sites \\
-    -H "Authorization: Bearer __sc__netlify__"
-Multi-account: switch the phantom value (__sc__netlify_work__).
+    -H "Authorization: Bearer __sprott__netlify__"
+Multi-account: switch the phantom value (__sprott__netlify_work__).
 """
 
 [service]

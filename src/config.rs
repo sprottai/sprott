@@ -184,11 +184,11 @@ pub enum Command {
     /// proxy + CA env bundle merged in; `sprott run --export-env` prints the same
     /// bundle as shell `export` lines for `eval "$(sprott run --export-env)"`. No
     /// plaintext secret ever enters the child's env — the agent writes the
-    /// phantom (`__sc__<conn>__`) itself; the proxy substitutes at egress.
+    /// phantom (`__sprott__<conn>__`) itself; the proxy substitutes at egress.
     Run(RunArgs),
     /// Manage the connections in the active vault (add / ls / rm). A connection
     /// is a secret (or several) bound to an egress host anchor; the agent reaches
-    /// it via the phantom `__sc__<id>__`. The CLI twin of the console's
+    /// it via the phantom `__sprott__<id>__`. The CLI twin of the console's
     /// "Connections". Short: `sprott conn`.
     #[command(alias = "conn")]
     Connection(ConnectionArgs),
@@ -242,7 +242,7 @@ pub struct RunArgs {
 pub struct ConnectArgs {
     /// A short id YOU choose for this connection (not picked from a list) —
     /// free text is slugified to `[a-z0-9_]` (e.g. "My Work" → `my_work`) and
-    /// becomes the phantom `__sc__<id>__` the agent uses. Omit on a terminal to
+    /// becomes the phantom `__sprott__<id>__` the agent uses. Omit on a terminal to
     /// be prompted (with the rest of the wizard); required off a terminal.
     #[arg(value_name = "ID")]
     pub name: Option<String>,
@@ -1028,7 +1028,7 @@ pub struct SetArgs {
     /// stdin isn't a terminal.
     pub value: Option<String>,
     /// Anchor the secret to an egress host so the agent can broker it: creates a
-    /// raw connection `__sc__<key>__` → this exact domain (repeatable). Pass
+    /// raw connection `__sprott__<key>__` → this exact domain (repeatable). Pass
     /// `--host none` (or `--no-broker`) to store it for humans only. On a TTY a
     /// host is prompted when neither is given; off a TTY the command errors
     /// (naming both fixes) rather than storing an unusable item.

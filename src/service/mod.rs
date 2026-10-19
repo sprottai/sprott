@@ -1786,7 +1786,7 @@ client_id = "public-client"
     fn setup_block_parses_plain_prose() {
         let toml_str = r#"
 setup = """
-Put the phantom in the URL: sprott run -- git clone https://x:__sc__github__@github.com/o/r
+Put the phantom in the URL: sprott run -- git clone https://x:__sprott__github__@github.com/o/r
 """
 
 [service]

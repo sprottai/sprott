@@ -6,7 +6,7 @@ resolves to a minted OAuth access token; put it in the bearer header, the proxy
 substitutes it at egress, the token never enters the agent:
   sprott run -- curl \\
     "https://analyticsadmin.googleapis.com/v1beta/accounts" \\
-    -H "Authorization: Bearer __sc__ga4__"
+    -H "Authorization: Bearer __sprott__ga4__"
 """
 
 [service]

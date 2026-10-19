@@ -2,9 +2,9 @@ setup = """
 git over HTTPS (SSH is outside the broker): put the phantom in the URL as the
 credential — token in the password slot, user `oauth2` — so no pre-existing git
 credential helper can shadow it:
-  sprott run -- git clone https://oauth2:__sc__gitlab__@gitlab.com/<owner>/<repo>
+  sprott run -- git clone https://oauth2:__sprott__gitlab__@gitlab.com/<owner>/<repo>
 Same shape for remote add / push / fetch. Multi-account: switch the phantom value
-(__sc__gitlab_work__).
+(__sprott__gitlab_work__).
 """
 
 [service]
