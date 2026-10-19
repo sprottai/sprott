@@ -15,7 +15,7 @@
 //!
 //! The signed byte layout is built by [`crate::identity`] (`server_envelope_input`
 //! / `contact_token_input`) and the backend mirrors it byte-for-byte in
-//! `safeclaw-pro-backend/src/server-signing.mjs` (guarded by a shared golden
+//! the backend's `src/server-signing.mjs` (guarded by a shared golden
 //! vector). The pinned key below is the DEV server key; a prod build or a test
 //! overrides it via `SPROTT_SERVER_PUBKEY` (64-hex).
 

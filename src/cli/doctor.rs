@@ -1,4 +1,4 @@
-//! `safeclaw doctor` — quick self-check for "is my CLI set up right?"
+//! `sprott doctor` — quick self-check for "is my CLI set up right?"
 //!
 //! Read-only. Reports on:
 //!   - active profile (which custodian + vault)

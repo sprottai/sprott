@@ -1,4 +1,4 @@
-//! `safeclaw passkey ...` — manage the active vault's enrolled passkeys.
+//! `sprott passkey ...` — manage the active vault's enrolled passkeys.
 //!
 //! `ls` lists; `add` prints the console page (passkeys are enrolled in the
 //! browser, where the identity key lives). `rm` / `rename` are not built yet

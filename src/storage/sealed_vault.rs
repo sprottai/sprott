@@ -1,6 +1,6 @@
 //! Sealed-vault on-disk format = [`sudp::state::SealedState`].
 //!
-//! As of Phase 3b.M (2026-05-21), safeclaw uses sudp's canonical state shape
+//! As of Phase 3b.M (2026-05-21), Sprott uses sudp's canonical state shape
 //! for vault.dat: `{ version, registry, credentials, ciphertext }` where
 //! - `registry` keys credential_id → opaque public-key JSON (WebAuthn x/y/
 //!   device_name)
@@ -9,7 +9,7 @@
 //! - `ciphertext` = AEAD-seal of canonical(ProtectedState) under K with AAD
 //!   `DS_SEAL ‖ ver_be`
 //!
-//! The client does the sealing — safeclaw daemon never sees `K` (the state
+//! The client does the sealing — the Sprott daemon never sees `K` (the state
 //! key) or `M` (ProtectedState) in plaintext at setup time. The client sends
 //! the already-sealed bytes; the daemon just rehouses them into a SealedState
 //! file. At grant redemption (export / use / write) the client transmits `W_c`
@@ -99,7 +99,7 @@ pub fn write_atomic(path: &Path, vault: &SealedVault) -> Result<()> {
 
 /// Look up a credential's WebAuthn public key from the registry.
 ///
-/// Returns a safeclaw-side [`PasskeyEntry`] so existing call sites that fetch
+/// Returns a Sprott-side [`PasskeyEntry`] so existing call sites that fetch
 /// `(x, y, device_name)` for binding verification don't need to know the
 /// sudp Registry shape.
 pub fn find_pubkey(vault: &SealedVault, credential_id_b64: &str) -> Option<PasskeyEntry> {

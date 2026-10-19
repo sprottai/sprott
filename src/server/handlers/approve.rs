@@ -3140,7 +3140,7 @@ mod tests {
     fn test_state_in(tag: &str) -> AppState {
         let cfg = crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-approve-{}{}",
+                "/tmp/sprott-test-approve-{}{}",
                 std::process::id(),
                 tag
             )),

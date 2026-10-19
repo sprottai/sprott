@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn private_directory_is_0700() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("safeclaw").join("setup");
+        let path = dir.path().join("sprott").join("setup");
         ensure_private_dir(path.parent().unwrap()).unwrap();
         ensure_private_dir(&path).unwrap();
         #[cfg(unix)]

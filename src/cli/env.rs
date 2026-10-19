@@ -1,9 +1,9 @@
-//! `safeclaw env` — print shell `export` lines for the DEVICE/human's shell.
+//! `sprott env` — print shell `export` lines for the DEVICE/human's shell.
 //!
 //! Output is meant to be evaluated by the user's shell:
 //!
 //! ```bash
-//! eval "$(safeclaw env)"
+//! eval "$(sprott env)"
 //! ```
 //!
 //! `sc env` is the DEVICE/human's tool (CREDENTIAL_BROKER.md §14) — it emits

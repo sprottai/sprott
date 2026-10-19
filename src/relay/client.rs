@@ -692,7 +692,7 @@ mod tests {
     fn test_state() -> AppState {
         AppState::new(crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-relay-{}",
+                "/tmp/sprott-test-relay-{}",
                 std::process::id()
             )),
             port: 0,

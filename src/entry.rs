@@ -437,7 +437,7 @@ async fn run_daemon(
         rp_ids = %config.relying_party.rp_ids.join(","),
         webauthn_origins = %config.relying_party.origins.join(","),
         origin = %config.origin,
-        "safeclaw daemon starting"
+        "sprott daemon starting"
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

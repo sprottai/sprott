@@ -8,7 +8,7 @@
 //! `wrappingKey` is `W_c` in the SUDP paper (§5.5 II.2). It's the per-credential
 //! key that wraps the state key `K = sudp::SealedState.ciphertext`-encryption-
 //! key. SUDP leaves the client-side derivation of `W_c` to deployments;
-//! safeclaw picks HKDF with `DS_WRAP` as the info prefix so the label matches
+//! Sprott picks HKDF with `DS_WRAP` as the info prefix so the label matches
 //! the AEAD AAD that the wrap step itself uses.
 
 use sudp::primitives::{domain::DS_WRAP, HkdfSha256, Kdf as _};

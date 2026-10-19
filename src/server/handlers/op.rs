@@ -731,7 +731,7 @@ mod tests {
     fn test_state() -> AppState {
         let cfg = crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-op-{}",
+                "/tmp/sprott-test-op-{}",
                 std::process::id()
             )),
             port: 0,

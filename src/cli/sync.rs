@@ -1,4 +1,4 @@
-//! `safeclaw sync` — force an on-demand cloud pull + complete any pending OAuth
+//! `sprott sync` — force an on-demand cloud pull + complete any pending OAuth
 //! connect, without waiting for the background watcher. Handy right after a web
 //! "Connect" if the console is still showing "Connecting…": it pulls the latest
 //! sealed blob and runs the `<conn>_oauth_pending` → exchange → refresh_token

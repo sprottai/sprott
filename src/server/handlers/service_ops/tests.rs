@@ -153,7 +153,7 @@ fn copy(v: &VaultPlaintextView) -> VaultPlaintextView {
 fn test_state() -> AppState {
     let cfg = crate::config::Config {
         state_dir: std::path::PathBuf::from(format!(
-            "/tmp/safeclaw-test-service-ops-{}",
+            "/tmp/sprott-test-service-ops-{}",
             std::process::id()
         )),
         port: 0,

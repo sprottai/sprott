@@ -1,4 +1,4 @@
-//! `safeclaw ls` — list secret names known to the active vault.
+//! `sprott ls` — list secret names known to the active vault.
 //!
 //! Hits the custodian's `GET /v/{vid}/secret-keys` (cache-driven; no passkey
 //! ceremony). Vault must be Unlocked — the custodian answers `vault_locked`

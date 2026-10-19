@@ -1,4 +1,4 @@
-//! `safeclaw status` / `safeclaw vault status` — current vault status.
+//! `sprott status` / `sprott vault status` — current vault status.
 
 use crate::cli::active::{console_origin, frontend_origin, join_vault_url, load as load_config};
 

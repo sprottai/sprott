@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_carries_no_safeclaw_credential_and_preserves_child_auth() {
+    fn forward_carries_no_sprott_credential_and_preserves_child_auth() {
         // A plain-HTTP passthrough must inject NO Sprott credential (the daemon
         // brokers nothing over plain HTTP). The child's OWN Authorization to the
         // origin passes through; only a stray Proxy-Authorization is stripped and

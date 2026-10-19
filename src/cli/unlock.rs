@@ -1,4 +1,4 @@
-//! `safeclaw unlock` / `safeclaw lock` — build the lifecycle op and hand it to
+//! `sprott unlock` / `sprott lock` — build the lifecycle op and hand it to
 //! the shared approval driver (`cli::approve`), which picks the remote (cloud
 //! web-approval) or local (on-box ceremony) arm. No bespoke passkey logic here
 //! — every approval flows through the one code path.

@@ -418,7 +418,7 @@ pub struct ServiceMeta {
     /// policy. Must be http(s) when present (it is rendered as a link).
     #[serde(default)]
     pub secret_url: Option<String>,
-    /// Help text returned by GET /{service}/help and rendered into safeclaw.md.
+    /// Help text returned by GET /{service}/help.
     /// Supports template variables: {{wallet.*}} resolved from vault service data.
     #[serde(default)]
     pub help: Option<String>,

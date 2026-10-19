@@ -2355,7 +2355,7 @@ mod tests {
 
     fn test_state() -> AppState {
         let cfg = Config {
-            state_dir: PathBuf::from(format!("/tmp/safeclaw-test-{}", std::process::id())),
+            state_dir: PathBuf::from(format!("/tmp/sprott-test-{}", std::process::id())),
             port: 0,
             proxy_port: 0,
             listen: "127.0.0.1".into(),

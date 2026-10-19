@@ -1,4 +1,4 @@
-//! `safeclaw set <KEY> <VALUE>` / `safeclaw get <KEY>` / `safeclaw rm <KEY>`
+//! `sprott set <KEY> <VALUE>` / `sprott get <KEY>` / `sprott rm <KEY>`
 //!
 //! Every verb drives ONE op through the shared approval path
 //! (`cli::approve::approve_op`): paired → the cloud `/grant/{op_id}` link,

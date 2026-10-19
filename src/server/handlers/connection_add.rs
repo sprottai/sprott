@@ -923,7 +923,7 @@ secrets = ["MIXED_KEY"]
     fn test_state() -> crate::state::AppState {
         let cfg = crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-connadd-{}",
+                "/tmp/sprott-test-connadd-{}",
                 std::process::id()
             )),
             port: 0,

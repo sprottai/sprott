@@ -1,4 +1,4 @@
-//! `safeclaw store ...` — external store inspection.
+//! `sprott store ...` — external store inspection.
 //!
 //! Today: `store ls` only. `connect` / `disconnect` need the Write op
 //! path (vault re-encryption), which isn't shipped on the CLI yet — see

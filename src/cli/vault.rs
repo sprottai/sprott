@@ -1,4 +1,4 @@
-//! `safeclaw vault ...` — vault lifecycle ops.
+//! `sprott vault ...` — vault lifecycle ops.
 
 use serde_json::json;
 use std::io::{self, Write as _};
@@ -19,7 +19,7 @@ const LOCAL_VAULT_ID: &str = "default";
 
 /// True if the custodian URL points at this machine. Used to specialize
 /// "daemon down" hints — a remote daemon being unreachable is a network
-/// problem; a local one almost always means `safeclaw c start` isn't running.
+/// problem; a local one almost always means the daemon isn't running (`sprott up`).
 fn is_localhost(custodian: &str) -> bool {
     let after_scheme = custodian
         .trim_start_matches("http://")
