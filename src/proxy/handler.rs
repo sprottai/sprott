@@ -459,7 +459,7 @@ impl BrokerHandler {
 
         // ── team serve gate (shared-vault offline lease, etc.) ───────────────
         // Serve-time team policy is team-EXCLUSIVE (team-edition §9) and lives in
-        // the closed `safeclaw-ee` overlay behind this hook. The open build wires
+        // the closed `sprott-ee` overlay behind this hook. The open build wires
         // `NoopHooks` → no gate, so a personal vault is never leased. The overlay
         // impl reads `vault_is_shared` + `cloud_contact_age_secs` (both kept as
         // neutral core bookkeeping) to enforce the offline lease.

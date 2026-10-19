@@ -10,7 +10,6 @@ pub mod agent_detect;
 pub mod agent_shim;
 pub mod apierr;
 pub mod approve;
-pub mod command_name;
 pub mod config;
 pub mod conn;
 pub mod connect;

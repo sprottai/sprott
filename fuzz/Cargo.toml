@@ -4,7 +4,7 @@
 # Seed it with the in-tree definitions:
 #   mkdir -p corpus/gate && for d in ../services/*/; do cp "$d"service.toml "corpus/gate/$(basename "$d")"; done
 [package]
-name = "safeclaw-fuzz"
+name = "sprott-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -14,7 +14,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-safeclaw = { path = ".." }
+sprott = { path = ".." }
 
 [[bin]]
 name = "gate"

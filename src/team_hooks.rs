@@ -2,10 +2,10 @@
 //!
 //! Team-EXCLUSIVE client policy — the shared-vault offline lease, invite
 //! redemption, member handling — is closed-source and lives in the private
-//! `safeclaw-ee` overlay crate, NEVER in this open repo. Core exposes only these
+//! `sprott-ee` overlay crate, NEVER in this open repo. Core exposes only these
 //! neutral extension points; the open-source build wires [`NoopHooks`] (no team
 //! behavior at all, so a personal vault is never gated), while the official
-//! binary's `safeclaw-ee` crate provides real implementations and injects them
+//! binary's `sprott-ee` crate provides real implementations and injects them
 //! via [`crate::state::AppState::with_team_hooks`].
 //!
 //! What stays in open core is neutral per-vault bookkeeping the hooks READ
@@ -24,7 +24,7 @@ pub struct GateDenial {
     pub message: String,
 }
 
-/// Extension points the closed `safeclaw-ee` overlay implements. Every method
+/// Extension points the closed `sprott-ee` overlay implements. Every method
 /// has a no-op default, so the open-source build (which wires [`NoopHooks`])
 /// carries zero team policy.
 pub trait TeamHooks: Send + Sync {
@@ -47,7 +47,7 @@ pub trait TeamHooks: Send + Sync {
 
     /// Does this build SERVE shared (team) vaults at all? The open-source PERSONAL
     /// edition returns `false`: it does not sync or serve team vaults, leaving them
-    /// to the official Sprott build (team-edition §9). The closed `safeclaw-ee`
+    /// to the official Sprott build (team-edition §9). The closed `sprott-ee`
     /// overlay returns `true`. Default `false` — a build that injects no team
     /// policy is the personal edition.
     fn serves_shared_vaults(&self) -> bool {

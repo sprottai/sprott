@@ -2378,58 +2378,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "safeclaw"
-version = "1.5.0"
-dependencies = [
- "axum",
- "base64",
- "clap",
- "data-encoding",
- "dirs",
- "ed25519-dalek",
- "flate2",
- "futures-util",
- "hkdf",
- "hmac",
- "hostname",
- "hpke",
- "http-body-util",
- "hudsucker",
- "hyper-rustls",
- "jsonwebtoken",
- "once_cell",
- "p256",
- "rand 0.8.5",
- "regex",
- "reqwest",
- "rpassword",
- "rs_merkle",
- "rusqlite",
- "rustix",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "sha2",
- "spake2",
- "subtle",
- "sudp",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "toml",
- "tower",
- "tower-http",
- "tower-service",
- "tracing",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2696,6 +2644,58 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sprott"
+version = "1.5.0"
+dependencies = [
+ "axum",
+ "base64",
+ "clap",
+ "data-encoding",
+ "dirs",
+ "ed25519-dalek",
+ "flate2",
+ "futures-util",
+ "hkdf",
+ "hmac",
+ "hostname",
+ "hpke",
+ "http-body-util",
+ "hudsucker",
+ "hyper-rustls",
+ "jsonwebtoken",
+ "once_cell",
+ "p256",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "rpassword",
+ "rs_merkle",
+ "rusqlite",
+ "rustix",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spake2",
+ "subtle",
+ "sudp",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

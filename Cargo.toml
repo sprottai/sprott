@@ -1,5 +1,5 @@
 [package]
-name = "safeclaw"
+name = "sprott"
 version = "1.5.0"
 edition = "2021"
 description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
@@ -10,20 +10,11 @@ description = "Sprott daemon — multi-vault passkey-gated credential vault for 
 license-file = "LICENSE"
 repository = "https://github.com/sprottai/sprott"
 
-# Three bin targets share the same main.rs:
-#   `sprott`   - the command name everything prints
-#   `sc`       - alias (installs before 1.5 have only this name)
-#   `safeclaw` - alias (the release asset is the safeclaw-ee overlay's bin of this name)
+# One bin. install.sh lays out the command names: `sprott` is the file, `sc`
+# and `safeclaw` are symlinks to it. The release asset is the sprott-ee
+# overlay's bin of the same name.
 [[bin]]
 name = "sprott"
-path = "src/main.rs"
-
-[[bin]]
-name = "sc"
-path = "src/main.rs"
-
-[[bin]]
-name = "safeclaw"
 path = "src/main.rs"
 
 [dependencies]

@@ -35,10 +35,13 @@ pub fn init_cli(verbose: u8) {
 
 /// The env-filter `serve` should use given a `-v` count (0 = the daemon's normal
 /// default). Lets `sc serve -vv` raise the daemon's own logging.
+/// The crate's own target comes from `CARGO_CRATE_NAME`, so a crate rename
+/// cannot silently drop its debug lines again.
 pub fn serve_filter(verbose: u8) -> String {
+    let own = env!("CARGO_CRATE_NAME");
     match verbose {
-        0 => "info,safeclaw=debug,tower_http=info".into(),
-        1 => "info,safeclaw=debug,tower_http=debug".into(),
+        0 => format!("info,{own}=debug,tower_http=info"),
+        1 => format!("info,{own}=debug,tower_http=debug"),
         2 => "debug".into(),
         _ => "trace".into(),
     }
@@ -54,5 +57,11 @@ mod tests {
         assert_eq!(filter_for(1), Some("info"));
         assert_eq!(filter_for(2), Some("debug"));
         assert_eq!(filter_for(9), Some("trace"));
+    }
+
+    #[test]
+    fn serve_filter_names_this_crate() {
+        assert_eq!(serve_filter(0), "info,sprott=debug,tower_http=info");
+        assert_eq!(serve_filter(1), "info,sprott=debug,tower_http=debug");
     }
 }
