@@ -38,7 +38,10 @@ pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
 /// Bare `safeclaw` (no subcommand) prints help.
 #[derive(Debug, Parser)]
 #[command(
-    name = "safeclaw",
+    // Usage and errors name `sprott` however the binary was invoked (`sc` and
+    // `safeclaw` are aliases of the same binary).
+    name = "sprott",
+    bin_name = "sprott",
     // NOT bare `version` (= CARGO_PKG_VERSION): rc builds must self-report
     // their release tag here too, same as `sc status` / the custom prints.
     version = crate::build_version(),

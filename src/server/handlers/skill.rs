@@ -17,9 +17,13 @@ use axum::{
 
 /// Canonical skill location. Points at `main` (the skill is additive and
 /// deployment-agnostic, so it doesn't need to be version-pinned to a tag).
-const SKILL_RAW_URL: &str =
-    "https://raw.githubusercontent.com/getsafeclaw/safeclaw/main/skills/safeclaw/SKILL.md";
+fn skill_raw_url() -> String {
+    format!(
+        "https://raw.githubusercontent.com/{}/main/skills/safeclaw/SKILL.md",
+        crate::GITHUB_REPO
+    )
+}
 
 pub async fn skill_md() -> impl IntoResponse {
-    (StatusCode::FOUND, [(header::LOCATION, SKILL_RAW_URL)])
+    (StatusCode::FOUND, [(header::LOCATION, skill_raw_url())])
 }

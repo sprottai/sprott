@@ -1,5 +1,5 @@
 //! The daemon/CLI entrypoint, factored out of `main.rs` so BOTH binaries can
-//! reuse it: the open-source `safeclaw`/`sc` bins call [`run_cli`] with
+//! reuse it: the open-source `sprott`/`sc`/`safeclaw` bins call [`run_cli`] with
 //! [`crate::team_hooks::NoopHooks`], and the closed `safeclaw-ee` overlay's bin
 //! calls it with its real hooks. `hooks` only reaches the daemon (`run_daemon` →
 //! `AppState::with_team_hooks`); every other verb is identical across builds.
@@ -21,6 +21,8 @@ use crate::team_hooks::TeamHooks;
 /// Parse argv and run the requested command. `hooks` is injected into the daemon
 /// (`serve`) path only; all other verbs ignore it.
 pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error::Error>> {
+    // A pre-1.5 install upgraded in place has only `sc`; add `sprott` beside it.
+    cli::command_name::ensure_canonical_beside();
     // Loopback is never proxied: pin localhost into NO_PROXY before any HTTP
     // client is built, so a corporate HTTPS_PROXY (or the one `sc run` injects)
     // can't trap our calls to the local daemon. reqwest honours env proxies by
