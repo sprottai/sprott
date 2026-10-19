@@ -440,13 +440,42 @@ fn phase1(ctx: &Ctx) -> Result<(), Fail> {
     write_json(&marker, &moving)
         .map_err(|e| Fail::Refused(format!("Sprott 2.0 could not move ~/.safeclaw: {e}")))?;
 
-    // 3. Stop it the way it was started.
+    // 3. Stop it the way it was started. Where the unit or plist runs the
+    //    daemon, a stop that fails refuses the move: a sandbox may reach
+    //    neither the user bus nor the real loopback, so a silent port there
+    //    proves nothing. (A detached daemon beside a unit file 1.x wrote
+    //    without a user systemd is stopped by its pid.)
+    let manages = moving.manager != Manager::Detached || moving.was_enabled;
+    let cannot_stop = |what: &str, e: String| {
+        match &previous {
+            Some(p) => {
+                let _ = write_json(&marker, p);
+            }
+            None => {
+                let _ = fs::remove_file(&marker);
+            }
+        }
+        Fail::Refused(format!(
+            "Sprott 2.0 could not move ~/.safeclaw: stopping {what} failed: {e}\n\
+             Fix: run it where the service manager answers (outside a sandbox): sprott up"
+        ))
+    };
     let mut stopped_unit = false;
     if unit.is_some() {
-        stopped_unit = ctx.sys.systemctl(&["stop", OLD_UNIT]).is_ok();
+        match ctx.sys.systemctl(&["stop", OLD_UNIT]) {
+            Ok(()) => stopped_unit = true,
+            Err(e) if manages => return Err(cannot_stop(OLD_UNIT, e)),
+            Err(_) => {}
+        }
     }
     if plist.is_some() {
-        let _ = ctx.sys.launchctl(&["bootout", &ctx.gui(OLD_LABEL)]);
+        if let Err(e) = ctx.sys.launchctl(&["bootout", &ctx.gui(OLD_LABEL)]) {
+            // Not loaded (stopped with `sc down`): nothing to stop.
+            let not_loaded = e.contains("No such process") || e.contains("Could not find");
+            if manages && !not_loaded {
+                return Err(cannot_stop(OLD_LABEL, e));
+            }
+        }
     }
     if let Some(p) = pid {
         ctx.sys.terminate(p);
@@ -587,9 +616,7 @@ fn phase2(ctx: &Ctx) -> Result<Report, Phase2> {
 
 fn start_daemon(ctx: &Ctx, service: Option<Platform>, moving: &Moving) {
     match (service, moving.manager) {
-        (_, Manager::Detached) => {
-            let _ = ctx.sys.spawn_detached(&ctx.exe);
-        }
+        (_, Manager::Detached) => spawn_detached_once(ctx),
         (Some(Platform::Systemd), _) => {
             let _ = ctx.sys.systemctl(&["start", names::SYSTEMD_UNIT]);
         }
@@ -614,9 +641,16 @@ fn start_daemon(ctx: &Ctx, service: Option<Platform>, moving: &Moving) {
                 .sys
                 .launchctl(&["bootstrap", &domain, &plist.to_string_lossy()]);
         }
-        (_, Manager::None) => {
-            let _ = ctx.sys.spawn_detached(&ctx.exe);
-        }
+        (_, Manager::None) => spawn_detached_once(ctx),
+    }
+}
+
+/// A detached daemon this move already started (killed before step 11, and
+/// slow to answer) is still running: start no second one.
+fn spawn_detached_once(ctx: &Ctx) {
+    let started = read_pid(&ctx.data().join("daemon.pid")).is_some_and(|p| ctx.sys.pid_live(p));
+    if !started {
+        let _ = ctx.sys.spawn_detached(&ctx.exe);
     }
 }
 
