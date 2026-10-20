@@ -4,17 +4,7 @@
 
 <h1 align="center">Sprott</h1>
 
-<p align="center"><b>Sprott is a credential broker for AI agents.</b> Your agent uses your API keys but never holds them.</p>
-
-## Set up
-
-```bash
-curl -fsSL https://sprott.ai/install.sh | sh
-```
-
-Paste it to your AI agent, or run it in a terminal. It installs `sprott` and the agent skill. When an agent runs it, the installer continues straight into `sprott setup`; in a terminal it prints the next step.
-
-Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/sprottai/sprott.
+<p align="center"><b>Every AI agent on your team, with real access, in one picture.</b><br>Sprott gives your agents the keys they need without handing them over, and shows you what each one did with them.</p>
 
 <p align="center">
   <a href="https://github.com/sprottai/sprott/releases"><img src="https://img.shields.io/github/v/release/sprottai/sprott?label=release&color=2ea44f" alt="release"></a>
@@ -24,125 +14,50 @@ Are you an AI agent? Run the command above and follow what it prints. Install on
 
 <p align="center">
   <a href="https://sprott.ai">sprott.ai</a> ·
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#faq">FAQ</a> ·
-  <a href="docs/README.md">Docs</a>
+  <a href="https://sprott.ai/docs">Docs</a> ·
+  <a href="https://sprott.ai/docs/quickstart">Quickstart</a> ·
+  <a href="https://sprott.ai/docs/faq">FAQ</a>
 </p>
 
-<!-- demo GIF goes here once recorded: see demo/README.md -->
-
-Pasting an API key into an agent's env hands it to every prompt injection, rogue skill, and log line downstream. Sprott takes the key out of the agent's hands entirely:
-
-```bash
-GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
-```
-
-`__sprott__github__` is a **phantom**: a placeholder the agent uses instead of the credential. Sprott's local proxy swaps it for the real token at the network edge, only toward that service's own hosts. The agent gets the API response, never the key. Sensitive calls pause until you approve them with a passkey tap (Touch ID, Windows Hello, or a security key).
-
-## Why
-
-- **The agent never sees a secret.** It writes phantoms; the proxy injects real values at egress, pinned to each service's own hosts.
-- **No plaintext at rest, anywhere.** Keys are sealed under your passkey. The cloud syncs the sealed blob and cannot decrypt it. Plaintext exists only in the daemon's memory while unlocked; `sprott lock` wipes it.
-- **You approve what matters.** Every brokered call is policy-checked; sensitive ones wait for your passkey tap. A compromised agent can't spend your keys unsupervised, and can't exfiltrate what it never held.
-- **No passwords.** Passkeys only (WebAuthn).
-- **One ~5 MB static binary.** No runtime deps.
-
-## How it works
-
-```
-AI agent ──── sprott run -- gh pr list ────► Sprott proxy ── real token ──► api.github.com
- holds only                               (localhost)
- __sprott__github__                            │
-                                               ├─ vault: sealed under your passkey;
-                                               │  plaintext only in daemon memory
-                                               └─ sensitive calls wait for your
-                                                  passkey tap
-```
-
-`sprott` is the binary; `sc` and `safeclaw` are links to it. A machine on 1.x moves to 2.0 by running the installer again, which moves `~/.safeclaw` to `~/.sprott` ([docs/upgrade.md](docs/upgrade.md)). The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
-
-Only traffic routed through `sprott run` is touched. A phantom sent anywhere else reaches the upstream as a literal string and fails with a clean 401: nothing to leak.
-
-GitHub, OpenAI, Anthropic, Gemini, Gmail, Google Drive, GCP, Supabase, Railway, GitLab, npm, crates.io, Telegram and more ship in [the catalog](docs/reference/services.md); any other HTTPS API works as a custom connection.
-
-## Quickstart
-
-**1. Install.** Run the one setup command:
+## Set up
 
 ```bash
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
-It installs `sprott` in `~/.local/bin`, verifies the download's SHA256, and installs the agent skill. When run by an agent, it continues straight into `sprott setup`; in a terminal it prints the next step. It uses no sudo.
+Paste it to your AI agent, or run it in a terminal. It installs `sprott` and the agent skill, then continues into `sprott setup` (an agent) or prints the next step (a terminal). Step by step: [Quickstart](docs/quickstart.md).
 
-Each release also carries a sigstore build-provenance attestation: `gh attestation verify ~/.local/bin/sprott --repo sprottai/sprott`.
+Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/sprottai/sprott.
 
-**2. Set up the agent.** An agent installer continues here automatically. Otherwise run:
+## How it works
 
-```bash
-sprott setup
-```
-
-`--name <name>` is optional and defaults to the agent's product name.
-It never prompts. Follow each printed instruction until it reports `done`: sign in or create an account, create a passkey, approve the machine, and approve the agent and choose its vaults.
-
-After the machine and agent are approved, unlock the vault with `sprott unlock`; it prints an unlock link and the `sprott op wait` command. For several vaults, run `sprott vault ls`, choose one, then run `sprott unlock --vault <name>`.
-
-**3. Add a credential.** In the console's Connections tab (values are encrypted in your browser before upload), or at your terminal:
+The agent never holds a key. It puts a **phantom** where the key goes and runs the command through Sprott:
 
 ```bash
-sprott set HF_TOKEN --host huggingface.co   # prompts for the value; one passkey approval
-                                        # mints the phantom __sprott__hf_token__
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
 ```
 
-Entered this way, the value never leaves your machine.
+A broker on your machine checks the agent's signature, the destination and your policy, then swaps in the real token on the way to `api.github.com`. Sensitive calls wait for your passkey. The agent gets the response, never the key.
 
-**4. Use it.** The agent puts the phantom where the credential belongs and routes the command through the proxy:
+- **Every action has a signature.** Each agent has its own identity key and signs everything it does. Every approval and every policy change is signed by a person. Every record traces back to both.
+- **Access to exactly what was asked.** A key is used only for the request the agent made. Rules clear the routine calls. You approve the rest on a screen that shows exactly what will run.
+- **Runs where your agents run.** A broker runs on every machine, so it works on any network, including private ones. Your traffic and plaintext keys never pass through our cloud.
+- **Set up once, works for every agent.** Add a credential once, and every agent and teammate you allow can use it. Pair an agent once, and it gets every connection it's allowed.
 
-```bash
-HF_TOKEN=__sprott__hf_token__ sprott run -- python train.py
-```
-
-Full walkthrough: [docs/quickstart.md](docs/quickstart.md).
-
-## Teach your agent
-
-Agents learn Sprott from [skills/sprott/SKILL.md](skills/sprott/SKILL.md), in Agent Skills format. The installer adds it with `sprott skill install` and `sprott upgrade` installs it again. Without `sprott`, an agent can add it with `npx skills add sprottai/sprott`; see [docs/for-your-agent.md](docs/for-your-agent.md). The one habit that matters: **phantoms, not values**. An agent never needs `sprott get`; see [docs/sc-run.md](docs/sc-run.md).
-
-## CLI
-
-```text
-Setup         sprott setup · login · logout · up · down · restart · status
-Secrets       sprott set · get · ls · rm              (aliases of sprott secret …)
-Connections   sprott connection add|ls|rm · sprott run -- <cmd> · sprott registry · sprott store
-Services      sprott service add|update|ls|rm|validate   (from ./folder or github:owner/repo)
-Account       sprott agent · sprott device · sprott passkey · sprott vault
-Maintenance   sprott unlock · lock · sync · logs · doctor · upgrade · proxy · op
-```
-
-`sprott --help` shows the grouped list; `sprott <cmd> --help` for details. Ports default to `23293` (control) and `23294` (the proxy `sprott run` routes through); state lives under `~/.sprott/`.
-
-## FAQ
-
-**Where do my keys actually live?** Sealed under a key derived from your passkey. The cloud stores and syncs the sealed blob and cannot decrypt it. Plaintext exists in exactly one place: the daemon's memory on your machine, while unlocked. Details: [docs/security-model.md](docs/security-model.md).
-
-**Can't the agent just run `sprott get`?** Every `sprott get` is passkey-gated; it exists for you at a terminal, not for agents. An agent never needs the raw value: the phantom + `sprott run` path uses a credential without revealing it. Patterns and anti-patterns: [docs/sc-run.md](docs/sc-run.md).
-
-**What about traffic I don't route through `sprott run`?** Untouched. Sprott is not a machine-wide MITM; only commands you deliberately route are brokered, and a phantom sent unrouted is a worthless string.
-
-**What can a compromised agent do?** Spend credentials only through the proxy, only toward each connection's own hosts, under your policy, with sensitive actions waiting for your passkey. It cannot read the values, and outside the proxy its phantoms are inert.
-
-More answers: [docs/faq.md](docs/faq.md).
+GitHub, OpenAI, Anthropic, Gemini, Gmail, Google Drive, GCP, Supabase, Railway, GitLab, npm, crates.io, Telegram and more are built in; any other HTTPS API works as a custom connection.
 
 ## Docs
 
 | | |
 |---|---|
-| [Docs](docs/README.md) | The product, module by module: concepts, guides, security |
-| [Reference](docs/reference/) | Service definitions, policy, error codes, consent templates |
-| [Design docs](design/) | For contributors: protocol, broker architecture, schemas, sync |
+| [What is Sprott](docs/README.md) | The picture, the benefits, the parts |
+| [Quickstart](docs/quickstart.md) | Install, pair, add a key, make the first call |
+| [Work as a team](docs/team.md) | Shared vaults, members, the team overview |
+| [Security model](docs/security-model.md) | Signatures, where keys live, what the cloud sees |
+| [CLI](docs/reference/cli.md) | Every command |
+
+Agents learn Sprott from [skills/sprott/SKILL.md](skills/sprott/SKILL.md). Contributors: the design notes are in [design/](design/).
 
 ## License
 
-[Functional Source License 1.1 (Apache-2.0 future)](LICENSE), **FSL-1.1-ALv2**. Download, run, study, modify, and self-host for any purpose except a Competing Use: offering Sprott (or a derivative) to others as a commercial substitute. Each release converts to Apache-2.0 two years after it ships. This repo is the open client of a cloud-connected product; the cloud service stays proprietary.
+[Functional Source License 1.1, Apache 2.0 future license](LICENSE) (FSL-1.1-ALv2): Fair Source, eventually open source. Use, change and share it for any purpose except a Competing Use, which means offering it to others as a commercial substitute for Sprott. Each release becomes available under Apache 2.0 two years after it ships.
