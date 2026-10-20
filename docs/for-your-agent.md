@@ -6,6 +6,14 @@ description: "Give your coding agent one prompt to install and set up Sprott, th
 
 This page explains how an agent gets the Sprott skill, runs setup, loads its identity, and uses Sprott without handling credential values.
 
+## Paste-ready prompt
+
+Paste this to your coding agent:
+
+```text
+Set up Sprott for me: run `curl -fsSL https://sprott.ai/install.sh | sh` and follow what it prints. I only open links and tap my passkey; you run every command.
+```
+
 ## The skill
 
 The skill lives at [`skills/sprott/SKILL.md`](https://github.com/sprottai/sprott/blob/main/skills/sprott/SKILL.md) in Agent Skills format. It is the source of truth for discovery, phantom placement, `sprott run`, approvals, and setup.

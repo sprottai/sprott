@@ -4,8 +4,8 @@ description: "How Sprott lets an AI agent use your credentials without holding t
 
 # Overview: the whole model on one page
 
-Sprott gives an agent the **use** of a credential without ever letting it
-**hold** the credential.
+Sprott is a credential broker for AI agents. It gives an agent the **use**
+of a credential without ever letting it **hold** the credential.
 
 ![One brokered request, end to end: the agent holds only a phantom, the local broker resolves it, checks host and policy, and swaps in the real value at the last hop; the vault stays sealed under your passkey, and the cloud syncs only sealed data it cannot decrypt](assets/architecture.svg)
 

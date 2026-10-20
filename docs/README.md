@@ -4,12 +4,12 @@ description: "Docs for Sprott, the credential broker for AI agents: setup, conce
 
 # Sprott Docs
 
-This documentation explains Sprott through concepts, task guides, security
-pages, and reference pages. Contributor design docs live outside this tree in
-[`design/`](https://github.com/sprottai/sprott/tree/main/design).
+Sprott is a credential broker for AI agents. Your agent puts a placeholder
+where a key goes, and Sprott's local proxy swaps in the real value on the way
+out, with sensitive calls waiting for your passkey.
 
 New here? Read [Overview](overview.md), then do the
-[Quickstart](quickstart.md).
+[Quickstart](quickstart.md). Short answers: [FAQ](faq.md).
 
 ## Concepts
 
@@ -47,13 +47,4 @@ For users and service authors, in [`reference/`](reference/):
 [platform-support.md](reference/platform-support.md) (which OSes run the `sprott` binary),
 [consent-templates.md](reference/consent-templates.md) (approval-copy grammar).
 
-## Design docs
-
-For contributors reading the source, outside this tree in
-[`design/`](https://github.com/sprottai/sprott/tree/main/design):
-[protocol.md](https://github.com/sprottai/sprott/blob/main/design/protocol.md) (SUDP cryptographic profile),
-[credential-broker.md](https://github.com/sprottai/sprott/blob/main/design/credential-broker.md) (the broker architecture),
-[connection-schema.md](https://github.com/sprottai/sprott/blob/main/design/connection-schema.md) (vault data shapes),
-[sync.md](https://github.com/sprottai/sprott/blob/main/design/sync.md) / [sse-sync.md](https://github.com/sprottai/sprott/blob/main/design/sse-sync.md) (cloud sync),
-[request-scope.md](https://github.com/sprottai/sprott/blob/main/design/request-scope.md) (approval scope binding),
-[stores-and-items.md](https://github.com/sprottai/sprott/blob/main/design/stores-and-items.md) (stores and vault content model).
+Contributors: the design docs behind the source are in [`design/`](https://github.com/sprottai/sprott/tree/main/design).

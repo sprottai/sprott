@@ -4,7 +4,7 @@
 
 <h1 align="center">Sprott</h1>
 
-<p align="center"><b>Let your AI agent use your API keys. It never holds them.</b></p>
+<p align="center"><b>Sprott is a credential broker for AI agents.</b> Your agent uses your API keys but never holds them.</p>
 
 ## Set up
 
@@ -133,6 +133,8 @@ Maintenance   sprott unlock · lock · sync · logs · doctor · upgrade · prox
 
 **What can a compromised agent do?** Spend credentials only through the proxy, only toward each connection's own hosts, under your policy, with sensitive actions waiting for your passkey. It cannot read the values, and outside the proxy its phantoms are inert.
 
+More answers: [docs/faq.md](docs/faq.md).
+
 ## Docs
 
 | | |
@@ -143,4 +145,4 @@ Maintenance   sprott unlock · lock · sync · logs · doctor · upgrade · prox
 
 ## License
 
-[Functional Source License 1.1 (Apache-2.0 future)](LICENSE), **FSL-1.1-ALv2**. Download, run, study, modify, and self-host freely for any purpose except a Competing Use: offering Sprott (or a derivative) to others as a commercial substitute. Each release converts to Apache-2.0 two years after it ships. This repo is the open client of a cloud-connected product; the cloud service stays proprietary.
+[Functional Source License 1.1 (Apache-2.0 future)](LICENSE), **FSL-1.1-ALv2**. Download, run, study, modify, and self-host for any purpose except a Competing Use: offering Sprott (or a derivative) to others as a commercial substitute. Each release converts to Apache-2.0 two years after it ships. This repo is the open client of a cloud-connected product; the cloud service stays proprietary.

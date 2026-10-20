@@ -8,6 +8,14 @@ This page explains how to install Sprott, run agent-driven setup, approve the br
 
 ## 1. Install
 
+To have your coding agent install and set up Sprott, paste this to it:
+
+```text
+Set up Sprott for me: run `curl -fsSL https://sprott.ai/install.sh | sh` and follow what it prints. I only open links and tap my passkey; you run every command.
+```
+
+Or run the installer yourself in a terminal:
+
 ```bash
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
