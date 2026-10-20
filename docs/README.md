@@ -1,34 +1,28 @@
 ---
-description: "Sprott gives your AI agents the keys they need without handing them over, and shows you what each one did with them. What it is, how it works, and where to start."
+description: "Sprott is the access layer for AI agents: your agents get access, never the keys, and you get a live picture of every agent, with control over every permission. What it is, how it works, and where to start."
 ---
 
 # What is Sprott
 
-**Every AI agent on your team, with real access, in one picture.**
+**The access layer for AI agents.**
 
-Sprott gives your agents the keys they need without handing them over, and
-shows you what each one did with them.
+Your agents get access, never the keys. You get a live picture of every
+agent on your team, with control over every permission.
 
-One screen shows every agent, the machine it runs on, the services it
-reaches, and what got blocked or approved, and by whom: the
-[team overview](team.md#the-team-overview).
-
-> **Every action your agents take is signed by the agent that took it, and by the person who approved it.**
-
-## Why it makes sense
-
-1. **Every action has a signature.** Each agent has its own identity key and
-   signs everything it does. Every approval and every policy change is
-   signed by a person. Every record traces back to both.
-2. **Access to exactly what was asked.** A key is used only for the request
-   the agent made. Rules clear the routine calls. You approve the rest on a
-   screen that shows exactly what will run.
-3. **Runs where your agents run.** A broker runs on every machine, so it
-   works on any network, including private ones. Your traffic and plaintext
-   keys never pass through our cloud.
-4. **Set up once, works for every agent.** Add a credential once, and every
-   agent and teammate you allow can use it. Pair an agent once, and it gets
-   every connection it's allowed.
+1. **Credential broker.** The agent works with a placeholder, and the broker
+   on its machine swaps in the real key on the way out. It works on any
+   network, and our cloud never sees your traffic.
+2. **Connect once.** Connect a service once, and every agent you allow can
+   use it, on every machine. OAuth tokens renew on their own.
+3. **Passkey approvals.** Everyday calls pass your rules. Only the risky call
+   waits for your face or fingerprint.
+4. **Know your agent.** Every action is signed by the agent that took it and
+   by the person who approved it. SUDP, our published protocol, ties each
+   approval to that one call.
+5. **Activity log.** Every call: which agent, on which machine, for whom,
+   and who approved it.
+6. **Team overview.** See every agent on your team, live, and control every
+   permission: the [team overview](team.md#the-team-overview).
 
 ## Start
 
@@ -53,8 +47,8 @@ GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
 
 A broker on your machine checks the agent's signature, the destination and
 your policy, then swaps in the real token on the way to `api.github.com`. The
-agent gets the response, never the key. Zero trust for agents: every request
-is checked against the agent that signed it and the scope it asks for.
+agent gets the response, never the key. That check, on every request and
+before any key is used, is zero trust for agents.
 
 | Part | What it does |
 |---|---|

@@ -4,7 +4,7 @@
 
 <h1 align="center">Sprott</h1>
 
-<p align="center"><b>Every AI agent on your team, with real access, in one picture.</b><br>Sprott gives your agents the keys they need without handing them over, and shows you what each one did with them.</p>
+<p align="center"><b>The access layer for AI agents.</b><br>Your agents get access, never the keys. You get a live picture of every agent on your team, with control over every permission.</p>
 
 <p align="center">
   <a href="https://github.com/sprottai/sprott/releases"><img src="https://img.shields.io/github/v/release/sprottai/sprott?label=release&color=2ea44f" alt="release"></a>

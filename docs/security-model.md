@@ -4,8 +4,10 @@ description: "How Sprott signs every action, where your keys live, what the clou
 
 # Security model
 
-Zero trust for agents: every request is checked against the agent that
-signed it and the scope it asks for.
+Zero trust for agents: before a key is used, the broker checks which agent
+signed the request and exactly what it asks to do. Every agent, machine and
+person has its own key, so you always know your agent: who acted, and who
+approved it.
 
 Approvals are built on SUDP, a protocol for passkey-signed, single-use
 grants ([paper](https://arxiv.org/pdf/2604.24920)).

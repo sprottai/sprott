@@ -6,8 +6,8 @@ description: "Short answers on what Sprott is, how it differs from secrets manag
 
 ## What is Sprott?
 
-Sprott gives your agents the keys they need without handing them over, and
-shows you what each one did with them. The agent puts a phantom, such as
+Sprott is the access layer for AI agents: your agents get access, never the
+keys, and you see what every agent does. The agent puts a phantom, such as
 `__sprott__github__`, where a key goes. A broker on your machine swaps in
 the real value as the request leaves, only toward that service's hosts and
 only when policy allows. Every action is signed by the agent that took it,
