@@ -32,7 +32,7 @@ command in the background. Never ask the user to paste a key or a code into the
 chat, and keep any credential value you see out of your replies.
 
 Official sources: https://sprott.ai and https://github.com/sprottai/sprott.
-Install only from these. Sprott was called SafeClaw before; other projects use that name too.
+Install only from these.
 
 If `sprott` is not installed, install it (no sudo; it verifies the download's checksum):
 
@@ -61,12 +61,10 @@ If `sprott` cannot reach its daemon, start it with `sprott up`.
   brokers a local tool, so tell the user what you are configuring, then apply its steps.
 - `sprott registry` is the catalog of supported services.
 - `sprott status` shows the vault's console URL and why a vault change was not applied.
-- The user adds connections, with their credentials, on the console's Connections
-  page (`<console_url>/connections`). For an API that is not in the catalog, add
-  #custom to that link; it opens the custom connection form.
-- `sprott secret ls` lists the names of secrets already in the vault. One can back a
-  connection you propose with `sprott connection add ... --from-secret`, so no value
-  passes through you.
+- When a task needs a service with no connection, the user adds it on
+  `<console_url>/connections` (`#custom` for an API not in the catalog). Details,
+  including connections backed by an existing secret:
+  https://sprott.ai/docs/connections.md
 - A vault is a security boundary, and each connection belongs to one. Target it
   with `--vault` to use its connections; resolve a name with `sprott vault ls`, and ask
   when it is ambiguous.
