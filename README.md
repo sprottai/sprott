@@ -60,7 +60,7 @@ AI agent ──── sprott run -- gh pr list ────► Sprott proxy ─�
                                                   passkey tap
 ```
 
-`sprott` is the binary; `sc` and `safeclaw` are links to it. A machine on 1.x moves to 2.0 by running the installer again, which moves `~/.safeclaw` to `~/.sprott`. The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
+`sprott` is the binary; `sc` and `safeclaw` are links to it. A machine on 1.x moves to 2.0 by running the installer again, which moves `~/.safeclaw` to `~/.sprott` ([docs/upgrade.md](docs/upgrade.md)). The daemon runs on your machine; the control plane at [sprott.ai](https://sprott.ai) handles encrypted vault backup, cross-device sync, and web approvals, and this binary is its open client.
 
 Only traffic routed through `sprott run` is touched. A phantom sent anywhere else reaches the upstream as a literal string and fails with a clean 401: nothing to leak.
 

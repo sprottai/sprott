@@ -29,6 +29,7 @@ New here? Read [Overview](overview.md), then do the
 | [Quickstart](quickstart.md) | Zero to first brokered call in five minutes |
 | [`sprott run` and phantoms](sc-run.md) | The patterns, and the `sprott get` anti-pattern |
 | [For your agent](for-your-agent.md) | Handing Sprott to an agent: skill file, paste-ready prompt |
+| [Upgrading](upgrade.md) | Moving a 1.x machine to 2.0 |
 
 ## Security
 

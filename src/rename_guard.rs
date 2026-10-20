@@ -355,6 +355,8 @@ fn shipped_text_names_no_pre_2_0_name() {
         r"|Sprott was called SafeClaw before",
         r"|moves `?~/\.safeclaw`? to `?~/\.sprott",
         r"|a phantom from before Sprott 2\.0 \(`__sc__<conn>__`\)",
+        // The 1.x `sc upgrade` error, quoted in docs/upgrade.md.
+        r"|no checksum for safeclaw-<platform> in the latest release",
     ))
     .unwrap();
     let mut bad = Vec::new();
