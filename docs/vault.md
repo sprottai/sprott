@@ -26,7 +26,7 @@ vault is unlocked.
 | Who | only you | your team: members, admins and one owner |
 | Credentials | yours | one set for the whole team, used by everyone's agents |
 | Approvals | you | the requester or an admin |
-| Overview tab | your vault's status | the [team overview](team.md#the-team-overview) |
+| Overview tab | the [overview](activity.md#the-overview) of your agents | the same, for every member: the [team overview](team.md#the-team-overview) |
 
 You choose the kind when you create a vault (console: **New vault**), and it
 never changes. Shared vaults are available on Team. Setting one up:

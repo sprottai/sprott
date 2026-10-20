@@ -15,12 +15,12 @@ Prices: [sprott.ai/pricing](https://sprott.ai/pricing).
 | Activity, with every call recorded on your machine | ✅ | ✅ | ✅ |
 | Agent access per vault | ✅ | ✅ | ✅ |
 | Activity in the console | last 7 days | last 90 days | last 90 days |
+| [Overview](../activity.md#the-overview) of every agent | ✅ | ✅ | ✅ |
 | Machines | one | several, synced | several, synced |
 | Vaults | one personal vault | several | several |
 | More passkeys to unlock and approve | | ✅ | ✅ |
 | Per-agent, per-connection access | | ✅ | ✅ |
 | [Shared vaults](../team.md), members, roles and invites | | | ✅ |
-| [Team overview](../team.md#the-team-overview) | | | ✅ |
 | Team activity, attributed to person, agent and machine | | | ✅ |
 
 - **Pro** has a 14-day trial, no card needed. You can start it when you

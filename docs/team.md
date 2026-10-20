@@ -62,21 +62,9 @@ vault and which connections each may reach ([Identity](agents.md#agent-access)).
 
 ## The team overview
 
-A shared vault's **Overview** tab is the team overview:
-
-- **Inventory**: members, agents, machines and connections, each linking to
-  its tab.
-- **Totals** for the last 24 hours, 7 days or 30 days: calls, allowed,
-  approved, blocked and rejected.
-- **The map**: every member, machine and agent on one side, every connection
-  on the other. A line's width is its number of calls; its colour is how
-  recent the last call was. A dashed line means an agent can use a connection
-  but hasn't.
-- **Approvals**: who approved what, their own requests and their teammates'.
-- **Latest calls**, each with who approved it, and a link to
-  [Activity](activity.md).
-
-It refreshes every 15 seconds. **Full screen** turns it into a wall display.
+On a shared vault, the [overview](activity.md#the-overview) covers the whole
+team: the map starts from every member, then their machines and agents, and
+Approvals splits each person's own requests from their teammates'.
 
 ## Remove a member
 

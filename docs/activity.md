@@ -52,5 +52,23 @@ Each machine keeps the full history of its own calls. The cloud keeps a
 copy of the metadata above so the console can show it across machines, for
 the window your plan includes ([Plans](reference/plans.md)).
 
-On a shared vault, Activity covers the whole team, and the
-[team overview](team.md#the-team-overview) sums it up in one picture.
+On a shared vault, Activity covers the whole team.
+
+## The overview
+
+A vault's **Overview** tab sums Activity up in one picture, once the vault
+is set up:
+
+- **Inventory**: agents, machines and connections, each linking to its tab.
+- **Totals** for the last 24 hours, 7 days or 30 days: calls, allowed,
+  approved, blocked and rejected.
+- **The map**: every machine and agent on one side, every connection on the
+  other. A line's width is its number of calls; its colour is how recent the
+  last call was. A dashed line means an agent can use a connection but
+  hasn't.
+- **Approvals**: who approved what.
+- **Latest calls**, each with who approved it.
+
+It refreshes every 15 seconds. **Full screen** turns it into a wall display.
+On a shared vault it covers every member: the
+[team overview](team.md#the-team-overview).

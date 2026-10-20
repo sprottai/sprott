@@ -12,10 +12,10 @@ agent on your team, with control over every permission.
 1. **Credential broker.** The agent works with a placeholder, and Sprott
    swaps in the real key on the way out, right on the agent's machine. It
    works on any network, and our cloud never sees your traffic.
-2. **Passkey approvals.** Everyday calls pass your rules. Only the risky call
+2. **Overview.** Every agent, live, in one picture, and control of any in
+   one click: the [overview](activity.md#the-overview).
+3. **Passkey approvals.** Everyday calls pass your rules. Only the risky call
    waits for your face or fingerprint.
-3. **Team overview.** Every agent on your team, live, and control of any in
-   one click: the [team overview](team.md#the-team-overview).
 4. **Activity log.** Every call: which agent, on which machine, for whom,
    and who approved it.
 5. **Know your agent.** Every action is signed by the agent that took it and
