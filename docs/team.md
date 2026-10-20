@@ -83,4 +83,6 @@ create new ones at each service and update them in the vault.
 ## Billing
 
 After the trial, a shared vault is billed per seat. Seats count people,
-the owner included; agents don't take seats. Prices: [sprott.ai/pricing](https://sprott.ai/pricing).
+the owner included; agents don't take seats. Every seat gets Pro's limits on
+the member's own account, and a shared vault keeps 90 days of activity in
+the console ([Plans](reference/plans.md)). Prices: [sprott.ai/pricing](https://sprott.ai/pricing).

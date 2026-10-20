@@ -59,7 +59,8 @@ cloud cannot read what it syncs. Add a machine with `sprott setup` (or
 `sprott login`) and approve it with your passkey. Revoking a machine cuts its
 access in your account ([Identity](agents.md#machines)).
 
-Multi-device sync is available on Pro and Team.
+How many machines an account can pair depends on its plan
+([Plans](reference/plans.md)).
 
 ## Several vaults
 
@@ -73,7 +74,8 @@ agent's traffic never lands in another vault by accident.
 
 An agent's env never changes your default vault.
 
-Multiple vaults are available on Pro and Team.
+How many private vaults an account can create depends on its plan
+([Plans](reference/plans.md)).
 
 ## Lose every passkey
 

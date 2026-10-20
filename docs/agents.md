@@ -60,8 +60,6 @@ An agent gets access when you approve it at pairing, from the **Authorize
 all** prompt on a shared vault, or on this tab. You manage your own agents;
 on a shared vault, admins manage anyone's.
 
-Per-agent, per-connection access is available on Pro and Team.
-
 ### Removing an agent
 
 Console: **Account → Agents → Revoke agent**. It stops working on every
