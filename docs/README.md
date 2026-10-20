@@ -9,20 +9,20 @@ description: "Sprott is the access layer for AI agents: your agents get access, 
 Your agents get access, never the keys. You get a live picture of every
 agent on your team, with control over every permission.
 
-1. **Credential broker.** The agent works with a placeholder, and the broker
-   on its machine swaps in the real key on the way out. It works on any
-   network, and our cloud never sees your traffic.
-2. **Connect once.** Connect a service once, and every agent you allow can
-   use it, on every machine. OAuth tokens renew on their own.
-3. **Passkey approvals.** Everyday calls pass your rules. Only the risky call
+1. **Credential broker.** The agent works with a placeholder, and Sprott
+   swaps in the real key on the way out, right on the agent's machine. It
+   works on any network, and our cloud never sees your traffic.
+2. **Passkey approvals.** Everyday calls pass your rules. Only the risky call
    waits for your face or fingerprint.
-4. **Know your agent.** Every action is signed by the agent that took it and
+3. **Team overview.** Every agent on your team, live, and control of any in
+   one click: the [team overview](team.md#the-team-overview).
+4. **Activity log.** Every call: which agent, on which machine, for whom,
+   and who approved it.
+5. **Know your agent.** Every action is signed by the agent that took it and
    by the person who approved it. SUDP, our published protocol, ties each
    approval to that one call.
-5. **Activity log.** Every call: which agent, on which machine, for whom,
-   and who approved it.
-6. **Team overview.** See every agent on your team, live, and control every
-   permission: the [team overview](team.md#the-team-overview).
+6. **Connect once.** Connect a service once, and every agent you allow can
+   use it, on every machine. OAuth tokens renew on their own.
 
 ## Start
 
