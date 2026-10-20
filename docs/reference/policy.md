@@ -1,4 +1,8 @@
-# Policy: 审批策略 (per-action decisions)
+---
+description: "How Sprott policy levels, rules and read and write floors are written, and the order in which they decide a request."
+---
+
+# Policy: per-action decisions
 
 This page describes Sprott's per-action policy levels and how the policy engine evaluates them.
 

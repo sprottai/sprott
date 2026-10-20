@@ -1,3 +1,7 @@
+---
+description: "Docs for Sprott, the credential broker for AI agents: setup, concepts, security and reference pages."
+---
+
 # Sprott Docs
 
 This documentation explains Sprott through concepts, task guides, security

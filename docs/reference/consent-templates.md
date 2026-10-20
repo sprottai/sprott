@@ -1,3 +1,7 @@
+---
+description: "The template grammar for Sprott approval cards, which show only reviewed text and signed values."
+---
+
 # Consent templates: the ONE grammar for approval copy
 
 This page defines the reviewed consent templates used by Sprott approval surfaces.

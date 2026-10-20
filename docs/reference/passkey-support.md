@@ -1,3 +1,7 @@
+---
+description: "Which passkey providers, operating systems and browsers can encrypt a Sprott vault, and what to do when yours cannot."
+---
+
 # Passkey support
 
 This page lists the passkey and browser combinations that can encrypt a Sprott vault. It also explains what to do when a setup does not support the WebAuthn **PRF extension**.

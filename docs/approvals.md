@@ -1,3 +1,7 @@
+---
+description: "How Sprott decides each request (allow, ask, ask-always or deny), where the rules come from and what one passkey approval covers."
+---
+
 # Approvals & policy: who decides what runs
 
 This page explains Sprott's per-action approval levels, policy sources, and passkey decisions.

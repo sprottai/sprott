@@ -1,3 +1,7 @@
+---
+description: "How Sprott lets an AI agent use your credentials without holding them: phantoms, the local proxy and passkey approvals."
+---
+
 # Overview: the whole model on one page
 
 Sprott gives an agent the **use** of a credential without ever letting it

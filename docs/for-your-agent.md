@@ -1,3 +1,7 @@
+---
+description: "Give your coding agent one prompt to install and set up Sprott, then the skill and identity it uses to work without seeing credentials."
+---
+
 # For your agent
 
 This page explains how an agent gets the Sprott skill, runs setup, loads its identity, and uses Sprott without handling credential values.

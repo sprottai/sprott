@@ -1,3 +1,7 @@
+---
+description: "Every Sprott error code with its HTTP status, the next step and its cause, plus CLI exit codes and the known blind spots."
+---
+
 # Diagnostics: error codes and surfaces
 
 This page lists Sprott error codes, response shapes, actions, and known blind spots. Sprott reports problems loudly and leaves unrelated upstream errors without a Sprott marker.

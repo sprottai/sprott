@@ -1,3 +1,7 @@
+---
+description: "Install Sprott, pair your machine and agent, add a credential and make your first call through the local proxy."
+---
+
 # Quickstart
 
 This page explains how to install Sprott, run agent-driven setup, approve the browser steps, and make the first brokered call.

@@ -1,3 +1,7 @@
+---
+description: "Write a Sprott service definition and add it to a vault: hosts, secrets, tags, OAuth and the commands that install it."
+---
+
 # Service TOML reference (v4)
 
 This page explains how to write a Sprott service definition. Design rationale lives in
@@ -159,7 +163,7 @@ shape only, the vocabulary is open).
 
 - Core vocabulary today: `ai` (model providers), `app` (external apps/SaaS),
   `messaging` (Telegram-class channels). Business-dimension tags (e.g.
-  `wallet`) coexist freely in the same list.
+  `wallet`) coexist in the same list.
 - Consumers: the console derives its filter chips and grouping from the tags
   present in the registry (an unknown tag renders verbatim as a chip), and the
   policy engine matches tags against the per-tag default floors: when several

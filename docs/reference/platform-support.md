@@ -1,3 +1,7 @@
+---
+description: "Which operating systems and CPUs run the sprott CLI and daemon, how to install and verify it, and how it runs on each."
+---
+
 # Platform support
 
 This page lists the operating systems and CPU architectures supported by the `sprott` binary and daemon. Passkey and browser support is covered separately in [Passkey support](passkey-support.md).

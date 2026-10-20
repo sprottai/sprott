@@ -1,3 +1,7 @@
+---
+description: "Where Sprott keeps your credentials: a vault sealed under your passkey, opened only in memory on your machine and synced sealed."
+---
+
 # Vault: sealed under your passkey
 
 The vault is where credentials live. Its defining property: **plaintext

@@ -1,3 +1,7 @@
+---
+description: "Where your keys live, what the cloud can and cannot read, and what a compromised agent or server can do with Sprott."
+---
+
 # Security model: where your keys actually live
 
 This page answers the security questions about Sprott's credential broker. The cryptographic detail behind each one is in

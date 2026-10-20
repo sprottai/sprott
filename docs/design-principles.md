@@ -1,3 +1,7 @@
+---
+description: "The ten rules Sprott is built on, from use without possession to failing loudly, each one checkable against how it behaves."
+---
+
 # Design principles
 
 This page lists the rules that guide Sprott's design and can be checked against observable behavior.

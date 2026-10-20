@@ -1,3 +1,7 @@
+---
+description: "Use a credential without seeing it: place the phantom, run the command through sprott run, handle approvals and debug a 401 or 403."
+---
+
 # `sprott run` and phantoms: use a key without seeing it
 
 The one habit that makes Sprott work: **the agent handles phantoms, never

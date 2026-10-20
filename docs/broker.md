@@ -1,3 +1,7 @@
+---
+description: "How Sprott's local proxy swaps a phantom for the real value at the last hop, only on traffic you route through sprott run."
+---
+
 # Broker: one local egress point
 
 The whole mechanism in one sentence: **Sprott is a local proxy; put the

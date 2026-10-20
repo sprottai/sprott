@@ -1,3 +1,7 @@
+---
+description: "How each agent gets its own identity in Sprott, what it can and cannot do, and how its requests stay tied to it in the audit trail."
+---
+
 # Agents: attribution without possession
 
 This page explains agent identities, the setup commands that create them, and how policy controls what each agent may do.

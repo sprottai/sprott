@@ -1,3 +1,7 @@
+---
+description: "How a stored secret becomes a phantom your agent can use: connections, host anchors, the service catalog and the ways to connect."
+---
+
 # Connections: how a secret becomes a phantom
 
 A secret in the vault is just a value. A **connection** is what makes it
