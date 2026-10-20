@@ -1,10 +1,10 @@
 ---
-description: "Give your coding agent one prompt to install and set up Sprott, then the skill and identity it uses to work without seeing credentials."
+description: "Hand Sprott setup to your coding agent with one prompt, then give it the skill and the identity it uses to work without seeing credentials."
 ---
 
-# For your agent
+# Set up with your agent
 
-This page explains how an agent gets the Sprott skill, runs setup, loads its identity, and uses Sprott without handling credential values.
+Your agent runs every command. You open links and approve with your passkey.
 
 ## Paste-ready prompt
 
@@ -14,13 +14,21 @@ Paste this to your coding agent:
 Set up Sprott for me: run `curl -fsSL https://sprott.ai/install.sh | sh` and follow what it prints. I only open links and tap my passkey; you run every command.
 ```
 
+The agent runs the installer and `sprott setup`, and hands you each link to
+open. What happens at each step: [Quickstart](quickstart.md#2-run-setup).
+
+Never paste a key or a code into the chat. Setup prints the sentence to relay
+and the next command to run.
+
 ## The skill
 
-The skill lives at [`skills/sprott/SKILL.md`](https://github.com/sprottai/sprott/blob/main/skills/sprott/SKILL.md) in Agent Skills format. It is the source of truth for discovery, phantom placement, `sprott run`, approvals, and setup.
+The skill teaches an agent everything it needs: finding connections, placing
+phantoms, `sprott run`, approvals and setup. Read it at
+[sprott.ai/skill.md](https://sprott.ai/skill.md).
 
-The installer adds it with `sprott skill install`. `sprott upgrade` runs the skill
-install again, so the installed copy stays current. An agent without `sprott` can
-add it with:
+The installer adds it with `sprott skill install`, and `sprott upgrade`
+installs it again so it stays current. An agent without `sprott` can add it
+with:
 
 ```bash
 npx skills add sprottai/sprott
@@ -29,61 +37,29 @@ npx skills add sprottai/sprott
 Install only from [sprott.ai](https://sprott.ai) or
 [github.com/sprottai/sprott](https://github.com/sprottai/sprott).
 
-## Set up
+## Load the agent's identity
 
-If `sprott` is not installed, run:
-
-```bash
-curl -fsSL https://sprott.ai/install.sh | sh
-```
-
-The installer verifies the download's SHA256, puts `sprott` in `~/.local/bin`,
-installs this skill, and continues straight into `sprott setup` when an agent runs
-it. In a terminal, it prints the next step. Run:
+Each agent has its own identity and env file. If `SPROTT_AGENT_IDENTITY` is
+unset, the agent loads its file before running `sprott`:
 
 ```bash
-sprott setup
+set -a; . ~/.sprott/agents/<name>/agent.env; set +a
 ```
 
-`--name <a short name for the agent>` is optional and defaults to the agent's
-product name, such as `claude-code` or `codex`.
-`sprott setup` never prompts. Give the person any link and code it prints (they
-open the link and enter the code), then run its `Next:` command. Repeat until a
-run prints no `Next:`. After an error, run the printed `Fix:`. The last `Next:`
-is usually `sprott unlock`: it prints a link for the person and a `sprott op wait`
-command. Run that wait command and continue after approval.
-
-The browser sequence is: the person signs in or creates an account, creates a
-passkey, and approves the machine; approves the agent and chooses which vaults
-it may use. Under the hood, setup runs `sprott login` and `sprott agent add` when needed,
-writes `~/.sprott/agents/<name>/agent.env`, and installs the skill. It is safe
-to re-run.
-
-Never ask the person to paste a key or a code into chat. Relay the sentence
-that setup prints and run the next command it prints.
-
-## Per-agent identity
-
-Each agent has its own identity under `~/.sprott/agents/<name>/`. If
-`SPROTT_AGENT_IDENTITY` is unset, the agent loads its own env file before
-running `sprott`: `set -a; . ~/.sprott/agents/<name>/agent.env; set +a`. With one
-directory there, that one is the agent's; with several, it uses the name it set up
-with. `sprott setup` prints this line when it reports `done`. The file sets:
-
-| Variable | Meaning |
-|---|---|
-| `SPROTT_BROKER_URL` | The local broker, for example `http://127.0.0.1:23294` |
-| `SPROTT_AGENT_IDENTITY` | The agent identity file used to sign requests; it is not a credential |
-
-The env file is non-secret. Do not share an identity file between agents.
+`sprott setup` prints this line when it reports `done`. What the file holds:
+[Identity](agents.md#the-agent-identity).
 
 ## What your agent can propose
 
-Changes to the vault come from you, but an agent may ask for one: a new host on a connection (`sprott connection add-host`), or a new connection that uses a secret already in your vault (`sprott connection add <id> --service <svc> --from-secret ROLE=KEY`). Each is an approval request; nothing changes until you approve it with your passkey, and the card lists every key and host involved.
-For an API that is not in the catalog, add #custom to that link; it opens the custom connection form.
+An agent can ask for a change to the vault. Nothing changes until you approve
+it with your passkey, and the approval card lists every key and host
+involved.
 
-## Terminal commands for people
+- A new host on a connection: `sprott connection add-host`.
+- A new connection that uses a secret already in the vault:
+  `sprott connection add <id> --service <svc> --from-secret ROLE=KEY`.
 
-People can still run `sprott login` to pair a machine and `sprott agent add <name>` to
-register an agent at a terminal. `sprott setup` runs whichever command is still
-needed, then handles the env file and skill.
+When a task needs a service with no connection, you add it on the vault's
+Connections page in the console. `sprott status` prints the vault's console
+URL. Add `#custom` to the Connections page URL to open the form for an API
+that is not in the catalog.

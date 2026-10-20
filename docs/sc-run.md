@@ -1,79 +1,82 @@
 ---
-description: "Use a credential without seeing it: place the phantom, run the command through sprott run, handle approvals and debug a 401 or 403."
+description: "Use a credential without seeing it: find the phantom, place it, run the command through sprott run, use several accounts and debug a 401 or 403."
 ---
 
-# `sprott run` and phantoms: use a key without seeing it
+# Use a credential
 
-The one habit that makes Sprott work: **the agent handles phantoms, never
-values**. A phantom is a placeholder like `__sprott__github__`. Put it exactly
-where the credential would go, prefix the command with `sprott run --`, and the
-proxy substitutes the real value at egress, only toward that connection's own
-hosts.
+The habit that makes Sprott work: **the agent handles phantoms, never
+values.** How phantoms work: [Phantoms and the proxy](broker.md).
 
-## The pattern
+## Three steps
+
+1. **Find the phantom.** `sprott connection ls` lists every connection with
+   its hosts and phantom (`--json` for a machine-readable list). Copy the
+   phantom exactly as shown.
+2. **Place it** where the credential belongs: an env var a tool reads, an
+   `Authorization` header, a config file, or a URL path.
+3. **Run the command** through `sprott run --`.
 
 ```bash
 HF_TOKEN=__sprott__hf_token__ sprott run -- python train.py
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
+sprott run -- curl -s "https://api.telegram.org/bot__sprott__telegram__/getMe"
 ```
 
-The env var carries the phantom, not a value. Nothing in the agent's world
-ever holds the token; the swap happens inside the proxy, on the way to
-`huggingface.co` and nowhere else. No approval ceremony per read, because
-nothing is revealed.
+`sprott run --vault <name> -- <cmd>` picks a vault other than your default.
 
-Three steps, always the same:
+## Several accounts
 
-1. **Find the phantom.** `sprott connection ls` lists every connection with its
-   hosts and phantom (add `--json` for a machine-readable list). Copy it exactly
-   as shown.
-2. **Place it** where the credential belongs: an env var a tool reads, an
-   `Authorization` header, a config file, even a URL path
-   (`https://api.telegram.org/bot__sprott__telegram__/sendMessage`).
-3. **Route the command** through `sprott run --`. Unrouted traffic is untouched,
-   and an unrouted phantom reaches the upstream as a literal string: a clean
-   401, never a leak.
-
-## Multi-account
-
-Accounts are distinguished by phantom *value*, not env-var name. Same
-`GITHUB_TOKEN` variable, different phantom:
+Accounts differ by phantom, not by env var name. The same `GITHUB_TOKEN`
+variable, two connections:
 
 ```bash
 GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list        # personal
 GITHUB_TOKEN=__sprott__github_work__ sprott run -- gh pr list   # work
 ```
 
-## Approvals mid-run
+## Git and Docker
 
-A policy-gated use fails the command with an approval link in its error
-output. Open the link, tap your passkey, re-run the exact same command; the
-approval is cached. Agents background `sprott op wait <op_id>` and treat its exit
-as the signal (0 = approved).
+Inside `sprott run`, git uses Sprott as its credential helper: for a host
+with a connection, git sends that connection's phantom as the password, and
+the proxy swaps in the real token.
 
-## The anti-pattern: `$(sprott get)`
+```bash
+sprott run -- git push
+```
 
-If you learned other secret managers first, this feels natural:
+The proxy also fills phantoms inside `Authorization: Basic`, so for other
+tools a phantom goes where the password goes:
+
+```bash
+sprott run -- docker login -u <user> -p __sprott__dockerhub__
+```
+
+## When an approval is needed
+
+The command fails with an approval link in its output. Open it, approve with
+your passkey, and run the same command again. An agent runs
+`sprott op wait <op_id>` in the background and re-runs the command when it
+exits 0. Details: [Policy and approvals](approvals.md#for-agents).
+
+## Don't use `$(sprott get)`
 
 ```bash
 HF_TOKEN=$(sprott get HF_TOKEN) python train.py     # don't
 ```
 
-It runs, but it defeats the point. The plaintext now sits in the process
-environment where the agent, `python`, and every child process can read it,
-and you paid a passkey ceremony for the privilege: every `sprott get` is
-approval-gated because it reveals a value. You have reproduced "paste the key
-into the env" with extra steps.
+This puts the value in the process environment, where the agent and every
+child process can read it. `sprott get` asks for your passkey every time,
+because it shows a value. It is for you at a terminal: checking what is
+stored, a one-off command you type yourself, moving away. An agent never
+needs it.
 
-`sprott get` exists for *you* at a terminal: a one-off `curl` you type yourself,
-checking what's stored, migrating away. It is not an agent primitive.
-
-## Debugging a 401/403
+## Debugging a 401 or 403
 
 On a brokered call, an auth failure is usually routing, not the credential.
 Check in order:
 
-1. Did the command actually run under `sprott run --`?
-2. Is the phantom verbatim from `sprott connection ls`?
+1. Did the command run under `sprott run --`?
+2. Is the phantom exactly as `sprott connection ls` shows it?
 3. Is the destination one of that connection's hosts?
-4. Still failing: `sprott doctor`, and the error's `Sprott: <code>` line maps to
-   a fix in [DIAGNOSTICS.md](reference/diagnostics.md).
+4. Run `sprott doctor`. A `Sprott: <code>` line in the output maps to a fix
+   in [Error codes](reference/diagnostics.md).
