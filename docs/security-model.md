@@ -52,7 +52,9 @@ everything" token to steal.
 
 ## Can I verify any of this?
 
-Yes: this repo is the entire client. The sealing, the proxy substitution, and
-the approval protocol all happen in code you can read and build yourself
-(`cargo build --release`), and releases carry sigstore build-provenance
-attestations tying the binary you installed to this source.
+Yes. The sealing, the proxy substitution, and the approval protocol all happen
+in this repo's code, which you can read and build yourself
+(`cargo build --release`). The official binary adds one closed component, the
+add-on for shared team vaults. Releases carry sigstore build-provenance
+attestations tying the binary you installed to this repo's release workflow and
+commit.
