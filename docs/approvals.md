@@ -1,93 +1,96 @@
 ---
-description: "How Sprott decides each request (allow, ask, ask-always or deny), where the rules come from and what one passkey approval covers."
+description: "How Sprott decides each request (allow, ask, ask-always or deny), where the rules come from, what one passkey approval covers, and the Approvals inbox."
 ---
 
-# Approvals & policy: who decides what runs
+# Policy and approvals
 
-This page explains Sprott's per-action approval levels, policy sources, and passkey decisions.
+A key is used only for the request the agent made. Rules clear the routine
+calls. You approve the rest on a screen that shows exactly what will run.
 
-Every brokered request gets exactly one decision:
+## Four levels
 
-| Level | Behavior |
-|---|---|
-| `allow` | proceeds, no ceremony |
-| `ask` | one passkey approval, then reused for that rule (or floor class) for its window |
-| `ask-always` | a passkey approval every single time |
-| `deny` | blocked unconditionally |
+Every brokered request gets one level:
 
-When multiple sources have an opinion, **the strictest wins**
-(`deny > ask-always > ask > allow`), the same fail-safe family as cloud IAM
-systems.
+| Level | Console label | Behaviour |
+|---|---|---|
+| `allow` | Allowed | Runs with no approval. |
+| `ask` | Ask once | One approval, then reused for that rule's window. |
+| `ask-always` | Ask every time | An approval every time. |
+| `deny` | Never | Refused. |
 
-Out of the box the read and write floors are `allow`: a key you add is usable
-by your agent right away. A service's rules tighten specific actions (sending
-email, deleting a repository) to `ask` or `ask-always`. A connection you
-define yourself has no rules, so everything on it is allowed until you add
-some or set its floors.
+When several rules match, the strictest wins.
 
-## Where decisions come from
+## Where the level comes from
 
-1. **Service rules.** Each catalog service ships human-labeled, per-action
-   rules ("Read email content", "Delete a repository") matched
-   nginx-style against the request. Written by the recipe, overridable by
-   you.
-2. **Your overrides.** Per connection, you can re-level any rule or set
-   read/write floors.
-3. **Floors.** Connection, category, and global read/write defaults, derived
-   from an objective fact (the HTTP method), not a vibe. `GET`, `HEAD` and
-   `OPTIONS` are reads; every other method is a write. They apply when no
-   rule matches.
+1. **Rules.** Each catalog service ships labelled rules for its actions,
+   such as "Read email content" or "Delete repository". A rule matches the
+   request's method and path.
+2. **Floors.** A request no rule matches falls to the connection's read or
+   write floor, then the floors for the service's type, then the vault's
+   global floor. `GET`, `HEAD` and `OPTIONS` are reads; every other method
+   is a write.
 
-There are no "risk scores". Sprott doesn't grade actions medium-spicy on
-your behalf; rules state what an action *is*, and the level states your
-decision about it.
+You decide every level. On the vault's **Permissions** tab you can change
+any rule, set a connection's floors ("Everything else"), and set the vault
+defaults by service type.
 
-`deny` is never a factory default. Sprott is a gate, not a block: the point
-is to let agents work, with you at the choke point that matters.
+Out of the box the floors are `allow`, so a key you add works right away.
+A service's rules tighten the actions it names, such as sending email or
+deleting a repository. A custom connection has no rules until you add some
+or set its floors. `deny` is never a default.
 
-## What a tap actually approves
+There are no risk scores. A rule says what an action is; the level is your
+decision about it. Writing rules: [Policy rules](reference/policy.md).
 
-Approvals ride SUDP, a passkey-signed **single-use grant** protocol. The
-consent card names the specific action from a curated template; your
-signature covers that operation, scope-bound, and nothing else. There is no
-session-wide approval token to steal, and an approval can't be replayed into
-a different request.
+## What an approval covers
 
-What an approval lets through afterwards is stated on its card, from signed
-fields. It always covers only the requesting agent, on that connection and
-host, and only the unit that asked:
+The approval card shows the exact operation: the agent, the connection, the
+host, and the action. Your passkey signs that operation and nothing else.
+There is no session-wide approval to steal, and an approval can't be
+replayed into a different request.
 
-- `ask-always`: this one request; the next identical one asks again.
-- `ask` on a request a service scopes by its values (a `[requests]` shape,
-  e.g. an amount): this identical request, same values, for the window.
-- `ask` from a rule (e.g. "Send email"): later requests that the same rule
-  decides, for the rule's window, reads or writes like the approved one. A
-  read approved under a rule never lets a write through. Another rule still
-  asks.
-- `ask` from a read or write floor you set to `ask`: later reads (or writes)
-  on that connection that no rule matches, for the floor's window. A read
-  approval never lets a write through.
+### Details
 
-A request your policy allows never needs an approval to be authorized; if
-its credential is not loaded yet, approving it loads the credential for
-allowed requests only and lets no `ask` request through. Whether a
-credential is loaded never decides whether an `ask` request may run.
+An approval covers only the agent that asked, on that connection and host:
 
-The daemon refuses an approval whose signed card differs from what it would
-grant, so the card is never a guess.
+- `ask-always`: this one request.
+- `ask` on a request the service scopes by its values (such as an amount):
+  this request with the same values, for the window.
+- `ask` from a rule: later requests the same rule decides, for the rule's
+  window, of the same kind (read or write).
+- `ask` from a floor: later reads (or writes) on that connection that no
+  rule matches, for the floor's window.
 
-## Boundaries refuse; they don't prompt
+A read approval never lets a write through. The card states what the
+approval covers, and the daemon refuses an approval whose signed card differs
+from what it would grant.
 
-A request outside a connection's hosts, or against a `deny` rule, is refused
-loudly and immediately. So is a request on a value-scoped path covered by a
-connection rule you wrote that decides on something an approval there cannot
-pin: the body, or a field outside the path's `[requests]` scope. It does not become an approval popup. Prompts are
-reserved for actions you defined as sensitive; violations are not a
-negotiation. This is the anti-approval-fatigue stance: the fewer taps you
-see, the more each one means.
+## Boundaries refuse
+
+A request outside a connection's hosts, to a private address, or against a
+`deny` rule is refused at once. It does not become an approval prompt.
+Prompts are kept for the actions you marked as sensitive, so each one means
+something. A host the connection doesn't list yet comes with one approval to
+add it permanently.
+
+## The Approvals inbox
+
+**Approvals**, in the console sidebar, lists every request waiting for you,
+across all your vaults, grouped by vault: credential uses, unlocks, new
+hosts, removals and other changes. Join requests for shared vaults appear
+here too.
+
+- Select several and **Approve N**: one passkey touch per vault and machine.
+- **Reject** needs no passkey.
+
+On a shared vault, the requester or a vault admin can approve. Teammates'
+requests are listed under **Team members' requests** and don't count toward
+your badge.
 
 ## For agents
 
-An approval-gated command fails with the approval link in its output. The
-agent surfaces the link, backgrounds `sprott op wait <op_id>` (exit 0 means
-approved), and re-runs the same command. You tap; nobody types "done".
+A command that needs an approval fails with the approval link in its output.
+The agent gives you the link, runs `sprott op wait <op_id>` in the background
+(exit `0` means approved), and runs the same command again. With several
+requests waiting, the agent sends you the console's Approvals page instead of
+each link.

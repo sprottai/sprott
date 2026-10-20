@@ -1,60 +1,82 @@
 ---
-description: "Where Sprott keeps your credentials: a vault sealed under your passkey, opened only in memory on your machine and synced sealed."
+description: "Where Sprott keeps your credentials: personal and shared vaults, sealed under your passkey, opened only in memory on your machine and synced sealed."
 ---
 
-# Vault: sealed under your passkey
+# Vaults
 
-The vault is where credentials live. Its defining property: **plaintext
-exists in exactly one place**, the daemon's memory on your machine, and only
-while the vault is unlocked.
-
-## No password, by construction
-
-A vault is sealed under a key derived from your passkey (WebAuthn: Touch ID,
-Windows Hello, a security key). There is no master password to invent, reuse,
-phish, or forget. The passkey that seals the vault is the same one that signs
-approvals later, so the root of trust is a single physical gesture.
+A vault holds your credentials. It is sealed under your passkey. Plaintext
+exists in one place only: the daemon's memory on your machine, while the
+vault is unlocked.
 
 ## What's inside
 
-- **Secrets**: a flat pool of `KEY = value` pairs. A secret on its own is
-  inert storage; it becomes spendable only when a
-  [connection](connections.md) claims it.
-- **Connections**: the bindings that turn secrets into phantoms, each
-  anchored to its service's hosts.
-- **Policy**: your per-connection decisions and overrides
-  ([Approvals & policy](approvals.md)).
+- **Secrets**: `KEY = value` pairs. A secret is just stored; it becomes
+  usable when a [connection](connections.md) uses it.
+- **Connections**: secrets bound to a service's hosts, each with its phantom.
+- **Policy**: your rules and floors per connection
+  ([Policy and approvals](approvals.md)).
+- **Agent access**: which agents may use the vault, and which connections
+  each one may reach ([Identity](agents.md)).
+- **Activity**: a record of every brokered call ([Activity](activity.md)).
 
-## Lifecycle
+## Personal and shared vaults
+
+| | Personal | Shared |
+|---|---|---|
+| Who | only you | your team: members, admins and one owner |
+| Credentials | yours | one set for the whole team, used by everyone's agents |
+| Approvals | you | the requester or an admin |
+| Overview tab | your vault's status | the [team overview](team.md#the-team-overview) |
+
+You choose the kind when you create a vault (console: **New vault**), and it
+never changes. Shared vaults are available on Team. Setting one up:
+[Work as a team](team.md).
+
+## No password
+
+A vault is sealed under a key derived from your passkey (Touch ID, Windows
+Hello, a security key, or a passkey manager). There is no master password to
+reuse, phish or forget. The same passkey signs your approvals. Not every
+passkey can seal a vault: [Passkey support](reference/passkey-support.md).
+
+## Lock and unlock
 
 ```bash
-sprott up       # daemon up + vault unlocked: one passkey tap, idempotent
-sprott lock     # wipe decrypted state from memory
+sprott up       # start the daemon and unlock: one passkey approval
+sprott lock     # wipe the decrypted keys from memory
 sprott status   # which vault, locked or not, daemon health
 ```
 
-On disk, yours or the cloud's, the vault only ever exists sealed. `sprott lock`
-(or stopping the daemon) ends the plaintext's life entirely.
+On disk, yours or the cloud's, a vault exists only sealed. `sprott lock`, or
+stopping the daemon, ends the plaintext copy.
 
-## Backup and multi-device
+## Sync across machines
 
-The cloud stores the sealed vault for backup and syncs it across your
-machines per item, so two devices editing different entries don't clobber
-each other. The cloud cannot read what it syncs: sealing and unsealing happen
-on your devices only. Pairing a new machine is part of `sprott setup`; at a
-terminal, a person can run `sprott login` and approve it with a passkey. Unpairing
-revokes that device's standing cloud-side too.
+The cloud keeps the sealed vault as a backup and syncs it to your other
+machines item by item, so two machines editing different entries don't
+overwrite each other. Sealing and unsealing happen only on your devices; the
+cloud cannot read what it syncs. Add a machine with `sprott setup` (or
+`sprott login`) and approve it with your passkey. Revoking a machine cuts its
+access in your account ([Identity](agents.md#machines)).
 
-## Multiple vaults
+Multi-device sync is available on Pro and Team.
 
-One account can hold several vaults (work and personal, say). The daemon
-hosts all of them at once; which vault a request touches is named in the
-request itself, not global daemon state. Your CLI's active vault comes from
-`sprott vault use`, and an agent's env can never redirect it.
+## Several vaults
 
-## The honest edge case
+One account can hold several vaults, for example work and personal. The
+daemon serves all of them at once. Each request names its vault, so one
+agent's traffic never lands in another vault by accident.
 
-Lose every enrolled passkey and the vault stays sealed forever; nobody,
-including Sprott, can decrypt it. That is the price of the cloud being
-unable to read your keys. Enroll a backup passkey (your vault's Passkeys tab)
-on day one.
+- `sprott vault ls` lists them; `*` marks your default.
+- `sprott vault use <vault>` sets the default for your own commands.
+- `--vault <vault>` targets another one for a single command.
+
+An agent's env never changes your default vault.
+
+Multiple vaults are available on Pro and Team.
+
+## Lose every passkey
+
+If you lose every passkey on your account, the vault stays sealed for good.
+Nobody, including Sprott, can open it. Add a second passkey on day one:
+console, **Account → Passkeys → Add a passkey**.
