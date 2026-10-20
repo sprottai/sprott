@@ -4,19 +4,17 @@ description: "Which operating systems and CPUs run the sprott CLI and daemon, ho
 
 # Platform support
 
-This page lists the operating systems and CPU architectures supported by the `sprott` binary and daemon. Passkey and browser support is covered separately in [Passkey support](passkey-support.md).
+The `sprott` command and daemon run on these platforms. Which passkeys and
+browsers can seal a vault: [Passkey support](passkey-support.md).
 
-**Legend:** ✅ available · 🚧 in progress · ❌ not supported
+| Platform | Architecture | Binary |
+|---|---|---|
+| macOS | Apple Silicon (arm64) | `sprott-macos-aarch64` |
+| macOS | Intel (x86_64) | `sprott-macos-x86_64` |
+| Linux | x86_64 | `sprott-linux-x86_64` (static, musl) |
+| Linux | aarch64 | `sprott-linux-aarch64` (static, musl) |
 
-| Platform | Architecture | Status | Binary |
-|---|---|:--:|---|
-| macOS | Apple Silicon (arm64) | ✅ | `sprott-macos-aarch64` |
-| macOS | Intel (x86_64) | ✅ | `sprott-macos-x86_64` |
-| Linux | x86_64 | ✅ | `sprott-linux-x86_64` (static, musl) |
-| Linux | aarch64 | ✅ | `sprott-linux-aarch64` (static, musl) |
-| Windows | x86_64 | 🚧 | see [Windows](#windows) |
-| Windows | 32-bit / Arm | ❌ | not planned |
-| Any other OS / arch | N/A | ❌ | the installer exits with "Unsupported platform" |
+On any other platform the installer exits with "Unsupported platform".
 
 ## Install
 
@@ -45,7 +43,7 @@ gh attestation verify ~/.local/bin/sprott --repo sprottai/sprott
 
 ## macOS
 
-The binary is not yet Apple-notarized. The `curl | sh` install above runs
+The binary is not Apple-notarized. The `curl | sh` install above runs
 without a Gatekeeper prompt; a binary downloaded through a browser would be
 quarantined and blocked as "unidentified developer" instead. Verify provenance
 with the attestation command above if you obtained it another way.
@@ -60,15 +58,6 @@ A single static binary, no runtime dependencies. `sprott up` installs a per-user
 systemd unit (`~/.config/systemd/user/sprott.service`, `systemctl --user`)
 that starts the daemon and restarts it on failure; `sprott log` reads its journal.
 Running it as a system-wide service is possible by hand-writing your own unit.
-
-## Windows
-
-Native Windows support is not available in the standard install channel. The
-installer does not provide a Windows build, and an unsigned `.exe` would
-trigger SmartScreen.
-
-On Windows the binary is `sprott.exe` with no `sc.exe` alias: `sc` is Windows'
-own Service Control Manager and would shadow ours.
 
 ## Runtime
 

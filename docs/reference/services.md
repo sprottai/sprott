@@ -1,274 +1,153 @@
 ---
-description: "Write a Sprott service definition and add it to a vault: hosts, secrets, tags, OAuth and the commands that install it."
+description: "Write a Sprott service definition: hosts, secrets, tags, OAuth, and how each credential shape is declared."
 ---
 
-# Service TOML reference (v4)
+# service.toml
 
-This page explains how to write a Sprott service definition. Design rationale lives in
-[credential-broker.md](https://github.com/sprottai/sprott/blob/main/design/credential-broker.md); this page is the authoring
-reference only.
-
-A service is a folder `services/{id}/`: flat, so the filesystem itself
-enforces id uniqueness. Classification is data (`tags`), not layout.
+A service is a folder:
 
 ```
-services/github/
+my-api/
   service.toml     # this page
-  policy.toml      # per-action rules (each declares a level): see policy.md; rules match (host, path, method)
+  policy.toml      # optional: labelled rules, see Policy rules
+  icon.png         # optional: a PNG of at most 32 KiB
 ```
 
-Format: TOML (authored by humans/agents; CI publishes `registry.json`).
+Add it to a vault with `sprott service add ./my-api`
+([Add a service](../add-a-service.md)). Rules: [Policy rules](policy.md).
 
-## Adding services to a vault: `sprott service`
-
-Services outside the built-in catalog live in your vault, added from a
-**source**. A source is a folder in the catalog's layout:
-
-- a service folder: `service.toml` + optional `policy.toml`, or
-- a collection: `services/<id>/service.toml` + optional `policy.toml`.
-
-| Source | Example |
-|---|---|
-| Local folder | `./my-api`, `/abs/path/tools` |
-| GitHub repository, optional sub-folder | `github:owner/repo`, `github:owner/repo:services/acme` (`git:` works too) |
-
-GitHub only for now; another git host or a URL is refused. `owner/slug`
-names the service registry, which is not open yet.
-
-| Command | Does |
-|---|---|
-| `sprott service add <source> [--id <id>] [--ref <ref>]` | Reads the source, checks every definition, stores them with one passkey approval. |
-| `sprott service update <id\|source> [--all] [--check] [-y] [--ref <ref>]` | Re-reads a source and stores what changed, with one passkey approval. |
-| `sprott service ls [id]` | Lists the vault's definitions by source, with the pinned commit and loaded / skipped (with the reason). |
-| `sprott service rm <id\|source>` | Removes one service, or every service of a source. |
-| `sprott service validate <source> [--ref <ref>]` | Runs the same checks as `add`, without a vault. For authors and CI. |
-
-How it works:
-
-- **Third-party.** A service added from a source is installed: Sprott does
-  not review it. A vault loads installed services only while its owner turns
-  them on (console: Settings → Services); while off, `add` and `update` are
-  refused, `sprott service ls` shows them skipped, and connections that use them
-  fail.
-- **Pinned.** A GitHub source is resolved to a full commit (`--ref` takes a
-  branch or tag; default: the default branch) and stored with it and the ref.
-- **Read, never run.** Only `service.toml`, `policy.toml` and an optional
-  `icon.png` at those paths are read, as regular files: symlinks, links and devices are not followed
-  (a local folder is opened one component at a time without following a
-  link, macOS and Linux), a GitHub tarball is read in memory (never
-  extracted), `..` or an absolute path refuses it, and sizes and entry counts
-  are capped. A parse error gives its kind, line and column, never the text.
-- **All or nothing.** Every definition passes the same gate the daemon runs at
-  unlock; one invalid definition refuses the whole source.
-- **Icons.** A service folder may ship an `icon.png` (a real PNG, at most
-  32 KiB; anything else refuses the source). Icons display from the public
-  catalog, not from installs: the vault stores TOML only, and nothing of the
-  icon reaches the approval card.
-- **One approval.** The card lists each service, every host that receives
-  its credentials or OAuth data (declared hosts, the token endpoint, the
-  authorization page, a redirect that leaves your device), `PKCE: off` when
-  the flow has no PKCE, the rules it applies (each label with what it
-  matches, and any approval window it sets), the source with its ref and
-  commit, and the definition text. The daemon fetches a GitHub source itself:
-  the ref (or the default branch) is resolved under `refs/heads/` or
-  `refs/tags/` (an annotated tag to its commit) and must be at that commit,
-  and the commit must hold the same definitions. A commit id, any other ref,
-  a name that is both a branch and a tag at different commits (state
-  `refs/heads/<name>` or `refs/tags/<name>`), a failed fetch, or no answer
-  from GitHub refuses the request. Only the rules that tighten apply in a
-  vault.
-- **Ids.** A definition is stored under its `[service] id`. It may not be a
-  built-in id or one another source already holds; `--id` renames a
-  single-service source.
-- **Updates.** `update` proposes the remote default branch head (or `--ref`),
-  shows what changes, and marks new hosts (`+ NEW HOST`) and what now lets
-  requests through more easily (`! LOOSENED`: a rule gone or less strict, a
-  longer approval window, a request variable an approval no longer binds,
-  PKCE turned off). `--check` only shows; `-y`
-  skips the terminal question, never the passkey. A local source is re-read
-  only from the path you pass: `sprott service update ./my-api`. Services the
-  source no longer has are removed.
-- **Storage.** Each definition is its own record in the vault, like a
-  connection: any member can add, update or remove one, after approving the
-  card with a passkey. Definitions stored by earlier versions in one shared
-  record are moved to their own records: the daemon migrates a vault
-  without a keyset after an unlock; a vault with a keyset is migrated in the
-  console by an owner.
-- **Sync.** If a definition was changed in two places at once, both versions
-  are kept, like a connection: the second is the record `<id> (conflict
-  copy)`, which `sprott service ls` lists as skipped and which is never used;
-  keep the one you want in the console. A pulled change this device does not
-  apply (a setting not signed by an owner, or one that waits for unlock) is
-  listed by `sprott status` and `sprott service ls` with why.
-- **Removal.** Connections that use a removed service are kept and listed;
-  they stop working until a definition is added again.
-- `ls` reads the unlocked vault: no network, no passkey.
-
-## service.toml
+## A minimal service
 
 ```toml
 [service]
-id = "github"            # required; [a-z0-9_], no "__"; must equal the services/{id}/ dir name
+id = "github"            # required; [a-z0-9_], no "__"
 name = "GitHub"          # display name
-tags = ["app"]           # classification, multiple allowed: see below
-# optional: group, hidden, activation, help, secret_url
+tags = ["app"]           # classification, several allowed
 
 hosts = ["api.github.com", "github.com"]
 secrets = ["GITHUB_TOKEN"]
 ```
 
-That is a complete service. An optional top-level `setup = """…"""` string
-(sibling of `[service]`, not inside it) carries agent-facing setup notes. Add
-`[auth]` only if the service mints tokens.
+That is a complete service. A top-level `setup = """…"""` string, next to
+`[service]` and not inside it, carries setup notes for agents. Add `[auth]`
+only if the service mints tokens.
 
-### `hosts`
+## `hosts`
 
-The only destinations this service's secrets may ever be sent to.
+The only destinations this service's secrets may be sent to.
 
-- Entry = exact FQDN, or `*.suffix` (`*` leftmost only, matches exactly one
-  label: `*.openai.azure.com` matches `foo.openai.azure.com`, not
-  `a.b.openai.azure.com`). Bare `*` is rejected.
-- Authorities only: no scheme, no path prefix.
-- With a wildcard entry, each connection pins its exact host(s) at connect
-  time; enforcement always runs against exact FQDNs.
-- Do not add routing/transport info anywhere in the file; tool-native hints
-  (e.g. npm `--registry`) belong in `setup` prose.
+- An entry is an exact domain, or `*.suffix`. The `*` is leftmost only and
+  matches one label: `*.openai.azure.com` matches `foo.openai.azure.com`,
+  not `a.b.openai.azure.com`. A bare `*` is rejected.
+- Domains only: no scheme, no path.
+- With a wildcard entry, each connection pins its exact hosts when it is
+  created. Checks always run against exact domains.
+- Routing hints for a tool, such as npm's `--registry`, go in `setup`.
 
-### `secrets`
+## `secrets`
 
-The durable stored keys a connection of this type holds. Keys are `[A-Z0-9_]`
-and are the same list for **every** service: an OAuth2 service lists its
-refresh-token key here too (whatever `[auth].refresh_token` names). Presence of
-all of them is what makes a connection "connected".
+The keys a connection of this service stores. Keys are `[A-Z0-9_]`. An OAuth
+service lists its refresh-token key here too. A connection is connected when
+all of them are present.
 
-- **The injectable rule (uniform):** a connection's phantoms resolve to what its
-  *production* PRODUCES. No section = pass-through: the products are the declared
-  `secrets` themselves. A production section (`[auth]`; future `[sigv4]`-class)
-  makes its OUTPUT the injectable and marks every secret its fields name (e.g.
-  `refresh_token = "…"`) as a production INPUT: stored, never injectable
-  (the proxy answers such a phantom with an explicit `403 refresh_forbidden`).
-  The registry's per-connection `phantoms` list is the computed projection of
-  this rule: agents copy from it, never derive.
-- The phantom `__sprott__<conn>__` resolves to the sole injectable; if a connection
-  has several, agents use `__sprott__<conn>__<key>__` (key lowercased).
-- Insertion needs no declaration: the value replaces the phantom wherever the
-  tool puts it: any header, query param, URL path, body, or inside a decoded
-  `Authorization: Basic`. Never in the URL authority.
+What a phantom resolves to:
 
-### `tags`
+- With no `[auth]`, the phantoms resolve to the secrets themselves.
+- With `[auth]`, the phantom resolves to the minted access token. The
+  secrets `[auth]` names, such as the refresh token, are stored and never
+  sent: a phantom for one gets `refresh_forbidden`.
+- `__sprott__<conn>__` resolves to the connection's only value. With several,
+  use `__sprott__<conn>__<key>__`, with the key in lower case.
+  `sprott connection ls` lists each connection's phantoms.
 
-Classification, replacing the old `services/{category}/` directory layer.
-Lowercase-kebab slugs, several allowed, no duplicates (validator-enforced :
-shape only, the vocabulary is open).
+A phantom needs no placement declaration. The value replaces the phantom
+wherever the tool puts it: a header, a query parameter, a URL path, the body,
+or inside `Authorization: Basic`. Never in the host.
 
-- Core vocabulary today: `ai` (model providers), `app` (external apps/SaaS),
-  `messaging` (Telegram-class channels). Business-dimension tags (e.g.
-  `wallet`) coexist in the same list.
-- Consumers: the console derives its filter chips and grouping from the tags
-  present in the registry (an unknown tag renders verbatim as a chip), and the
-  policy engine matches tags against the per-tag default floors: when several
-  of a service's tags carry a floor, the most restrictive wins.
-- Untagged (typical for per-vault custom services): no tag floor applies :
-  only the global floor: and the console buckets the service as an app.
+## `tags`
 
-### `secret_url` (optional)
+Lower-case slugs, several allowed, no duplicates. Common tags: `ai` (model
+providers), `app` (apps and SaaS), `messaging`, `dev`, `payment`. Any slug
+is accepted.
 
-Where a HUMAN mints/manages this service's secret (e.g.
-`https://crates.io/settings/tokens`). Purely auxiliary and display-only: the
-console renders it as an "Open … → API tokens" helper link and
-`sprott connection add --service` prints it ("Get a token: …"). Nothing ever
-fetches a secret from it, and it never participates in routing or policy.
-Must be `http(s)` when present: it is rendered as a link, so the validator
-rejects non-web schemes.
+The console groups and filters services by tag. Policy applies tag floors:
+when several of a service's tags have one, the strictest wins. An untagged
+service gets only the global floor.
 
-### `[auth] type = "oauth2"`
+## `secret_url`
 
-Declare only when the service authenticates with minted OAuth2 access tokens.
+Optional. The page where a person creates the secret, such as
+`https://crates.io/settings/tokens`. The console shows it as a link, and
+`sprott connection add --service` prints it. Must be `http(s)`. Display
+only.
+
+## `[auth] type = "oauth2"`
+
+Only for a service that authenticates with minted OAuth2 access tokens.
 
 ```toml
 [service]
 # …
-secrets = ["GMAIL_REFRESH_TOKEN"]   # the refresh key is listed here too (uniform `secrets`)
+secrets = ["GMAIL_REFRESH_TOKEN"]   # the refresh key is listed here too
 
 [auth]
 type = "oauth2"
-provider = "google"                 # display label only ("Connect with Google")
+provider = "google"                 # display label ("Connect with Google")
 scopes   = ["https://www.googleapis.com/auth/gmail.send"]
-refresh_token = "GMAIL_REFRESH_TOKEN"  # RFC 6749 field name → the vault secret KEY the
-                                    #   durable refresh token is stored under
+refresh_token = "GMAIL_REFRESH_TOKEN"  # the secret key the refresh token is stored under
 authorization_url = "https://accounts.google.com/o/oauth2/v2/auth"
 token_url         = "https://oauth2.googleapis.com/token"
 pkce              = true
-client_id         = "499410884315-…apps.googleusercontent.com"  # PUBLIC client, inline
-# client_secret only for a non-confidential PUBLIC client (by convention,
-# review-enforced; no client_type field). No provider-template layer; every
-# [auth] oauth2 section is inline-complete.
-# id_token = "GMAIL_ID_TOKEN"       # only when the provider returns a stored OIDC id token
-# exposes = ["account_id"]          # optional extra derived values →
-                                    #   __sprott__<conn>__account_id__
+client_id         = "499410884315-…apps.googleusercontent.com"
+# client_secret only for a public client
+# id_token = "GMAIL_ID_TOKEN"       # when the provider returns an OIDC id token to keep
+# exposes = ["account_id"]          # extra values, as __sprott__<conn>__account_id__
 ```
 
-Token-endpoint knobs, all optional:
+Token endpoint options, all optional:
 
 ```toml
 [auth]
-# ...
-oauth_style = "form"               # /token body style: form (default) or json
-token_auth  = "post"               # client auth at /token: post (default: client_id
-                                   #   and client_secret in the body) or basic
-                                   #   (Authorization: Basic client_id:client_secret,
-                                   #   RFC 6749 2.3.1, and neither in the body)
+# …
+oauth_style = "form"               # token request body: form (default) or json
+token_auth  = "post"               # client auth: post (default, in the body)
+                                   #   or basic (Authorization: Basic)
 
-[auth.token_params]                # extra params merged into the code-exchange body
-echo_state = "{state}"             #   {state} = the consent state of this connect;
-                                   #   the ONLY placeholder (any other {...} is refused)
+[auth.token_params]                # extra params for the code exchange
+echo_state = "{state}"             #   {state} is the only placeholder
 
-[auth.refresh_params]              # extra params merged into the refresh body
-audience = "api"                   #   static values only (no placeholders: there is
-                                   #   no consent state at refresh time)
+[auth.refresh_params]              # extra params for the refresh
+audience = "api"                   #   static values only
 ```
 
-`token_params` / `refresh_params` are additions, never overrides: the protocol
-params (`grant_type`, `code`, `code_verifier`, `client_id`, `client_secret`,
-`redirect_uri`; for refresh `grant_type`, `refresh_token`, `client_id`,
-`client_secret`) are reserved and refused. Every token-endpoint call sends
-`Accept: application/json`.
+`token_params` and `refresh_params` add parameters; they never override the
+protocol's own (`grant_type`, `code`, `code_verifier`, `client_id`,
+`client_secret`, `redirect_uri`, and `refresh_token` on refresh). Every token
+request sends `Accept: application/json`.
 
-The phantom resolves to the minted access token. Token slots use RFC 6749
-response field names: `refresh_token` (required) maps the durable refresh token
-to the vault secret KEY it lives under; `id_token` (optional) does the same for a
-stored OIDC id token. Naming the durable token explicitly keeps a multi-secret
-service unambiguous. The refresh key is internal to the mint: never injectable.
-`access_token` (minted, ephemeral, never stored) and the flow temps `code` /
-`code_verifier` are NOT in the toml. This is the only auth section; a signing
-family (`[sigv4]`, `[web3sign]`) may be added when real. Sections are named by
-auth mechanism, never by tool.
+`refresh_token` (required) and `id_token` (optional) use the RFC 6749 field
+names and map each token to the secret key it is stored under. The access
+token is minted on demand and never stored.
 
-### Basic auth: nothing to declare
+## Basic auth
 
-The proxy decodes `Authorization: Basic` and substitutes phantoms inside it.
-Put the phantom where the pair goes:
+The proxy decodes `Authorization: Basic` and fills phantoms inside it.
+Nothing to declare. Put the phantom where the password goes:
 
-- git: `https://x:__sprott__github__@github.com/owner/repo` (URL userinfo). If the
-  service validates the username (e.g. Bitbucket, case-sensitive), type the
-  real username there.
+- git: inside `sprott run`, git's credential helper sends the phantom for you.
+  By hand: `https://x:__sprott__github__@github.com/owner/repo`. If the
+  service checks the username, type the real one.
 - docker: `docker login -u <user> -p __sprott__dockerhub__`.
-- `sprott git-credential` (optional helper): emits `("x", <phantom of the host
-  connection's sole injectable secret>)`; declines if none or several.
 
 ## Which shape needs what
 
-| Wire shape | Example | toml |
+| How the service takes the credential | Example | Declare |
 |---|---|---|
 | `Authorization: Bearer <token>` | openai, npm | `hosts` + `secrets` |
-| custom header | anthropic `x-api-key` | same |
-| raw token, no prefix | crates.io | same |
-| query param | Gemini `?key=` | same |
-| token in URL path | telegram `/bot<token>/` | same |
-| Basic pair | github/gitlab git | same |
-| OAuth2 mint | gmail; openai-codex (`exposes`) | + `[auth]` |
-
-## Out of scope
-
-`services/system/*` and daemon-executed services are not credential brokering
-(their upstream is the daemon); this schema does not apply to them.
+| a custom header | anthropic `x-api-key` | same |
+| a raw token, no prefix | crates.io | same |
+| a query parameter | Gemini `?key=` | same |
+| a token in the URL path | Telegram `/bot<token>/` | same |
+| a Basic pair | GitHub and GitLab over git | same |
+| OAuth2 | Gmail; openai-codex (`exposes`) | + `[auth]` |
+| an approval bound to request values | an amount, a recipient | + `[requests]` ([Policy rules](policy.md#value-scoped-requests)) |
