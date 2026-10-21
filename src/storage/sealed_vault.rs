@@ -81,18 +81,39 @@ pub fn read(path: &Path) -> Result<Option<SealedVault>> {
 /// On success the tmp file is renamed over the final path. On any error
 /// the tmp file is unlinked so stale temps don't accumulate.
 pub fn write_atomic(path: &Path, vault: &SealedVault) -> Result<()> {
+    write_file_durable(path, &serde_json::to_vec_pretty(vault)?)
+}
+
+/// Replace `path` with `bytes` atomically AND durably: write a uniquely named
+/// temp file, fsync it, rename it over `path`, then fsync the directory so the
+/// rename itself survives a crash. Without the two fsyncs a crash shortly
+/// after the rename can leave the old file or an empty one, which for a
+/// provider-rotated refresh token means losing the only valid copy. On any
+/// error the temp file is removed.
+pub fn write_file_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(vault)?;
     let tmp = path.with_extension(format!("dat.tmp.{:08x}", rand::random::<u32>()));
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
+    // The directory entry: best effort where a directory cannot be opened
+    // for syncing (Windows); the file content is already on disk.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            dir.sync_all()?;
+        }
     }
     Ok(())
 }
@@ -1260,6 +1281,17 @@ fn digest_hex(d: &[u8; 32]) -> String {
     d.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Where [`PerItemVault::write_rotated_secret`] put the new value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RotatedWrite {
+    /// The secret's own row (item id).
+    InPlace(String),
+    /// A keep-both conflict copy (item id), because the secret's own row
+    /// cannot be read with this session's key; `None` when an identical
+    /// copy is already stored.
+    ConflictCopy(Option<String>),
+}
+
 /// What [`PerItemVault::reconcile_from_view`] did: the item ids it wrote; the
 /// owner-config changes it set aside instead (the stored row changed since
 /// the caller's base), each `(canonical item id, record)` for the caller to
@@ -2250,6 +2282,61 @@ impl PerItemVault {
                 Ok(Some(id))
             }
         }
+    }
+
+    /// Store a provider-rotated value of secret `name` (a refresh token the
+    /// provider just issued in exchange for the one it now refuses, RFC 6749
+    /// §6: the client "MUST discard the old refresh token" and "replace it
+    /// with the new refresh token") as ONE sealed row: no fold of the rest of
+    /// the store, no view rebuild, no merge. Its notes are kept.
+    ///
+    /// The caller holds the vault write lock across the refresh and this
+    /// write, and every pull adopts rows under that same lock, so the row
+    /// held now is the one the refresh started from: writing over it is the
+    /// plain "replace". The one exception is a row this key cannot open (a
+    /// keyset this session has not caught up with) that is not confirmed
+    /// unreadable: it is never written over, and the new value lands as its
+    /// keep-both conflict copy instead, still in this store, so it is durable
+    /// either way and nothing is silently replaced.
+    pub fn write_rotated_secret<S: PrimitiveSuite>(
+        &mut self,
+        keys: VaultKeys,
+        vault_id: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<RotatedWrite> {
+        let ns = ItemNs::Secret;
+        let wire = wire_id_for::<S>(keys.id_seed, ns, name)?;
+        let previous = match self.open_item::<S>(keys, vault_id, ns, name) {
+            Ok(p) => p.filter(|p| !p.is_tombstone()),
+            Err(_) if self.items.get(&wire).is_some_and(|s| s.unreadable_confirmed) => None,
+            Err(_) => {
+                let ours = ItemPayload::live(ns, name.to_string(), secret_body(value, None));
+                let copy = self.keep_conflict_copy::<S>(keys, vault_id, &ours)?;
+                return Ok(RotatedWrite::ConflictCopy(copy));
+            }
+        };
+        // A body that does not parse has no notes this build can keep.
+        let notes = previous
+            .as_ref()
+            .and_then(|p| parse_secret_body(&p.body).ok())
+            .and_then(|(_, notes)| notes);
+        let payload = ItemPayload::live(ns, name.to_string(), secret_body(value, notes.as_deref()));
+        let was_clean = self
+            .items
+            .get(&wire)
+            .is_none_or(|s| s.version <= s.synced_version);
+        let (id, _) = self.seal_and_bump::<S>(keys, vault_id, ns, name, &payload)?;
+        // Keep-both bookkeeping, as every write records it: the body this
+        // change was made from.
+        if was_clean {
+            if let Some(s) = self.items.get_mut(&id) {
+                s.base = previous
+                    .as_ref()
+                    .map(|p| digest_hex(&item_body_digest(ns, name, &p.body)));
+            }
+        }
+        Ok(RotatedWrite::InPlace(id))
     }
 
     /// Whether the row at `(ns, name)` may be written over: absent, or one
@@ -3597,20 +3684,7 @@ pub fn read_per_item(path: &Path) -> Result<Option<PerItemVault>> {
 /// Atomically write the per-item vault file (same F-18 random-suffix temp +
 /// rename discipline as [`write_atomic`]).
 pub fn write_per_item_atomic(path: &Path, vault: &PerItemVault) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec_pretty(vault)?;
-    let tmp = path.with_extension(format!("dat.tmp.{:08x}", rand::random::<u32>()));
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    Ok(())
+    write_file_durable(path, &serde_json::to_vec_pretty(vault)?)
 }
 
 #[cfg(test)]
@@ -6975,6 +7049,85 @@ pub(crate) mod tests {
             vec![0u8; 48],
         )
         .unwrap()
+    }
+
+    /// A provider-rotated secret is ONE row write: in place over a row this
+    /// key reads (notes kept, the base recorded, the row dirty); as a
+    /// keep-both conflict copy over one it cannot read; in place again once
+    /// that row is confirmed unreadable.
+    #[test]
+    fn a_rotated_secret_is_one_row_in_place_or_a_conflict_copy() {
+        use sudp::primitives::StdPrimitives;
+        type S = StdPrimitives;
+        let k = [0x5au8; 32];
+        let keys = VaultKeys::single(&k);
+        let vid = "vault-rotate";
+        let name = "OPENAI_REFRESH_TOKEN";
+
+        // In place, over a readable synced row with notes.
+        let mut pv = v1_store();
+        let id = pv
+            .plant::<S>(
+                keys,
+                vid,
+                ItemNs::Secret,
+                name,
+                4,
+                &ItemPayload::live(ItemNs::Secret, name, secret_body("old-rt", Some("work account"))),
+            )
+            .unwrap();
+        pv.items.get_mut(&id).unwrap().synced_version = 4;
+        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "new-rt").unwrap();
+        assert_eq!(wrote, RotatedWrite::InPlace(id.clone()));
+        let row = pv.get_item(&id).unwrap();
+        assert_eq!((row.version, row.synced_version), (5, 4), "bumped, dirty");
+        assert_eq!(
+            row.base.as_deref(),
+            Some(digest_hex(&item_body_digest(ItemNs::Secret, name, &secret_body("old-rt", Some("work account")))).as_str())
+        );
+        let view = pv.fold_view::<S>(keys, vid).unwrap();
+        assert_eq!(view.native_secrets[name], b"new-rt");
+        assert_eq!(view.native_secret_notes[name], "work account");
+
+        // Over a row this key cannot open: never written over; the new value
+        // is a conflict copy in the same store.
+        let mut pv = v1_store();
+        let wire = wire_id_for::<S>(&k, ItemNs::Secret, name).unwrap();
+        let garbage = vec![7u8; 60];
+        pv.put_raw(wire.clone(), 3, garbage.clone());
+        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "new-rt").unwrap();
+        assert!(matches!(wrote, RotatedWrite::ConflictCopy(Some(_))), "{:?}", wrote);
+        let row = pv.get_item(&wire).unwrap();
+        assert_eq!((row.version, &row.ct), (3, &garbage), "left as it is");
+        let view = pv.fold_view::<S>(keys, vid).unwrap();
+        assert!(
+            view.native_secrets
+                .iter()
+                .any(|(n, v)| n != name && n.starts_with(name) && v.as_slice() == b"new-rt"),
+            "{:?}",
+            view.native_secrets.keys().collect::<Vec<_>>()
+        );
+
+        // Confirmed unreadable after a keyset refresh: in place.
+        assert!(pv.confirm_unreadable::<S>(keys, vid));
+        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "newer-rt").unwrap();
+        assert_eq!(wrote, RotatedWrite::InPlace(wire.clone()));
+        assert_eq!(pv.fold_view::<S>(keys, vid).unwrap().native_secrets[name], b"newer-rt");
+    }
+
+    /// The durable replace leaves exactly the new bytes and no temp file.
+    #[test]
+    fn a_durable_write_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.per-item.json");
+        write_file_durable(&path, b"one").unwrap();
+        write_file_durable(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("vault.per-item.json")]);
     }
 
     /// A row this key cannot open is never written over: a change that
