@@ -33,7 +33,9 @@ Cache-Control: no-cache, no-transform
 X-Accel-Buffering: no
 
 event: hello
-data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted"}, ...}}
+data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted",
+                          "items_seq":N,"keyset_seq":N}, ...},   (cursors: v1.2, cap "cursors")
+       "caps":["op","agent_hashes","access","vaults","cursors"]}
 
 event: vault
 data: {"vid":"...","version":N,"status":"live|deleted"}
@@ -99,7 +101,8 @@ data: {"vid":"..."}                   writes; they ride other wakes / reconcile.
   saw, no seq bump), handleRenameVault:895 (label only, invisible to daemons
   today), handleCreateVault:857 (daemon picks up new vaults on restart),
   admin-demo-cleanup hard-delete via auth-user FK cascade (demo-only; vanished
-  row → hello omits vid → fallback long-poll owns it). pg_cron touches none of
+  row → hello omits vid → fallback long-poll owns it). v1.2: vault creation is
+  now announced by the account `vaults` event (see v1.2). pg_cron touches none of
   the three tables (verified).
 - At the vault/items sites also `wakeNow` the existing long-poll waiters —
   fallback and old daemons get faster wakes for free (keys have no waiter today).
@@ -292,11 +295,70 @@ loop's armed sleep re-sizes on a health flip (stream_health_edge) instead
 of riding a 600s timer across an Up→Down transition; mid-stream hellos
 fire the resync notify exactly like connect hellos.
 
+## v1.2: idle traffic (2026-10-21)
+
+Goal: an idle daemon (vault unlocked, no agent activity, console closed) costs
+the cloud about one request every few minutes, with no change in how fast
+approvals, revocations, new secrets and roster changes arrive (they still ride
+stream events). Every relaxation below is gated on a hello cap, so an older
+backend gets the v1.1 cadences unchanged.
+
+**Backend (additive):**
+- Cap `cursors`: each hello vault cell also carries `items_seq` (max
+  `vault_items.seq`) and `keyset_seq` (`vault_membership.keyset_seq`). The cap is
+  declared only when both cursor reads succeeded; otherwise the cells carry
+  neither field.
+- Cap `vaults` + account event `vaults` (payload `{}`), emitted when the account
+  gains a vault: a vault create (private or shared), the first membership triple
+  write of a new shared vault, and a member being seated.
+- Shared vaults the account is a member of are in hello like owned ones.
+
+**Core:**
+
+| path | cap / condition | cadence |
+|---|---|---|
+| hello reconcile per vault | `cursors` | blob only if `version` > local; items only if `items_seq` > local items cursor; keyset only if `keyset_seq` > local keyset cursor. A field the cell lacks counts as unknown and pulls. |
+| hello reconcile per vault | no `cursors` | v1.1: blob version-gated, items + keyset always |
+| Sse-shape safety reconcile | `cursors` | 1800s (else 300s) |
+| shared vault blob probe | Sse shape, `cursors` | 600s, blob only (its answer carries the signed contact token the offline lease runs on) |
+| principal ledger | healthy stream + `agent_hashes` | on the event and on every hello, safety timer 1800s (else 120s); events spaced ≥2s |
+| vault discovery | healthy stream + `vaults` | on the event and on every hello, safety timer 1800s (else 120s); events spaced ≥5s |
+| fallback (long-poll) shape | any | unchanged |
+
+- The local keyset cursor is compared with hello's `keyset_seq` only for a v2
+  (membership) keyset; a legacy keyset counts `/keys` rows on another sequence,
+  so it always pulls.
+- Format-2 vaults: once a vault is known to use the membership triple (a `/keys`
+  409 or a verified envelope with `format >= 2`, remembered for the process; the
+  format only ratchets up), keyset pulls go straight to `/membership`.
+- Ledger pulls are incremental: the daemon keeps the last accepted event list in
+  memory and asks `GET /api/vault/principals?since=<max seq>`. The cached events
+  plus the served ones must hash to the freshly signed head, exactly as a full
+  pull; a mismatch retries once as a full pull. A restart starts with a full pull.
+- Dynamic vault subscribe: every watcher registers its cell with the
+  dispatcher's vault set (weak refs). A vault adopted after startup (discovery,
+  restored access) makes a live stream close on purpose and re-dial with the new
+  `?vids` (handled like a rotation: no backoff, health stays Up), capped at 32
+  vids in registration order; the rest stay on long-poll. With no vault the
+  dispatcher waits for the first one.
+- Health flips re-size the ledger and discovery timers instead of riding a
+  1800s sleep into a Down stream.
+
+**Idle cost per hour, healthy stream, Railway rotation every ~15 min:**
+- before (v1.1): per vault, hello pull round 4 × 3 (`/keys` 409, `/membership`,
+  `/items`) + 300s reconcile 12 × 4 (`/blob`, `/keys`, `/membership`, `/items`)
+  = 60; per daemon, ledger ~30 (120s timer, re-armed by each hello pull) +
+  discovery 30 + stream connect 4 ≈ 64.
+- after (v1.2): per private vault, 1800s reconcile 2 × 3 (`/blob`, `/membership`,
+  `/items`) = 6; a shared vault adds 4 blob probes = 10; per daemon, ledger 4 +
+  discovery 4 (one each per hello; their 1800s timers are re-armed by each pull
+  and only fire when hellos stop) + stream connect 4 = 12.
+
 ## Non-goals (v1)
 
 No WebSocket / Socket.IO / Centrifugo / NATS / Redis. No multi-instance fan-out
-(single Railway instance; long-poll fallback stays correct if that changes). No
-dynamic vault subscribe (restart picks up new vaults, as today). No exactly-once —
+(single Railway instance; long-poll fallback stays correct if that changes).
+(v1 had no dynamic vault subscribe; v1.2 adds it.) No exactly-once:
 cursors + idempotent pulls + reconcile ARE the delivery semantics. op_relay +
 agent-hash eventing = v1.1.
 
