@@ -38,7 +38,24 @@ use crate::state::AppState;
 pub const LEASE_SECS: u64 = 7 * 24 * 3600;
 
 /// Poll cadence: a revoke reaches an online device within one interval (I4).
+/// Used whenever no `agent_hashes` event can be proven to reach this daemon.
 const INTERVAL: Duration = Duration::from_secs(120);
+/// Safety timer while the stream is healthy and declares `agent_hashes`: the
+/// event and every reconnect hello (at most ~15 min apart) are the pull
+/// triggers then, and this only bounds a missed one.
+const SAFETY_INTERVAL: Duration = Duration::from_secs(1800);
+/// Minimum spacing between two loop pulls, however many events arrive.
+const EVENT_FLOOR: Duration = Duration::from_secs(2);
+
+/// The loop's timer (pure): relaxed only with proof that `agent_hashes`
+/// events reach this daemon (healthy stream AND the hello cap).
+fn ledger_interval(stream_healthy: bool, agent_hash_events: bool) -> Duration {
+    if stream_healthy && agent_hash_events {
+        SAFETY_INTERVAL
+    } else {
+        INTERVAL
+    }
+}
 
 // ── Wire shapes (GET /api/vault/principals) ─────────────────────────────────
 
@@ -51,7 +68,7 @@ struct AnchorJson {
     uik_pub: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct PrincipalEventJson {
     seq: u64,
     op: String,           // "admit" | "revoke"
@@ -143,14 +160,20 @@ async fn fetch_ledger(
     cloud: &str,
     anchor_uik: &str,
     signer: &DeviceRequestSigner,
+    since: u64,
 ) -> Result<LedgerJson, FetchError> {
     // `uik` names the pinned account explicitly (the backend would otherwise
-    // pick the account with the newest event naming this device).
-    let url = format!(
+    // pick the account with the newest event naming this device). `since`
+    // asks only for the events after the ones this process already verified
+    // (the head still covers the whole list).
+    let mut url = format!(
         "{}/api/vault/principals?uik={}",
         cloud.trim_end_matches('/'),
         urlencoding::encode(anchor_uik)
     );
+    if since > 0 {
+        url.push_str(&format!("&since={}", since));
+    }
     let path = crate::device_auth::path_and_query(&url)
         .ok_or_else(|| FetchError::Other("unparseable cloud URL".into()))?;
     let mut rb = client.get(&url);
@@ -172,6 +195,39 @@ async fn fetch_ledger(
     resp.json()
         .await
         .map_err(|e| FetchError::Other(format!("parse: {}", e)))
+}
+
+// ── Incremental pulls ────────────────────────────────────────────────────────
+
+/// The events of the last ACCEPTED pull, per pinned account, kept in memory
+/// so the next pull asks only for newer ones. Process-local: a restart
+/// starts with a full pull. Every pull is still verified as a whole: the
+/// cached events plus the new ones must hash to the freshly signed head.
+static VERIFIED_EVENTS: std::sync::Mutex<Option<(String, Vec<PrincipalEventJson>)>> =
+    std::sync::Mutex::new(None);
+
+/// The cached events for `anchor_uik` and the seq a delta pull starts after.
+fn cached_events(anchor_uik: &str) -> (Vec<PrincipalEventJson>, u64) {
+    match &*VERIFIED_EVENTS.lock().unwrap() {
+        Some((a, events)) if a == anchor_uik => {
+            let since = events.iter().map(|e| e.seq).max().unwrap_or(0);
+            (events.clone(), since)
+        }
+        _ => (Vec::new(), 0),
+    }
+}
+
+fn cache_events(anchor_uik: &str, events: Vec<PrincipalEventJson>) {
+    *VERIFIED_EVENTS.lock().unwrap() = Some((anchor_uik.to_string(), events));
+}
+
+/// The full list a delta pull stands for (pure): the cached events, then the
+/// served ones after `since`. A backend that ignored `since` serves the whole
+/// list again; the filter makes that the same result.
+fn merge_delta(mut cached: Vec<PrincipalEventJson>, since: u64, mut ledger: LedgerJson) -> LedgerJson {
+    cached.extend(ledger.events.into_iter().filter(|e| e.seq > since));
+    ledger.events = cached;
+    ledger
 }
 
 // ── Strict verify + fold ─────────────────────────────────────────────────────
@@ -673,8 +729,23 @@ async fn pull_now(state: &AppState, timeout: Duration) -> DeviceGate {
     let current = state.ledger.lock().unwrap().clone();
     let before = floor.clone();
     floor.max_wall = floor.max_wall.max(now);
+    let (cached, since) = cached_events(&ctx.anchor_uik);
     let pulled = match crate::cli::egress_proxy::client(timeout) {
-        Ok(client) => fetch_ledger(&client, &ctx.cloud, &ctx.anchor_uik, &ctx.signer).await,
+        Ok(client) => {
+            let mut pulled =
+                fetch_ledger(&client, &ctx.cloud, &ctx.anchor_uik, &ctx.signer, since)
+                    .await
+                    .map(|l| merge_delta(cached, since, l));
+            // A delta that does not verify against the new head (the cache
+            // and the cloud disagree) is retried once as a full pull, which
+            // alone decides; only that one's refusal holds.
+            let delta_refused = since > 0
+                && matches!(&pulled, Ok(l) if verify_strict(l, &ctx.anchor_uik).is_err());
+            if delta_refused {
+                pulled = fetch_ledger(&client, &ctx.cloud, &ctx.anchor_uik, &ctx.signer, 0).await;
+            }
+            pulled
+        }
         Err(e) => Err(FetchError::Other(e.to_string())),
     };
     let mut accepted = false;
@@ -693,6 +764,7 @@ async fn pull_now(state: &AppState, timeout: Duration) -> DeviceGate {
                 why
             ),
             Ok(folded) => {
+                let events = ledger.events.clone();
                 match apply_pull(
                     floor.clone(),
                     &folded,
@@ -703,6 +775,7 @@ async fn pull_now(state: &AppState, timeout: Duration) -> DeviceGate {
                     Ok(f) => {
                         floor = f;
                         accepted = true;
+                        cache_events(&ctx.anchor_uik, events);
                     }
                     Err(why) => tracing::warn!("principal ledger: {}; holding", why),
                 }
@@ -730,8 +803,11 @@ async fn pull_now(state: &AppState, timeout: Duration) -> DeviceGate {
     g
 }
 
-/// Periodic pull (every [`INTERVAL`], and on a backend principals / agent-key
-/// stream event). A verified revoke of this device wipes (does not return).
+/// Periodic pull, plus a pull on every `agent_hashes` stream event and every
+/// reconnect hello (the stream fires the same signal), and on a rejected
+/// device key. The timer is [`INTERVAL`] unless the stream proves the event
+/// reaches us ([`ledger_interval`]); a health flip re-sizes the armed timer.
+/// A verified revoke of this device wipes (does not return).
 pub async fn principal_ledger_loop(state: Arc<AppState>) {
     loop {
         let g = {
@@ -755,10 +831,25 @@ pub async fn principal_ledger_loop(state: Arc<AppState>) {
             ),
             DeviceGate::Open => {}
         }
-        tokio::select! {
-            _ = tokio::time::sleep(INTERVAL) => {}
-            _ = crate::sync_stream::agent_hashes_notified() => {}
-            _ = crate::sync_stream::device_auth_rejected_notified() => {}
+        let pulled_at = tokio::time::Instant::now();
+        loop {
+            let due = pulled_at
+                + ledger_interval(
+                    crate::sync_stream::stream_healthy(),
+                    crate::sync_stream::agent_hash_events_live(),
+                );
+            tokio::select! {
+                _ = tokio::time::sleep_until(due) => break,
+                _ = crate::sync_stream::agent_hashes_notified() => {
+                    tokio::time::sleep_until(pulled_at + EVENT_FLOOR).await;
+                    break;
+                }
+                _ = crate::sync_stream::device_auth_rejected_notified() => {
+                    tokio::time::sleep_until(pulled_at + EVENT_FLOOR).await;
+                    break;
+                }
+                _ = crate::sync_stream::stream_health_edge() => continue,
+            }
         }
     }
 }
@@ -1407,12 +1498,56 @@ mod tests {
 
         let signer = DeviceRequestSigner::new(dik, dev.clone());
         let client = crate::util::http_builder().build().unwrap();
-        let l = fetch_ledger(&client, &format!("http://{}", addr), &o.user_id(), &signer)
+        let l = fetch_ledger(&client, &format!("http://{}", addr), &o.user_id(), &signer, 0)
             .await
             .unwrap();
         let folded = verify_strict(&l, &o.user_id()).unwrap();
         let f = apply_pull(paired_at(1), &folded, &dev, &MY_PK, T0 + 60).unwrap();
         assert_eq!(gate(&f, T0 + 60, true, true), DeviceGate::Revoked);
+    }
+
+    #[test]
+    fn ledger_timer_relaxes_only_with_agent_hash_proof() {
+        assert_eq!(ledger_interval(true, true), Duration::from_secs(1800));
+        assert_eq!(ledger_interval(true, false), Duration::from_secs(120));
+        assert_eq!(ledger_interval(false, true), Duration::from_secs(120));
+        assert_eq!(ledger_interval(false, false), Duration::from_secs(120));
+    }
+
+    /// A delta pull stands for the whole list: cached events plus the new
+    /// ones must verify against the fresh head; a backend that ignores
+    /// `since` gives the same list; a cache the cloud disagrees with fails.
+    #[test]
+    fn delta_pull_verifies_as_the_whole_list() {
+        let o = owner();
+        let acct = o.user_id();
+        let all = vec![
+            ev(&o, "admit", MY_DEV, 1, &MY_PK),
+            ev(&o, "admit", "ag_a", 2, &[]),
+            ev(&o, "revoke", "ag_a", 3, &[]),
+        ];
+        let full = ledger(&o, all.clone());
+        // Delta: the backend serves only seq 3, with the head over 1..=3.
+        let mut delta = ledger(&o, all.clone());
+        delta.events = vec![all[2].clone()];
+        let merged = merge_delta(all[..2].to_vec(), 2, delta);
+        let folded = verify_strict(&merged, &acct).unwrap();
+        assert_eq!(folded.max_seq, 3);
+        assert!(folded.admitted_agents().is_empty());
+        // A backend without `since` serves everything again: same result.
+        let merged = merge_delta(all[..2].to_vec(), 2, ledger(&o, all.clone()));
+        assert_eq!(merged.events.len(), 3);
+        assert!(verify_strict(&merged, &acct).is_ok());
+        // Nothing new: the cache alone must still match the head.
+        let mut none_new = full;
+        none_new.events.clear();
+        assert!(verify_strict(&merge_delta(all.clone(), 3, none_new), &acct).is_ok());
+        // A cache that differs from what the head covers is refused.
+        let mut stale = all[..2].to_vec();
+        stale[1] = ev(&o, "admit", "ag_b", 2, &[]);
+        let mut delta = ledger(&o, all.clone());
+        delta.events = vec![all[2].clone()];
+        assert!(verify_strict(&merge_delta(stale, 2, delta), &acct).is_err());
     }
 
     /// The pairing admit proves the owner only over THIS machine's own keys.
