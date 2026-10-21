@@ -15,7 +15,7 @@ Prices: [sprott.ai/pricing](https://sprott.ai/pricing).
 | [Overview](../activity.md#the-overview) of every agent | ✅ | ✅ | ✅ |
 | Activity, with every call recorded on your machine | ✅ | ✅ | ✅ |
 | Activity in the console | last 7 days | last 30 days | last 90 days on shared vaults |
-| Private vaults | 2 | unlimited | unlimited |
+| Private vaults | 2 | 20 | 20 per seat |
 | Machines | 3 | 10 | 10 per seat |
 | Passkeys | 5 | 10 | 10 per seat |
 | Agents | 5 | 50 | 50 per seat |
