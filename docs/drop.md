@@ -1,87 +1,104 @@
 ---
-description: "One-time links that carry secrets either way: ask someone for a secret, or share one. The other person needs no account, and the values are encrypted in the browser."
+description: "Sprott Drop moves secrets through a one-time link, in either direction, to people with or without a Sprott account. Values are encrypted in the browser; Sprott relays only ciphertext."
 ---
 
-# Secrets by link
+# Sprott Drop: secrets by one-time link
 
-A drop is a one-time link that carries secrets, in either direction: ask
-someone for a secret, or share one with them. The other person doesn't need
-an account, and Sprott only ever holds ciphertext.
+Sprott Drop moves secrets between a Sprott vault and anyone else through a
+single-use link. The other side needs no account and installs nothing. The
+values are encrypted in the browser before they leave it, and Sprott's
+servers only ever relay ciphertext.
 
-## Ask someone for a secret
+It works in both directions:
 
-Sometimes the key you need is with someone else: a teammate outside your
-vault, a client, a friend. Send them a link. They paste what they have, and
-it arrives in your vault for you to review.
+- **Request.** A vault member asks someone for a key, a token or a whole
+  `.env`. What comes back lands in the vault for review before anything is
+  saved.
+- **Share.** A vault member sends saved secrets to someone. The recipient
+  sees them once.
+
+## How it works
+
+| | Request | Share |
+|---|---|---|
+| Encrypted where | In the sender's browser, to the requester's public key | In the sharer's browser, with a key split between the link and a code |
+| Who can open it | Only the requester, with the identity key their passkey unlocks | Only someone holding both the link and the code |
+| Uses | One submission | One opening |
+| Expires | 1 hour, 24 hours or 7 days; revocable at any time | Same |
+| What Sprott stores | Ciphertext, until it is saved or for at most 7 days | Ciphertext, until it is opened |
+
+**Encryption in the browser.** The part of a Drop link after the `#` never
+reaches a server; browsers keep it on the device.
+
+- A request link carries the requester's public encryption key there. The
+  sender's browser encrypts everything to that key (HPKE: X25519,
+  HKDF-SHA256, ChaCha20-Poly1305) and binds it to that one link. Other
+  members of a shared vault cannot open it.
+- A share link carries half of a key there; the other half is a 10-character
+  code sent separately, which is on by default. Together they derive the
+  decryption key (HKDF-SHA256, AES-256-GCM). The link alone opens nothing,
+  so chat previews and forwarded messages give nothing away.
+
+**Single use.** A request link accepts one submission. A share opens once:
+the recipient's **Show secrets** click makes the server hand over the
+ciphertext and delete it in the same step. Opening the link, including a
+chat app loading it for a preview, does not count. To refuse a wrong code
+without opening anything, Sprott keeps a check value derived from both
+halves; five wrong codes delete the share.
+
+**A named sender.** Every Drop page shows the name and email of the Sprott
+account behind the link, never free text. A note added by that person is
+shown separately and labelled as theirs.
+
+**Recorded.** [Activity](activity.md) records who shared how many secrets and
+when a share was opened. It never records key names or values.
+
+**Not encrypted:** the note, the key names a request asks for, and the number
+of secrets in a share. The page shows them to whoever has the link.
+
+## Request secrets
 
 1. On the vault's **Raw secrets** tab, click **Request by link**.
-2. Optionally list the key names you need (`STRIPE_KEY, STRIPE_WEBHOOK_SECRET`),
-   add a note they will see, and choose how long the link stays open:
-   1 hour, 24 hours (the default) or 7 days.
-3. Click **Copy & done** and send the link in a chat you already use with
-   them.
+2. Optionally list the key names needed (`STRIPE_KEY, STRIPE_WEBHOOK_SECRET`)
+   and add a note. Choose how long the link stays open.
+3. Click **Copy & done** and send the link over a channel the other person
+   already uses.
 
-Not sure what they have? Leave the key names empty. They can paste a whole
-`.env`, some JSON or a few lines of notes, and you sort it out when it
-arrives. Until they send, the link waits at the top of Raw secrets, where
-you can copy it again or **Revoke** it.
+Without key names, the page offers a single box for pasting a `.env`, some
+JSON or a few lines of notes. With key names, it offers one row per name; a
+named row must be filled in or removed before sending.
 
-**What they see.** A page that names who is asking, from the name and email
-on your Sprott account, and shows your note. They fill in the rows you asked
-for, add their own, or paste anything. One click encrypts it and sends it,
-and the link stops working.
+The waiting link shows at the top of Raw secrets, where it can be copied
+again or revoked. When the delivery arrives, **Review** opens it in the
+**Import from .env** sheet: keep what is needed, rename, **Add to draft**,
+then **Encrypt & save**. Nothing reaches the vault before the save.
+**Delete the drop after saving** is ticked by default. A delivery is deleted
+7 days after it arrives either way, and **Discard** deletes it at once.
 
-**When it arrives.** It shows at the top of Raw secrets. **Review** opens it
-in the same **Import from .env** sheet you use for any paste: keep what you
-need, rename, then **Add to draft** and **Encrypt & save**. Nothing reaches
-your vault until you save. **Delete the drop after saving** is ticked by
-default; untick it to review it again later. Either way it is deleted 7 days
-after it arrived. **Discard** deletes it now.
+## Share secrets
 
-## Share a secret
-
-1. On **Raw secrets**, select the secrets and click **Share by link** next
-   to **Delete selected**.
+1. On **Raw secrets**, select the secrets and click **Share by link** next to
+   **Delete selected**.
 2. Optionally add a note and choose how long the link stays open.
-3. **Add a code to send separately** is ticked by default. Leave it on: the
-   link alone can't open the share, so chat previews and forwarded messages
-   give nothing away.
-4. Click **Create link**. The link and the code are shown here only, once.
-   Copy the link, then the code, and send them in two places: the link in
-   chat, the code by text or in person. **Copy both & done** puts them in one
-   message when that is good enough.
+3. Keep **Add a code to send separately** ticked, then click **Create link**.
+4. The link and the code are shown once and are not stored anywhere. Copy the
+   link, then the code, and send them over two different channels, for
+   example the link in chat and the code by text. **Copy both & done** puts
+   them in one message when one channel is acceptable.
 
-The other person opens the link, enters the code and clicks **Show secrets**.
-They can copy each value, copy them all as `.env`, or download a `.env`. The
-values are shown only that once: refreshing or closing the page clears them.
+A share carries the saved values; an unsaved edit is not included. Raw
+secrets shows the share as waiting, then as **Opened**. A recipient who finds
+the link already used, without having opened it, means someone else opened
+it first: rotate those secrets.
 
-On Raw secrets the share shows as waiting until it is opened, then as
-**Opened**. [Activity](activity.md) records who shared how many secrets and
-when the share was opened, never the key names. If someone tells you the
-link was already used and it wasn't them, someone else opened it first:
-rotate those secrets.
+## Receiving a Drop link
 
-A share carries the saved values. An edit you haven't saved isn't shared.
+- **Asked for secrets:** fill in the rows or paste what is at hand, then
+  **Encrypt and send**. Plain values are safe to paste; they are encrypted
+  before they leave the browser.
+- **Sent secrets:** enter the code, click **Show secrets**, then copy the
+  values or download them as a `.env`. They are shown only once; refreshing
+  or closing the page clears them.
 
-## How it's protected
-
-- **Asking.** The link carries your public encryption key after the `#`,
-  which browsers never send to a server. The sender's browser encrypts
-  everything to that key before anything leaves (HPKE: X25519, HKDF-SHA256,
-  ChaCha20-Poly1305). Only you can open it, with the identity key your
-  passkey unlocks; other members of a shared vault cannot. The ciphertext is
-  bound to its link, so it can't be moved into another one.
-- **Sharing.** The link's `#` part and the code are two halves of the key
-  (HKDF-SHA256, then AES-256-GCM); your browser encrypts the values before
-  uploading them. Sprott stores neither the link nor the code. To refuse a
-  wrong code without opening anything it keeps a check value derived from
-  both, and five wrong codes delete the share. Opening hands the ciphertext
-  over once and deletes it. A chat app loading the link for a preview
-  doesn't count: only the **Show secrets** click does.
-- Every link takes one use, expires on schedule, and can be revoked.
-
-Your note, the key names you ask for and the number of secrets you share are
-not encrypted: the page shows them to whoever has the link.
-
-Got one of these links without expecting it? Check with the person named on
-the page before you send or open anything.
+An unexpected Drop link deserves a check with the person named on the page
+before anything is sent or opened.
