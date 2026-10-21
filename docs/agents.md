@@ -37,6 +37,15 @@ Neither is a credential: neither can reveal a value. Keep one identity per
 agent; don't share an identity file between agents. The vault is not in the
 env: each request names its vault, and `sprott run --vault <vault>` picks one.
 
+### Subagents
+
+An agent is an identity, not a process. Subagents, background jobs and
+helper scripts that an agent starts inherit its env, so they act as that
+agent: one agent in Agent access, one name in Activity, one toward your
+plan's agent limit. Give a helper its own identity (`sprott agent add`) only
+when you want to grant or revoke it separately, or see its calls under its
+own name.
+
 ### Two checks on every request
 
 1. **Admitted to your account.** You approved the agent and haven't revoked
