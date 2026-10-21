@@ -1,12 +1,12 @@
 ---
-description: "What each Sprott plan includes: Personal, Pro, Team and Enterprise, with the limits of each."
+description: "What each Sprott plan includes: Free, Pro, Team and Enterprise, with the limits of each."
 ---
 
 # Plans
 
 Prices: [sprott.ai/pricing](https://sprott.ai/pricing).
 
-| | Personal | Pro | Team |
+| | Free | Pro | Team |
 |---|:--:|:--:|:--:|
 | The broker, phantoms and `sprott run` | ✅ | ✅ | ✅ |
 | Every service in the catalog, custom connections | ✅ | ✅ | ✅ |
