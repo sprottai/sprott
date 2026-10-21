@@ -405,6 +405,14 @@ pub(crate) fn load_floor(state_dir: &Path) -> LedgerFloor {
         .unwrap_or_default()
 }
 
+/// The signed head seq of the last verified ledger (the persisted decision),
+/// or `None` before any verified pull or pairing. The stream's hello compares
+/// it with the backend's `ledger_seq` to skip a pull that would bring nothing.
+pub(crate) fn verified_head_seq(state_dir: &Path) -> Option<u64> {
+    let floor = load_floor(state_dir);
+    (floor.fresh_at != 0).then_some(floor.max_seq)
+}
+
 fn store_floor(state_dir: &Path, floor: &LedgerFloor) {
     if let Ok(json) = serde_json::to_string(floor) {
         if let Err(e) = std::fs::write(floor_path(state_dir), json) {
@@ -1504,6 +1512,14 @@ mod tests {
         let folded = verify_strict(&l, &o.user_id()).unwrap();
         let f = apply_pull(paired_at(1), &folded, &dev, &MY_PK, T0 + 60).unwrap();
         assert_eq!(gate(&f, T0 + 60, true, true), DeviceGate::Revoked);
+    }
+
+    #[test]
+    fn verified_head_seq_only_after_a_verified_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(verified_head_seq(dir.path()), None);
+        write_pairing_floor(dir.path(), 3, 9, vec![], T0).unwrap();
+        assert_eq!(verified_head_seq(dir.path()), Some(9));
     }
 
     #[test]

@@ -456,6 +456,10 @@ struct Pending {
     items_seq: Option<u64>,
     keyset_seq: Option<u64>,
     mode: Mode,
+    /// When the latest hello delivered a VERIFIED contact token for this
+    /// vault (already recorded on the runtime); `None` when the latest hello
+    /// carried none (an older backend). State like `mode`, not drained work.
+    hello_contact: Option<Instant>,
     /// ★★ "deleted" is STICKY for the cell's LIFETIME (survives `take_work`):
     /// backend emits from concurrent write handlers aren't serialized with
     /// commit order, and a stale hello can arrive after a fresher pre-hello
@@ -492,6 +496,7 @@ impl WakeCell {
                 items_seq: None,
                 keyset_seq: None,
                 mode: Mode::Fallback,
+                hello_contact: None,
                 deleted_sticky: false,
             }),
             notify: Notify::new(),
@@ -507,6 +512,17 @@ impl WakeCell {
 
     pub fn mode(&self) -> Mode {
         self.pending.lock().unwrap().mode
+    }
+
+    /// When the latest hello carried a verified contact token for this vault.
+    pub fn hello_contact_at(&self) -> Option<Instant> {
+        self.pending.lock().unwrap().hello_contact
+    }
+
+    /// Dispatcher-only: what the latest hello said about this vault's contact
+    /// token (overwritten by every hello).
+    fn set_hello_contact(&self, at: Option<Instant>) {
+        self.pending.lock().unwrap().hello_contact = at;
     }
 
     /// Dispatcher-only. Notifies on an actual change so the owning task
@@ -838,6 +854,45 @@ fn desired_vids_param() -> String {
     vids_param(select_stream_vids(live.iter().map(|(v, _)| v.as_str())))
 }
 
+/// Re-subscribe pacing: a re-subscribe to a NEW vid set re-dials at once; one
+/// to the same set as the last re-subscribe (within the window) waits 5s,
+/// doubling to 5 min. Bounds any register / re-dial / hello / discovery cycle
+/// (e.g. the account listing offers a vault the stream will not confirm) to
+/// slow retries. The stream keeps serving events while a re-subscribe waits.
+const RESUB_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const RESUB_BACKOFF_MAX: Duration = Duration::from_secs(300);
+const RESUB_REPEAT_WINDOW: Duration = Duration::from_secs(900);
+
+#[derive(Default)]
+struct ResubPacer {
+    /// The last re-subscribe's target `?vids` and when it fired.
+    last: Option<(String, Instant)>,
+    backoff: Duration,
+}
+
+impl ResubPacer {
+    /// The wait before re-subscribing to `target` (pure but for `now`).
+    fn delay_for(&mut self, target: &str, now: Instant) -> Duration {
+        match &self.last {
+            Some((prev, at))
+                if prev == target && now.saturating_duration_since(*at) < RESUB_REPEAT_WINDOW =>
+            {
+                let d = self.backoff.max(RESUB_BACKOFF_MIN);
+                self.backoff = (d * 2).min(RESUB_BACKOFF_MAX);
+                d
+            }
+            _ => {
+                self.backoff = RESUB_BACKOFF_MIN;
+                Duration::ZERO
+            }
+        }
+    }
+
+    fn record(&mut self, target: String, now: Instant) {
+        self.last = Some((target, now));
+    }
+}
+
 // ── Dispatcher — the connection owner ────────────────────────────────────────
 
 /// How one stream attempt ended.
@@ -887,6 +942,7 @@ pub async fn dispatcher(
     let mut never_healthy: u32 = 0;
     let mut rotating = false;
     let mut announced_off = false;
+    let mut resub = ResubPacer::default();
     tracing::debug!("sync stream: dispatcher started");
     loop {
         // Prune: a tombstoned vault's task exited and dropped its cell.
@@ -945,15 +1001,17 @@ pub async fn dispatcher(
             &vids_param,
             &health,
             rotating,
+            &mut resub,
         )
         .await
         {
             StreamEnd::Resubscribe => {
-                // Our own close to pick up a newly registered vault: re-dial
-                // at once like a rotation (health stays Up, the new hello
-                // reconciles every vault, cursor-gated where the backend
-                // allows). Backoff state is untouched: this says nothing
-                // about the path's health.
+                // Our own close to pick up a newly registered vault (already
+                // paced by `ResubPacer` while the old stream kept serving):
+                // re-dial at once like a rotation (health stays Up, the new
+                // hello reconciles every vault, cursor-gated where the
+                // backend allows). Connect backoff is untouched: this says
+                // nothing about the path's health.
                 rotating = true;
                 tracing::debug!("sync stream: vault set changed; re-dialing with the new set");
                 continue;
@@ -1068,6 +1126,7 @@ async fn run_stream(
     vids_param: &str,
     health: &watch::Sender<StreamHealth>,
     rotating: bool,
+    resub: &mut ResubPacer,
 ) -> StreamEnd {
     use futures_util::StreamExt;
     // ★ Fresh client on EVERY (re)connect — proxy config applied at build
@@ -1138,7 +1197,7 @@ async fn run_stream(
     // Modes + merges FIRST, the health edge second: a fallback task woken by
     // the Up edge re-reads its mode at the loop top and must see the final
     // value, never a stale Fallback.
-    let n = apply_hello(cells, &hello);
+    let n = apply_hello(cells, &hello, Some(state));
     // ★ Resync-on-reconnect (v1.1): the dominant way to LOSE an
     // `agent_hashes` event is a stream disconnect — and the reconnect the
     // loss forces is exactly where we stand now, so firing the notify here
@@ -1146,9 +1205,10 @@ async fn run_stream(
     // stream ≤15 min, the platform itself becomes the revocation backstop: a
     // revoke whose event fell into a gap goes unseen for at most one
     // rotation before this resync picks it up. The `vaults` signal (vault
-    // discovery) gets the same treatment for the same reason.
-    notify_agent_hashes();
-    notify_vaults();
+    // discovery) gets the same treatment for the same reason. With the
+    // `account_cursors` cap the hello itself says whether either pull would
+    // bring anything new.
+    notify_after_hello(&hello, Some(state));
     health.send_if_modified(|h| {
         if *h == StreamHealth::Up {
             false
@@ -1169,7 +1229,12 @@ async fn run_stream(
 
     let hello_at = Instant::now();
     let mut live_until = tokio::time::Instant::now() + LIVENESS;
+    // A paced re-subscribe waiting to fire (see ResubPacer).
+    let mut resub_at: Option<tokio::time::Instant> = None;
     loop {
+        // Copied out so the select arm borrows nothing the handlers mutate;
+        // the placeholder is never awaited (the arm is disabled then).
+        let resub_deadline = resub_at.unwrap_or(live_until);
         let next = tokio::select! {
             r = tokio::time::timeout_at(live_until, stream.next()) => r,
             _ = STREAM_SET_CHANGED.notified() => {
@@ -1177,7 +1242,23 @@ async fn run_stream(
                 // if the selection it would carry differs (the cap, or a
                 // registration of an already streamed vid, can leave it
                 // unchanged).
-                if desired_vids_param() != vids_param {
+                let target = desired_vids_param();
+                if target == vids_param {
+                    resub_at = None;
+                } else if resub_at.is_none() {
+                    let delay = resub.delay_for(&target, Instant::now());
+                    if !delay.is_zero() {
+                        tracing::debug!(wait_secs = delay.as_secs(), "sync stream: same vault set again; re-subscribe paced");
+                    }
+                    resub_at = Some(tokio::time::Instant::now() + delay);
+                }
+                continue;
+            }
+            _ = tokio::time::sleep_until(resub_deadline), if resub_at.is_some() => {
+                resub_at = None;
+                let target = desired_vids_param();
+                if target != vids_param {
+                    resub.record(target, Instant::now());
                     return StreamEnd::Resubscribe;
                 }
                 continue;
@@ -1268,9 +1349,16 @@ where
 /// not owned by this account (or hard-deleted): the backend did not register
 /// them, so long-poll keeps owning those vaults (mode → Fallback). Returns
 /// how many vids hello confirmed.
-fn apply_hello(cells: &HashMap<String, Arc<WakeCell>>, hello: &serde_json::Value) -> usize {
+fn apply_hello(
+    cells: &HashMap<String, Arc<WakeCell>>,
+    hello: &serde_json::Value,
+    state: Option<&Arc<crate::state::AppState>>,
+) -> usize {
     let vaults = hello.get("vaults").and_then(|v| v.as_object());
     let cursors = caps_list(hello.get("caps")).contains(&"cursors");
+    // Stamped BEFORE the cells wake, so a task woken by this hello already
+    // counts it as its latest reconcile.
+    *LAST_HELLO.lock().unwrap() = Some(Instant::now());
     let mut n = 0usize;
     let mut confirmed = std::collections::HashSet::new();
     for (vid, cell) in cells {
@@ -1278,6 +1366,16 @@ fn apply_hello(cells: &HashMap<String, Arc<WakeCell>>, hello: &serde_json::Value
             Some(row) => {
                 n += 1;
                 confirmed.insert(vid.clone());
+                // A shared vault's cell may carry the same signed contact
+                // token a /blob answer does: verified by the same check, it
+                // refreshes the lease clock with no request of its own.
+                let contact = match (state, row.get("contact_token")) {
+                    (Some(state), Some(tok)) => {
+                        crate::sync::apply_contact_token(state, vid, tok).then(Instant::now)
+                    }
+                    _ => None,
+                };
+                cell.set_hello_contact(contact);
                 cell.merge_work(hello_row_work(row, cursors));
                 cell.set_mode(Mode::Sse);
             }
@@ -1289,6 +1387,50 @@ fn apply_hello(cells: &HashMap<String, Arc<WakeCell>>, hello: &serde_json::Value
     // the Up edge must never read stale reach.
     set_stream_caps(confirmed, hello.get("caps"));
     n
+}
+
+/// Which account-scoped pulls a hello asks for: `(ledger, vaults)` (pure).
+/// Without the `account_cursors` cap, both: every hello is a resync point.
+/// With it, the ledger only when hello's `ledger_seq` differs from the local
+/// verified head seq, and discovery only when `vaults_unlisted` is true; a
+/// field the hello lacks (or no local head yet) counts as unknown and pulls.
+fn hello_account_wakes(hello: &serde_json::Value, local_ledger_seq: Option<u64>) -> (bool, bool) {
+    if !caps_list(hello.get("caps")).contains(&"account_cursors") {
+        return (true, true);
+    }
+    let ledger = match (
+        hello.get("ledger_seq").and_then(|v| v.as_u64()),
+        local_ledger_seq,
+    ) {
+        (Some(remote), Some(local)) => remote != local,
+        _ => true,
+    };
+    let vaults = hello
+        .get("vaults_unlisted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    (ledger, vaults)
+}
+
+/// Fire the account-scoped resync signals a hello asks for.
+fn notify_after_hello(hello: &serde_json::Value, state: Option<&Arc<crate::state::AppState>>) {
+    let local = state.and_then(|s| crate::principal_ledger::verified_head_seq(&s.config.state_dir));
+    let (ledger, vaults) = hello_account_wakes(hello, local);
+    if ledger {
+        notify_agent_hashes();
+    }
+    if vaults {
+        notify_vaults();
+    }
+}
+
+/// When the last hello was applied. With hello cursors each hello re-checks
+/// every vault it confirms, so the vault tasks count their safety reconcile
+/// from it (`sync::sse_reconcile_anchor`).
+static LAST_HELLO: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub fn last_hello_at() -> Option<Instant> {
+    *LAST_HELLO.lock().unwrap()
 }
 
 /// The work one hello row asks of its vault task. Without the `cursors` cap
@@ -1393,12 +1535,11 @@ fn dispatch_record_with_context(
     }
     if rec.event == "hello" {
         // Not expected mid-stream, but folding it like a fresh snapshot is
-        // strictly harmless (merges are monotone) — and it counts as a
-        // resync point, so fire the agent-hash notify exactly like the
+        // strictly harmless (merges are monotone), and it counts as a
+        // resync point, so fire the account resync signals exactly like the
         // connect-time hello does (design: after EVERY apply_hello).
-        apply_hello(cells, &data);
-        notify_agent_hashes();
-        notify_vaults();
+        apply_hello(cells, &data, context.map(|(state, _, _)| state));
+        notify_after_hello(&data, context.map(|(state, _, _)| state));
         return;
     }
     if rec.event == "op" {
@@ -1850,6 +1991,65 @@ mod tests {
             agent_hashes_notified().now_or_never().is_none(),
             "permit consumed"
         );
+    }
+
+    #[test]
+    fn hello_account_cursors_skip_pulls_that_bring_nothing() {
+        // No `account_cursors` cap: every hello is a resync point.
+        let old = serde_json::json!({"vaults": {}, "caps": ["op", "agent_hashes", "vaults"], "ledger_seq": 5, "vaults_unlisted": false});
+        assert_eq!(hello_account_wakes(&old, Some(5)), (true, true));
+        let hello = |ledger_seq: serde_json::Value, unlisted: serde_json::Value| {
+            serde_json::json!({"vaults": {}, "caps": ["account_cursors"], "ledger_seq": ledger_seq, "vaults_unlisted": unlisted})
+        };
+        // Same head, nothing unlisted: no pull at all.
+        assert_eq!(hello_account_wakes(&hello(5.into(), false.into()), Some(5)), (false, false));
+        // A different head (either way) pulls the ledger.
+        assert_eq!(hello_account_wakes(&hello(6.into(), false.into()), Some(5)), (true, false));
+        assert_eq!(hello_account_wakes(&hello(4.into(), false.into()), Some(5)), (true, false));
+        // An unlisted vault wakes discovery.
+        assert_eq!(hello_account_wakes(&hello(5.into(), true.into()), Some(5)), (false, true));
+        // Unknown on either side pulls.
+        assert_eq!(hello_account_wakes(&hello(5.into(), false.into()), None), (true, false));
+        let bare = serde_json::json!({"vaults": {}, "caps": ["account_cursors"]});
+        assert_eq!(hello_account_wakes(&bare, Some(5)), (true, true));
+    }
+
+    #[test]
+    fn resubscribe_to_the_same_set_backs_off() {
+        let t0 = Instant::now();
+        let mut p = ResubPacer::default();
+        // A new set re-dials at once.
+        assert_eq!(p.delay_for("a,b", t0), Duration::ZERO);
+        p.record("a,b".into(), t0);
+        // The same set again: 5s, doubling, capped at 5 min.
+        let mut waits = Vec::new();
+        for i in 0..9u64 {
+            let now = t0 + Duration::from_secs(10 * (i + 1));
+            waits.push(p.delay_for("a,b", now).as_secs());
+            p.record("a,b".into(), now);
+        }
+        assert_eq!(waits, vec![5, 10, 20, 40, 80, 160, 300, 300, 300]);
+        // A different set resets the pacing.
+        assert_eq!(p.delay_for("a,b,c", t0 + Duration::from_secs(100)), Duration::ZERO);
+        p.record("a,b,c".into(), t0 + Duration::from_secs(100));
+        assert_eq!(p.delay_for("a,b,c", t0 + Duration::from_secs(101)), RESUB_BACKOFF_MIN);
+        // The same set long after the window counts as new.
+        let later = t0 + Duration::from_secs(100) + RESUB_REPEAT_WINDOW;
+        assert_eq!(p.delay_for("a,b,c", later), Duration::ZERO);
+    }
+
+    #[test]
+    fn cell_hello_contact_is_state_not_work() {
+        let cell = WakeCell::new();
+        assert_eq!(cell.hello_contact_at(), None);
+        let t = Instant::now();
+        cell.set_hello_contact(Some(t));
+        assert!(!cell.has_work());
+        let _ = cell.take_work();
+        assert_eq!(cell.hello_contact_at(), Some(t));
+        // The next hello without a token clears it.
+        cell.set_hello_contact(None);
+        assert_eq!(cell.hello_contact_at(), None);
     }
 
     /// `vaults` (v1.2) is account-scoped and payload-free like

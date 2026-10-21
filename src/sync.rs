@@ -1246,29 +1246,38 @@ fn apply_verified_envelope(state: &Arc<AppState>, vault: &str, body: &serde_json
     }
     // Contact token: advance the lease freshness clock only from a verified token.
     if let Some(tok) = body.get("contact_token") {
-        let account_id = tok.get("account_id").and_then(|v| v.as_str()).unwrap_or("");
-        let issued_at = tok.get("issued_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        let nonce = tok
-            .get("nonce")
-            .and_then(|v| v.as_str())
-            .and_then(decode_b64)
-            .unwrap_or_default();
-        let verified = tok
-            .get("sig")
-            .and_then(|v| v.as_str())
-            .and_then(decode_sig64)
-            .map(|sig| {
-                crate::crypto::server_key::verify_contact_token(
-                    vault, account_id, issued_at, &nonce, &sig,
-                )
-            })
-            .unwrap_or(false);
-        if verified {
-            state.record_cloud_contact(vault);
-        } else {
-            tracing::warn!(vault = %vault, "cloud sync: contact token signature INVALID — not advancing lease clock");
-        }
+        apply_contact_token(state, vault, tok);
     }
+}
+
+/// Verify a server-signed contact token for `vault` and, if it verifies,
+/// advance the vault's lease contact clock. The ONE check for both carriers:
+/// a `/blob` 200 body and a stream hello's vault cell (same token shape,
+/// `{account_id, issued_at, nonce, sig}`). Returns whether it verified.
+pub(crate) fn apply_contact_token(state: &AppState, vault: &str, tok: &serde_json::Value) -> bool {
+    let account_id = tok.get("account_id").and_then(|v| v.as_str()).unwrap_or("");
+    let issued_at = tok.get("issued_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    let nonce = tok
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .and_then(decode_b64)
+        .unwrap_or_default();
+    let verified = tok
+        .get("sig")
+        .and_then(|v| v.as_str())
+        .and_then(decode_sig64)
+        .map(|sig| {
+            crate::crypto::server_key::verify_contact_token(
+                vault, account_id, issued_at, &nonce, &sig,
+            )
+        })
+        .unwrap_or(false);
+    if verified {
+        state.record_cloud_contact(vault);
+    } else {
+        tracing::warn!(vault = %vault, "cloud sync: contact token signature INVALID; not advancing lease clock");
+    }
+    verified
 }
 
 /// Parse a 200 blob-GET body into a `PullOutcome` and, for a live update,
@@ -2209,14 +2218,13 @@ pub async fn watch_loop(
             // the park is captured as a stored Notify permit and completes
             // the select instantly.
             let notified = cell.notified();
-            // The safety reconcile relaxes only when hello carries cursors
-            // (every reconnect then re-checks this vault at no cost); a
-            // shared vault also keeps its contact clock fresh in between.
-            let reconcile_every = sse_reconcile_interval(crate::sync_stream::hello_cursors_live());
-            let shared = state.vault_is_shared(&vault);
+            // Own wake-ups (see `sse_timers`): with hello cursors, a safety
+            // reconcile only once no hello has re-checked this vault for
+            // 1800s; a shared vault's contact refresh only when hellos do not
+            // carry its contact token, or are late.
             if !cell.has_work() {
-                let deadline =
-                    sse_wake_deadline(last_reconcile, reconcile_every, shared.then_some(last_contact));
+                let t = sse_timers(&state, &vault, &cell, last_reconcile, &mut last_contact);
+                let deadline = t.reconcile_at.min(t.contact_at.unwrap_or(t.reconcile_at));
                 let until_reconcile = deadline.saturating_duration_since(std::time::Instant::now());
                 tokio::select! {
                     _ = notified => {}
@@ -2337,8 +2345,10 @@ pub async fn watch_loop(
             // events (see `last_reconcile`): blob `?since` probe through the
             // shared handler, plus the pull block. In between, a shared
             // vault's contact refresh is the blob probe alone.
-            let full = last_reconcile.elapsed() >= reconcile_every;
-            let contact = !full && shared && last_contact.elapsed() >= SHARED_CONTACT_REFRESH;
+            let now = std::time::Instant::now();
+            let t = sse_timers(&state, &vault, &cell, last_reconcile, &mut last_contact);
+            let full = now >= t.reconcile_at;
+            let contact = !full && t.contact_at.is_some_and(|at| now >= at);
             if !auth_park && (full || contact) {
                 let mut ok = true;
                 match probe_blob_and_handle(
@@ -2713,15 +2723,21 @@ async fn health_changed(rx: &mut tokio::sync::watch::Receiver<StreamHealth>) {
 }
 
 /// The Sse shape's safety reconcile while the stream's hello carries
-/// per-vault cursors: every reconnect (at most ~15 min apart) already
-/// re-checks the vault for free, so this only bounds a missed event.
+/// per-vault cursors, counted from the later of the last reconcile and the
+/// last hello (each hello re-checks the vault for free): with hellos every
+/// ~15 min it never fires; it only bounds a stream that stopped rotating.
 const SSE_RECONCILE_RELAXED: Duration = Duration::from_secs(1800);
 /// The Sse shape's safety reconcile without hello cursors (an older backend)
 /// and the fallback shape's floor.
 const SSE_RECONCILE_LEGACY: Duration = Duration::from_secs(300);
-/// A shared vault's blob probe cadence between relaxed reconciles: the blob
-/// answer carries the signed contact token its offline lease runs on.
+/// A shared vault's blob probe cadence when hellos do not carry its contact
+/// token (an older backend): the blob answer carries the signed token its
+/// offline lease runs on.
 const SHARED_CONTACT_REFRESH: Duration = Duration::from_secs(600);
+/// With the token in every hello, probe only when the contact clock is older
+/// than this: beyond the ~15-min hello rotation, so it fires only when hellos
+/// are late.
+const HELLO_CONTACT_GRACE: Duration = Duration::from_secs(1200);
 
 /// Sse-shape safety reconcile interval (pure): relaxed only with proof that
 /// hello carries cursors.
@@ -2733,30 +2749,72 @@ fn sse_reconcile_interval(hello_cursors: bool) -> Duration {
     }
 }
 
-/// When an idle Sse-shape task next wakes on its own (pure): the safety
-/// reconcile, or a shared vault's contact refresh if that comes first.
-fn sse_wake_deadline(
+/// What the safety reconcile counts from (pure): with hello cursors, the
+/// later of the last reconcile and the last hello (a hello re-checks every
+/// vault it confirms by cursor); without them, the last reconcile.
+fn sse_reconcile_anchor(
     last_reconcile: std::time::Instant,
-    reconcile_every: Duration,
-    last_contact: Option<std::time::Instant>,
+    last_hello: Option<std::time::Instant>,
+    hello_cursors: bool,
 ) -> std::time::Instant {
-    let reconcile = last_reconcile + reconcile_every;
-    match last_contact {
-        Some(c) => reconcile.min(c + SHARED_CONTACT_REFRESH),
-        None => reconcile,
+    match last_hello {
+        Some(h) if hello_cursors => last_reconcile.max(h),
+        _ => last_reconcile,
+    }
+}
+
+/// How old a shared vault's contact clock may get before the task probes
+/// its blob (pure).
+fn contact_refresh_after(hello_carries_contact: bool) -> Duration {
+    if hello_carries_contact {
+        HELLO_CONTACT_GRACE
+    } else {
+        SHARED_CONTACT_REFRESH
+    }
+}
+
+/// An idle Sse-shape task's own deadlines.
+struct SseTimers {
+    reconcile_at: std::time::Instant,
+    /// `None` for a private vault (no contact clock to keep fresh).
+    contact_at: Option<std::time::Instant>,
+}
+
+/// Read the current stream facts and compute [`SseTimers`]. Folds a
+/// hello-delivered contact (verified and recorded by the dispatcher) into
+/// `last_contact` first.
+fn sse_timers(
+    state: &AppState,
+    vault: &str,
+    cell: &WakeCell,
+    last_reconcile: std::time::Instant,
+    last_contact: &mut std::time::Instant,
+) -> SseTimers {
+    let cursors = crate::sync_stream::hello_cursors_live();
+    let hello_contact = cell.hello_contact_at();
+    if let Some(t) = hello_contact {
+        *last_contact = (*last_contact).max(t);
+    }
+    let anchor = sse_reconcile_anchor(last_reconcile, crate::sync_stream::last_hello_at(), cursors);
+    SseTimers {
+        reconcile_at: anchor + sse_reconcile_interval(cursors),
+        contact_at: state
+            .vault_is_shared(vault)
+            .then(|| *last_contact + contact_refresh_after(hello_contact.is_some())),
     }
 }
 
 /// This vault's local sync cursors as a hello can compare them: the items
-/// cursor, and the keyset cursor ONLY for a v2 keyset (the hello's
-/// `keyset_seq` is the membership counter; a legacy keyset counts `/keys`
-/// rows on another sequence, so it is unknown here and always pulls). `None`
-/// = no local store yet (unknown: pull).
+/// cursor, and the keyset cursor ONLY once a `/membership` pull has set it
+/// ([`membership_cursor_known`]): the hello's `keyset_seq` is the membership
+/// counter, while a format-1 vault's local cursor counts `/keys` rows on
+/// another sequence (whatever its keyset shape), so it is unknown here and
+/// always pulls. `None` = no local store yet (unknown: pull).
 fn local_sync_cursors(state_dir: &Path, vault: &str) -> (Option<u64>, Option<u64>) {
     match read_per_item_store(state_dir, vault) {
         Some(pv) => (
             Some(pv.items_seq),
-            pv.keyset.uik.is_some().then_some(pv.keyset_seq),
+            membership_cursor_known(vault).then_some(pv.keyset_seq),
         ),
         None => (None, None),
     }
@@ -5521,6 +5579,25 @@ fn uses_membership_format(vault: &str) -> bool {
     MEMBERSHIP_FORMAT_VAULTS.lock().unwrap().contains(vault)
 }
 
+/// Vaults whose local `keyset_seq` is the membership counter: a `/membership`
+/// pull landed for them this process. Knowing the format is not enough: a
+/// vault that moved from format 1 still holds its `/keys` cursor until its
+/// first `/membership` pull replaces it.
+static MEMBERSHIP_CURSOR_VAULTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn note_membership_cursor(vault: &str) {
+    MEMBERSHIP_CURSOR_VAULTS
+        .lock()
+        .unwrap()
+        .insert(vault.to_string());
+}
+
+fn membership_cursor_known(vault: &str) -> bool {
+    uses_membership_format(vault) && MEMBERSHIP_CURSOR_VAULTS.lock().unwrap().contains(vault)
+}
+
 /// Pull a fmt=2 vault's `verify(anchor, members, proof)` TRIPLE from `GET /v/{vid}/membership`
 /// and adopt it into the keyset (unified-identity-schema.md §3). The end-to-end counterpart
 /// of `pull_keys`: the WIRE is the triple (no row format), but the in-memory keyset it builds
@@ -5603,9 +5680,16 @@ async fn pull_membership(
         .json()
         .await
         .map_err(|e| format!("parse membership response: {}", e))?;
-    adopt_pulled_membership(state_dir, vault, lock, &body)
+    let adopted = adopt_pulled_membership(state_dir, vault, lock, &body)
         .await
-        .map_err(CloudError::Other)
+        .map_err(CloudError::Other)?;
+    // The format memo is NOT set here (the approve self-heal also calls this
+    // path); the cursor's provenance is, for a vault already known to be
+    // format 2, so the cursor now on disk is the membership one.
+    if uses_membership_format(vault) {
+        note_membership_cursor(vault);
+    }
+    Ok(adopted)
 }
 
 /// The write-back of [`pull_membership`]: under the vault write lock, re-read
@@ -9651,23 +9735,25 @@ mod tests {
     }
 
     #[test]
-    fn sse_wake_deadline_brings_shared_contact_forward() {
+    fn hellos_with_cursors_stand_in_for_the_safety_reconcile() {
         let t0 = std::time::Instant::now();
-        // Personal vault: the reconcile alone.
-        assert_eq!(
-            sse_wake_deadline(t0, SSE_RECONCILE_RELAXED, None),
-            t0 + SSE_RECONCILE_RELAXED
-        );
-        // Shared vault: the 600s contact refresh comes first.
-        assert_eq!(
-            sse_wake_deadline(t0, SSE_RECONCILE_RELAXED, Some(t0)),
-            t0 + SHARED_CONTACT_REFRESH
-        );
-        // Legacy 300s reconcile is sooner than the contact refresh anyway.
-        assert_eq!(
-            sse_wake_deadline(t0, SSE_RECONCILE_LEGACY, Some(t0)),
-            t0 + SSE_RECONCILE_LEGACY
-        );
+        let hello = t0 + Duration::from_secs(900);
+        // With cursors, a later hello moves the anchor: while hellos keep
+        // arriving every ~15 min the 1800s reconcile never comes due.
+        assert_eq!(sse_reconcile_anchor(t0, Some(hello), true), hello);
+        // A hello older than the last reconcile does not move it back.
+        assert_eq!(sse_reconcile_anchor(hello, Some(t0), true), hello);
+        // No hello yet, or no cursors: the last reconcile alone.
+        assert_eq!(sse_reconcile_anchor(t0, None, true), t0);
+        assert_eq!(sse_reconcile_anchor(t0, Some(hello), false), t0);
+    }
+
+    #[test]
+    fn shared_contact_refresh_waits_out_hellos_that_carry_the_token() {
+        assert_eq!(contact_refresh_after(false), Duration::from_secs(600));
+        // Longer than the ~15-min hello rotation: fires only if hellos are late.
+        assert_eq!(contact_refresh_after(true), Duration::from_secs(1200));
+        assert!(contact_refresh_after(true) > Duration::from_secs(15 * 60));
     }
 
     #[test]
@@ -9706,21 +9792,27 @@ mod tests {
     }
 
     #[test]
-    fn local_cursors_trust_the_keyset_cursor_only_for_a_v2_keyset() {
+    fn local_cursors_trust_the_keyset_cursor_only_for_a_membership_vault() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(local_sync_cursors(dir.path(), "v-none"), (None, None));
+        assert_eq!(local_sync_cursors(dir.path(), "lc-none"), (None, None));
         let mut pv = empty_keyset_store();
         pv.items_seq = 12;
         pv.keyset_seq = 7;
-        std::fs::create_dir_all(dir.path().join("vaults").join("v-legacy")).unwrap();
-        write_per_item_store(dir.path(), "v-legacy", &pv).unwrap();
-        // No uik: the keyset cursor counts another sequence than hello's.
-        assert_eq!(local_sync_cursors(dir.path(), "v-legacy"), (Some(12), None));
-        // A v2 keyset: the membership cursor is comparable.
+        // A format-1 vault can hold a v2-shaped keyset adopted from /keys
+        // rows; its cursor still counts /keys rows, so it is not comparable.
         pv.keyset.uik = Some(Default::default());
-        std::fs::create_dir_all(dir.path().join("vaults").join("v-two")).unwrap();
-        write_per_item_store(dir.path(), "v-two", &pv).unwrap();
-        assert_eq!(local_sync_cursors(dir.path(), "v-two"), (Some(12), Some(7)));
+        std::fs::create_dir_all(dir.path().join("vaults").join("lc-fmt1")).unwrap();
+        write_per_item_store(dir.path(), "lc-fmt1", &pv).unwrap();
+        assert_eq!(local_sync_cursors(dir.path(), "lc-fmt1"), (Some(12), None));
+        // Known format 2 but no /membership pull yet: the cursor may still
+        // be the /keys one (a vault that moved from format 1).
+        std::fs::create_dir_all(dir.path().join("vaults").join("lc-fmt2")).unwrap();
+        write_per_item_store(dir.path(), "lc-fmt2", &pv).unwrap();
+        note_membership_format("lc-fmt2");
+        assert_eq!(local_sync_cursors(dir.path(), "lc-fmt2"), (Some(12), None));
+        // After a /membership pull set it: comparable.
+        note_membership_cursor("lc-fmt2");
+        assert_eq!(local_sync_cursors(dir.path(), "lc-fmt2"), (Some(12), Some(7)));
     }
 
     #[test]
