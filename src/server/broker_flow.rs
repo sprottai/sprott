@@ -163,6 +163,14 @@ pub async fn resolve_auth_value(
         )));
     };
 
+    // A rotation of this connection's refresh token not stored in the vault
+    // yet: whatever path produced `raw` (the session cache, or a ceremony's
+    // fresh decrypt from the store, which still holds the replaced value),
+    // the provider honors only the rotated token. This is the one place every
+    // mint input passes through.
+    let rotated = state.pending_rotation_of(vault_id, conn_id, raw);
+    let raw: &[u8] = rotated.as_ref().map(|t| t.as_bytes()).unwrap_or(raw);
+
     // §5: mint cache keyed by sha256(mint input). The input is read LOCALLY
     // only to compute the key; on a hit nothing is minted and the input never
     // leaves the daemon.

@@ -2431,6 +2431,42 @@ refresh_token = "REFRESH_TOKEN"
         assert!(state.take_pending_rotations(vid).is_empty());
     }
 
+    /// Two rotations failing in a row chain: the store still holds the first
+    /// replaced value, so the pending entry keeps it, and the retry stores
+    /// the newest token instead of finding the slot "changed" and dropping it.
+    #[test]
+    fn chained_failed_rotations_keep_the_first_replaced_value() {
+        let (_dir, state, vid, material, path, _) = rotation_fixture("rt-0");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-0", "rt-1", "disk");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "disk");
+        assert_eq!(state.pending_rotation_of(vid, "codex", b"rt-0").unwrap().as_str(), "rt-2");
+        retry_pending_rotations_locked(&state, vid);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
+        assert!(!state.has_pending_rotations(vid));
+        // An unrelated value for the slot replaces the entry as before.
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-2", "rt-3", "disk");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"other", "rt-9", "disk");
+        assert!(state.pending_rotation_of(vid, "codex", b"rt-2").is_none());
+        assert_eq!(state.pending_rotation_of(vid, "codex", b"other").unwrap().as_str(), "rt-9");
+    }
+
+    /// Every mint input passes through the pending rotations: a ceremony that
+    /// fresh-decrypted the replaced token from the store mints with (here:
+    /// finds the access token cached under) the rotated one, never the dead
+    /// one.
+    #[tokio::test]
+    async fn a_mint_from_the_replaced_token_uses_the_pending_rotation() {
+        use sha2::{Digest, Sha256};
+        let (_dir, state, vid, _material, _path, _) = rotation_fixture("rt-0");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-0", "rt-1", "disk");
+        let hash: String = Sha256::digest(b"rt-1").iter().map(|b| format!("{:02x}", b)).collect();
+        state.oauth_access_insert(vid, &hash, b"at-1".to_vec(), u64::MAX);
+        let minted = crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "gmail", b"rt-0")
+            .await
+            .unwrap();
+        assert_eq!(minted, b"at-1");
+    }
+
     /// A slot row this session's key cannot open is never written over: the
     /// store refuses (the token stays pending, retried after the keyset pull
     /// or at unlock), nothing is written.

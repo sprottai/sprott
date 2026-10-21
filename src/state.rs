@@ -1938,10 +1938,20 @@ impl AppState {
         why: &str,
     ) {
         if let Ok(runtime) = self.runtime(vault_id) {
-            runtime.pending_rotations.lock().unwrap().insert(
-                (conn_id.to_string(), role.to_string()),
+            let mut pending = runtime.pending_rotations.lock().unwrap();
+            let slot = (conn_id.to_string(), role.to_string());
+            // A rotation of a token that was itself still pending (the store
+            // failed twice in a row): the store still holds the FIRST
+            // replaced value, so the chain keeps it as `old`, or the retry
+            // would find the slot "changed" and drop the only valid token.
+            let old = match pending.get(&slot) {
+                Some(p) if p.new.as_bytes() == old => p.old.clone(),
+                _ => zeroize::Zeroizing::new(old.to_vec()),
+            };
+            pending.insert(
+                slot,
                 PendingRotation {
-                    old: zeroize::Zeroizing::new(old.to_vec()),
+                    old,
                     new: zeroize::Zeroizing::new(token.to_string()),
                 },
             );
@@ -1976,6 +1986,23 @@ impl AppState {
                 .remove(&(conn_id.to_string(), role.to_string()));
         }
         self.clear_rotation_note(vault_id, conn_id);
+    }
+
+    /// The rotated refresh token pending for connection `conn_id` that
+    /// replaced `value`, if any (`value` as the store still holds it, or as a
+    /// fresh decrypt read it).
+    pub fn pending_rotation_of(
+        &self,
+        vault_id: &str,
+        conn_id: &str,
+        value: &[u8],
+    ) -> Option<zeroize::Zeroizing<String>> {
+        let runtime = self.runtime_if_present(vault_id)?;
+        let pending = runtime.pending_rotations.lock().unwrap();
+        pending
+            .iter()
+            .find(|((c, _), p)| c == conn_id && p.old.as_slice() == value)
+            .map(|(_, p)| p.new.clone())
     }
 
     /// Any rotated refresh token of `vault_id` not stored yet?
