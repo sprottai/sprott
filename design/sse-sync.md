@@ -33,9 +33,8 @@ Cache-Control: no-cache, no-transform
 X-Accel-Buffering: no
 
 event: hello
-data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted",
-                          "items_seq":N,"keyset_seq":N}, ...},   (cursors: v1.2, cap "cursors")
-       "caps":["op","agent_hashes","access","vaults","cursors"]}
+data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted"}, ...}, "caps":[...]}
+                                     (v1.2 adds cursor and contact fields; see v1.2)
 
 event: vault
 data: {"vid":"...","version":N,"status":"live|deleted"}
@@ -298,36 +297,56 @@ fire the resync notify exactly like connect hellos.
 ## v1.2: idle traffic (2026-10-21)
 
 Goal: an idle daemon (vault unlocked, no agent activity, console closed) costs
-the cloud about one request every few minutes, with no change in how fast
-approvals, revocations, new secrets and roster changes arrive (they still ride
-stream events). Every relaxation below is gated on a hello cap, so an older
+the cloud a few requests an hour, with no change in how fast approvals,
+revocations, new secrets and roster changes arrive (they still ride stream
+events). Every relaxation below is gated on a hello cap or field, so an older
 backend gets the v1.1 cadences unchanged.
 
 **Backend (additive):**
-- Cap `cursors`: each hello vault cell also carries `items_seq` (max
-  `vault_items.seq`) and `keyset_seq` (`vault_membership.keyset_seq`). The cap is
-  declared only when both cursor reads succeeded; otherwise the cells carry
-  neither field.
-- Cap `vaults` + account event `vaults` (payload `{}`), emitted when the account
-  gains a vault: a vault create (private or shared), the first membership triple
-  write of a new shared vault, and a member being seated.
+
+```
+event: hello
+data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted",
+                          "items_seq":N,"keyset_seq":N,          (cap cursors)
+                          "contact_token":{account_id,issued_at,nonce,sig}}},  (shared vaults)
+       "ledger_seq":N,"vaults_unlisted":bool,                     (cap account_cursors)
+       "caps":["op","agent_hashes","access","vaults","cursors","account_cursors"]}
+
+event: vaults   data: {}                                          (cap vaults)
+```
+
+- `cursors`: each vault cell carries `items_seq` (max `vault_items.seq`) and
+  `keyset_seq` (`vault_membership.keyset_seq`, omitted when the vault has no
+  membership row). Declared only when both cursor reads succeeded.
+- `contact_token` on a shared vault's cell: the same signed token a `/blob` 200
+  body carries, same shape.
+- `account_cursors`: top-level `ledger_seq` (the account's principal ledger
+  head seq) and `vaults_unlisted` (the account has a vault the request did not
+  list).
+- `vaults`: account event when the account gains a vault: a vault create
+  (private or shared), the first membership triple write of a new shared vault,
+  and a member being seated.
 - Shared vaults the account is a member of are in hello like owned ones.
 
 **Core:**
 
-| path | cap / condition | cadence |
+| path | cap / condition | behaviour |
 |---|---|---|
-| hello reconcile per vault | `cursors` | blob only if `version` > local; items only if `items_seq` > local items cursor; keyset only if `keyset_seq` > local keyset cursor. A field the cell lacks counts as unknown and pulls. |
-| hello reconcile per vault | no `cursors` | v1.1: blob version-gated, items + keyset always |
-| Sse-shape safety reconcile | `cursors` | 1800s (else 300s) |
-| shared vault blob probe | Sse shape, `cursors` | 600s, blob only (its answer carries the signed contact token the offline lease runs on) |
-| principal ledger | healthy stream + `agent_hashes` | on the event and on every hello, safety timer 1800s (else 120s); events spaced ≥2s |
-| vault discovery | healthy stream + `vaults` | on the event and on every hello, safety timer 1800s (else 120s); events spaced ≥5s |
+| hello, per vault | `cursors` | blob only if `version` > local; items only if `items_seq` > local items cursor; keyset only if `keyset_seq` > local keyset cursor. A field the cell lacks counts as unknown and pulls. |
+| hello, per vault | no `cursors` | v1.1: blob version-gated, items + keyset always |
+| hello, shared vault | `contact_token` present | verified by the same check as the `/blob` body; on success it advances the lease contact clock |
+| hello, ledger | `account_cursors` | pull only if `ledger_seq` differs from the local verified head seq (or either is unknown); without the cap, every hello pulls |
+| hello, discovery | `account_cursors` | run only if `vaults_unlisted` is true (or absent); without the cap, every hello runs it |
+| Sse-shape safety reconcile | `cursors` | 1800s counted from the later of the last reconcile and the last hello, so it fires only when no hello has come for 1800s (else 300s from the last reconcile) |
+| shared vault blob probe | Sse shape | only when hellos do not carry its verified contact token: 600s; with the token, only if the contact clock passes 1200s (hellos late) |
+| principal ledger | healthy stream + `agent_hashes` | on the event and on hellos (above), safety timer 1800s (else 120s); events spaced ≥2s |
+| vault discovery | healthy stream + `vaults` | on the event and on hellos (above), safety timer 1800s (else 120s); events spaced ≥5s |
 | fallback (long-poll) shape | any | unchanged |
 
-- The local keyset cursor is compared with hello's `keyset_seq` only for a v2
-  (membership) keyset; a legacy keyset counts `/keys` rows on another sequence,
-  so it always pulls.
+- The local keyset cursor is compared with hello's `keyset_seq` only once a
+  `/membership` pull has set it for a vault known to be format 2. A format-1
+  vault's cursor counts `/keys` rows on another sequence, whatever its keyset
+  shape, so it always pulls.
 - Format-2 vaults: once a vault is known to use the membership triple (a `/keys`
   409 or a verified envelope with `format >= 2`, remembered for the process; the
   format only ratchets up), keyset pulls go straight to `/membership`.
@@ -338,9 +357,10 @@ backend gets the v1.1 cadences unchanged.
 - Dynamic vault subscribe: every watcher registers its cell with the
   dispatcher's vault set (weak refs). A vault adopted after startup (discovery,
   restored access) makes a live stream close on purpose and re-dial with the new
-  `?vids` (handled like a rotation: no backoff, health stays Up), capped at 32
-  vids in registration order; the rest stay on long-poll. With no vault the
-  dispatcher waits for the first one.
+  `?vids` (like a rotation: health stays Up), capped at 32 vids in registration
+  order; the rest stay on long-poll. A re-subscribe to the same vid set as the
+  last one (within 15 min) waits 5s, doubling to 5 min, while the old stream
+  keeps serving. With no vault the dispatcher waits for the first one.
 - Health flips re-size the ledger and discovery timers instead of riding a
   1800s sleep into a Down stream.
 
@@ -349,10 +369,13 @@ backend gets the v1.1 cadences unchanged.
   `/items`) + 300s reconcile 12 × 4 (`/blob`, `/keys`, `/membership`, `/items`)
   = 60; per daemon, ledger ~30 (120s timer, re-armed by each hello pull) +
   discovery 30 + stream connect 4 ≈ 64.
-- after (v1.2): per private vault, 1800s reconcile 2 × 3 (`/blob`, `/membership`,
-  `/items`) = 6; a shared vault adds 4 blob probes = 10; per daemon, ledger 4 +
-  discovery 4 (one each per hello; their 1800s timers are re-armed by each pull
-  and only fire when hellos stop) + stream connect 4 = 12.
+- after (v1.2, all caps): per format-2 vault, private or shared, 0 while hellos
+  arrive (one catch-up pull after a restart); a format-1 vault has no
+  `keyset_seq`, so each hello pulls `/keys` + `/items`: 8. Per daemon, stream
+  connect 4 + ledger 2 + discovery 2 (their 1800s timers; hellos skip both when
+  nothing changed) = 8.
+- after, older backend without `account_cursors` / `contact_token`: ledger and
+  discovery 4 each (one per hello); a shared vault probes its blob 6 times.
 
 ## Non-goals (v1)
 
