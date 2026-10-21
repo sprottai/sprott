@@ -338,6 +338,7 @@ event: vaults   data: {}                                          (cap vaults)
 | hello, ledger | `account_cursors` | pull only if `ledger_seq` differs from the local verified head seq (or either is unknown); without the cap, every hello pulls |
 | hello, discovery | `account_cursors` | run only if `vaults_unlisted` is true (or absent); without the cap, every hello runs it |
 | Sse-shape safety reconcile | `cursors` | 1800s counted from the later of the last reconcile and the last hello, so it fires only when no hello has come for 1800s (else 300s from the last reconcile) |
+| Sse-shape safety reconcile | connect work pending (an OAuth code exchange that failed transiently, or a rotated refresh token not stored yet) | 300s from the last reconcile, hellos or not: only a reconcile's pull block retries those; back to the row above once both drain |
 | shared vault blob probe | Sse shape | only when hellos do not carry its verified contact token: 600s; with the token, only if the contact clock passes 1200s (hellos late) |
 | principal ledger | healthy stream + `agent_hashes` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last pull and the last `account_cursors` hello, but a verified pull at least every 6h (the lease runs on pulls); events spaced ≥2s |
 | vault discovery | healthy stream + `vaults` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last run and the last `account_cursors` hello; events spaced ≥5s |

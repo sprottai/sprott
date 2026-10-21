@@ -1895,6 +1895,9 @@ impl AppState {
                 zeroize::Zeroizing::new(token.to_string()),
             );
         }
+        // The vault's watcher may be parked on a long idle deadline: wake it so
+        // it re-sizes to the short cadence that retries this.
+        self.nudge_watcher(vault_id);
         self.note_sync(
             vault_id,
             &rotation_note_key(conn_id),
@@ -1903,6 +1906,43 @@ impl AppState {
                 conn_id, why
             )),
         );
+    }
+
+    /// Record whether the last connect run left a code exchange to retry. A
+    /// new retry wakes the vault's watcher so it re-sizes its timer.
+    pub fn set_connect_retry(&self, vault_id: &str, pending: bool) {
+        let Some(runtime) = self.runtime_if_present(vault_id) else {
+            return;
+        };
+        let was = runtime
+            .connect_retry
+            .swap(pending, std::sync::atomic::Ordering::AcqRel);
+        if pending && !was {
+            self.nudge_watcher(vault_id);
+        }
+    }
+
+    /// Connect work left behind that only a later sync round retries: a code
+    /// exchange that failed transiently, or a rotated refresh token not yet
+    /// stored. While true, the vault's watcher keeps the short reconcile
+    /// cadence (the reconcile's pull block runs the connect jobs).
+    pub fn connect_work_pending(&self, vault_id: &str) -> bool {
+        self.runtime_if_present(vault_id).is_some_and(|runtime| {
+            runtime
+                .connect_retry
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !runtime.pending_rotations.lock().unwrap().is_empty()
+        })
+    }
+
+    /// Wake the vault's sync watcher (if any) so it re-reads its timers.
+    fn nudge_watcher(&self, vault_id: &str) {
+        let cell = self
+            .runtime_if_present(vault_id)
+            .and_then(|runtime| runtime.watcher_cell.lock().unwrap().clone());
+        if let Some(cell) = cell {
+            cell.nudge();
+        }
     }
 
     /// The rotated refresh tokens of `vault_id` not stored yet, taken.
@@ -3466,5 +3506,38 @@ scope = ["amount"]
             AccessLevel::Ask,
             "a scoped path must never fast-path via the coarse window"
         );
+    }
+
+    /// Connect work left behind keeps the vault's sync on the short cadence
+    /// until it drains; a new piece wakes the parked watcher.
+    #[test]
+    fn connect_work_pending_tracks_retries_and_rotations() {
+        use futures_util::FutureExt;
+        let s = test_state();
+        let v = "connect-work-test";
+        assert!(!s.connect_work_pending(v), "no runtime: nothing pending");
+        let runtime = s.runtime(v).unwrap();
+        let cell = Arc::new(crate::sync_stream::WakeCell::new());
+        *runtime.watcher_cell.lock().unwrap() = Some(cell.clone());
+        assert!(!s.connect_work_pending(v));
+
+        // (a) a transient code exchange left to retry.
+        s.set_connect_retry(v, true);
+        assert!(s.connect_work_pending(v));
+        assert!(cell.notified().now_or_never().is_some(), "watcher woken");
+        s.set_connect_retry(v, true);
+        assert!(
+            cell.notified().now_or_never().is_none(),
+            "no wake when already pending"
+        );
+        s.set_connect_retry(v, false);
+        assert!(!s.connect_work_pending(v), "drained");
+
+        // (b) a rotated refresh token not stored yet.
+        s.note_rotation_pending(v, "gmail", "refresh_token", "rt-new", "disk full");
+        assert!(s.connect_work_pending(v));
+        assert!(cell.notified().now_or_never().is_some(), "watcher woken");
+        assert_eq!(s.take_pending_rotations(v).len(), 1);
+        assert!(!s.connect_work_pending(v), "drained");
     }
 }

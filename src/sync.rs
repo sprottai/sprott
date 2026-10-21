@@ -2778,6 +2778,19 @@ fn sse_reconcile_interval(hello_cursors: bool) -> Duration {
     }
 }
 
+/// The Sse safety reconcile's interval, and whether it counts from hellos
+/// (pure). Connect work left behind (a code exchange that failed
+/// transiently, a rotated refresh token not stored yet) is retried only by a
+/// sync round's pull block, which a hello does not run: while any is pending
+/// the vault keeps the legacy 300s reconcile from its last real one.
+fn sse_reconcile_policy(hello_cursors: bool, connect_pending: bool) -> (Duration, bool) {
+    if connect_pending {
+        (SSE_RECONCILE_LEGACY, false)
+    } else {
+        (sse_reconcile_interval(hello_cursors), hello_cursors)
+    }
+}
+
 /// What the safety reconcile counts from (pure): with hello cursors, the
 /// later of the last reconcile and the last hello (a hello re-checks every
 /// vault it confirms by cursor); without them, the last reconcile.
@@ -2824,9 +2837,14 @@ fn sse_timers(
     if let Some(t) = hello_contact {
         *last_contact = (*last_contact).max(t);
     }
-    let anchor = sse_reconcile_anchor(last_reconcile, crate::sync_stream::last_hello_at(), cursors);
+    let (interval, from_hellos) = sse_reconcile_policy(cursors, state.connect_work_pending(vault));
+    let anchor = sse_reconcile_anchor(
+        last_reconcile,
+        crate::sync_stream::last_hello_at(),
+        from_hellos,
+    );
     SseTimers {
-        reconcile_at: anchor + sse_reconcile_interval(cursors),
+        reconcile_at: anchor + interval,
         contact_at: state
             .vault_is_shared(vault)
             .then(|| *last_contact + contact_refresh_after(hello_contact.is_some())),
@@ -9775,6 +9793,23 @@ mod tests {
         // No hello yet, or no cursors: the last reconcile alone.
         assert_eq!(sse_reconcile_anchor(t0, None, true), t0);
         assert_eq!(sse_reconcile_anchor(t0, Some(hello), false), t0);
+    }
+
+    #[test]
+    fn pending_connect_work_keeps_the_short_reconcile() {
+        // Connect work pending: 300s from the last real reconcile, hellos or not.
+        assert_eq!(sse_reconcile_policy(true, true), (SSE_RECONCILE_LEGACY, false));
+        assert_eq!(sse_reconcile_policy(false, true), (SSE_RECONCILE_LEGACY, false));
+        // Drained: back to the relaxed, hello-anchored reconcile.
+        assert_eq!(sse_reconcile_policy(true, false), (SSE_RECONCILE_RELAXED, true));
+        assert_eq!(sse_reconcile_policy(false, false), (SSE_RECONCILE_LEGACY, false));
+        let t0 = std::time::Instant::now();
+        let hello = t0 + Duration::from_secs(900);
+        let (interval, from_hellos) = sse_reconcile_policy(true, true);
+        assert_eq!(
+            sse_reconcile_anchor(t0, Some(hello), from_hellos) + interval,
+            t0 + Duration::from_secs(300)
+        );
     }
 
     #[test]

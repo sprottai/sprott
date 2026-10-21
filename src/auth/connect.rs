@@ -564,6 +564,20 @@ pub(crate) async fn apply_pending_connects(
     vault_id: &str,
     injected: Option<std::collections::BTreeMap<String, String>>,
 ) -> ConnectReport {
+    let report = apply_pending_connects_inner(state, vault_id, injected).await;
+    // A transient exchange failure writes nothing, so no event will bring it
+    // back: the vault's sync keeps a short cadence until a run leaves none.
+    // (Every pending entry is tried each run, so this run's report is the
+    // whole answer; a locked or unreadable vault is retried at unlock.)
+    state.set_connect_retry(vault_id, !report.unreached.is_empty());
+    report
+}
+
+async fn apply_pending_connects_inner(
+    state: &Arc<AppState>,
+    vault_id: &str,
+    injected: Option<std::collections::BTreeMap<String, String>>,
+) -> ConnectReport {
     let Some(k) = state.cloned_state_key(vault_id) else {
         return ConnectReport::default(); // Locked — no retained K; next unlock retries.
     };
