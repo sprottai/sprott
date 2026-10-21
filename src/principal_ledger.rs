@@ -46,6 +46,28 @@ const INTERVAL: Duration = Duration::from_secs(120);
 const SAFETY_INTERVAL: Duration = Duration::from_secs(1800);
 /// Minimum spacing between two loop pulls, however many events arrive.
 const EVENT_FLOOR: Duration = Duration::from_secs(2);
+/// A verified pull at least this often, whatever hellos say: the lease
+/// ([`LEASE_SECS`]) runs on verified pulls, not on hellos.
+const LEASE_REFRESH: Duration = Duration::from_secs(6 * 3600);
+
+/// When the loop's timer next comes due (pure). Relaxed, it counts from the
+/// later of the last pull and the last hello carrying `account_cursors`
+/// (that hello compared the ledger head and asked for a pull if it moved),
+/// so while hellos arrive the 1800s timer never fires; a pull still comes at
+/// least every [`LEASE_REFRESH`] to keep the lease fresh.
+fn ledger_due(
+    pulled_at: std::time::Instant,
+    account_hello: Option<std::time::Instant>,
+    stream_healthy: bool,
+    agent_hash_events: bool,
+) -> std::time::Instant {
+    let relaxed = stream_healthy && agent_hash_events;
+    let anchor = match account_hello {
+        Some(h) if relaxed => pulled_at.max(h),
+        _ => pulled_at,
+    };
+    (anchor + ledger_interval(stream_healthy, agent_hash_events)).min(pulled_at + LEASE_REFRESH)
+}
 
 /// The loop's timer (pure): relaxed only with proof that `agent_hashes`
 /// events reach this daemon (healthy stream AND the hello cap).
@@ -839,21 +861,32 @@ pub async fn principal_ledger_loop(state: Arc<AppState>) {
             ),
             DeviceGate::Open => {}
         }
-        let pulled_at = tokio::time::Instant::now();
+        let pulled_at = std::time::Instant::now();
+        let floor = tokio::time::Instant::from_std(pulled_at + EVENT_FLOOR);
         loop {
-            let due = pulled_at
-                + ledger_interval(
+            let due_at = || {
+                ledger_due(
+                    pulled_at,
+                    crate::sync_stream::last_account_hello_at(),
                     crate::sync_stream::stream_healthy(),
                     crate::sync_stream::agent_hash_events_live(),
-                );
+                )
+            };
+            let due = tokio::time::Instant::from_std(due_at());
             tokio::select! {
-                _ = tokio::time::sleep_until(due) => break,
+                _ = tokio::time::sleep_until(due) => {
+                    // A hello since arming may have moved the deadline on.
+                    if std::time::Instant::now() < due_at() {
+                        continue;
+                    }
+                    break;
+                }
                 _ = crate::sync_stream::agent_hashes_notified() => {
-                    tokio::time::sleep_until(pulled_at + EVENT_FLOOR).await;
+                    tokio::time::sleep_until(floor).await;
                     break;
                 }
                 _ = crate::sync_stream::device_auth_rejected_notified() => {
-                    tokio::time::sleep_until(pulled_at + EVENT_FLOOR).await;
+                    tokio::time::sleep_until(floor).await;
                     break;
                 }
                 _ = crate::sync_stream::stream_health_edge() => continue,
@@ -1520,6 +1553,22 @@ mod tests {
         assert_eq!(verified_head_seq(dir.path()), None);
         write_pairing_floor(dir.path(), 3, 9, vec![], T0).unwrap();
         assert_eq!(verified_head_seq(dir.path()), Some(9));
+    }
+
+    #[test]
+    fn ledger_timer_counts_from_account_cursor_hellos_within_the_lease_refresh() {
+        let t0 = std::time::Instant::now();
+        let hello = t0 + Duration::from_secs(900);
+        // Relaxed: a later account-cursor hello moves the deadline on.
+        assert_eq!(ledger_due(t0, Some(hello), true, true), hello + SAFETY_INTERVAL);
+        assert_eq!(ledger_due(t0, None, true, true), t0 + SAFETY_INTERVAL);
+        // Not relaxed: 120s from the last pull, hellos or not.
+        assert_eq!(ledger_due(t0, Some(hello), false, true), t0 + INTERVAL);
+        assert_eq!(ledger_due(t0, Some(hello), true, false), t0 + INTERVAL);
+        // Hellos never push a verified pull past the lease refresh.
+        let late = t0 + LEASE_REFRESH;
+        assert_eq!(ledger_due(t0, Some(late), true, true), t0 + LEASE_REFRESH);
+        assert!(LEASE_REFRESH < Duration::from_secs(LEASE_SECS));
     }
 
     #[test]

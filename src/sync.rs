@@ -859,6 +859,22 @@ fn discovery_interval(stream_healthy: bool, vault_events: bool) -> Duration {
     }
 }
 
+/// When discovery's timer next comes due (pure). Relaxed, it counts from the
+/// later of the last discovery and the last hello carrying `account_cursors`
+/// (that hello re-checked the listing), so while hellos arrive it never fires.
+fn discovery_due(
+    last: std::time::Instant,
+    account_hello: Option<std::time::Instant>,
+    stream_healthy: bool,
+    vault_events: bool,
+) -> std::time::Instant {
+    let anchor = match account_hello {
+        Some(h) if stream_healthy && vault_events => last.max(h),
+        _ => last,
+    };
+    anchor + discovery_interval(stream_healthy, vault_events)
+}
+
 /// Live auto-discovery: adopt an account vault created AFTER the daemon started
 /// (e.g. in the console) without a restart. Re-lists the account's vaults; a
 /// genuinely new one is persisted and handed to a steady `watch_loop`, whose
@@ -876,17 +892,30 @@ async fn discovery_reconcile_loop(
     dk: String,
     health_rx: tokio::sync::watch::Receiver<StreamHealth>,
 ) {
-    let mut last = tokio::time::Instant::now();
+    let mut last = std::time::Instant::now();
     loop {
         let healthy = crate::sync_stream::stream_healthy();
         let events = crate::sync_stream::vault_events_live();
         let relaxed = healthy && events;
-        let due = last + discovery_interval(healthy, events);
+        let due_at = |healthy, events| {
+            discovery_due(
+                last,
+                crate::sync_stream::last_account_hello_at(),
+                healthy,
+                events,
+            )
+        };
+        let due = tokio::time::Instant::from_std(due_at(healthy, events));
         if relaxed {
             tokio::select! {
-                _ = tokio::time::sleep_until(due) => {}
+                _ = tokio::time::sleep_until(due) => {
+                    // A hello since arming may have moved the deadline on.
+                    if std::time::Instant::now() < due_at(healthy, events) {
+                        continue;
+                    }
+                }
                 _ = crate::sync_stream::vaults_notified() => {
-                    tokio::time::sleep_until(last + DISCOVERY_FLOOR).await;
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(last + DISCOVERY_FLOOR)).await;
                 }
                 _ = crate::sync_stream::stream_health_edge() => continue,
             }
@@ -896,7 +925,7 @@ async fn discovery_reconcile_loop(
                 _ = crate::sync_stream::stream_health_edge() => continue,
             }
         }
-        last = tokio::time::Instant::now();
+        last = std::time::Instant::now();
         let cfg = match active::load() {
             Ok(c) => c,
             Err(_) => continue,
@@ -9821,6 +9850,26 @@ mod tests {
         assert_eq!(discovery_interval(true, false), Duration::from_secs(120));
         assert_eq!(discovery_interval(false, true), Duration::from_secs(120));
         assert_eq!(discovery_interval(false, false), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn discovery_timer_counts_from_account_cursor_hellos() {
+        let t0 = std::time::Instant::now();
+        let hello = t0 + Duration::from_secs(900);
+        // Relaxed: a later account-cursor hello moves the deadline on, so
+        // with hellos every ~15 min the 1800s timer never fires.
+        assert_eq!(
+            discovery_due(t0, Some(hello), true, true),
+            hello + DISCOVERY_SAFETY_INTERVAL
+        );
+        assert_eq!(
+            discovery_due(hello, Some(t0), true, true),
+            hello + DISCOVERY_SAFETY_INTERVAL
+        );
+        assert_eq!(discovery_due(t0, None, true, true), t0 + DISCOVERY_SAFETY_INTERVAL);
+        // Not relaxed: the 120s poll from the last discovery, hellos or not.
+        assert_eq!(discovery_due(t0, Some(hello), false, true), t0 + DISCOVERY_INTERVAL);
+        assert_eq!(discovery_due(t0, Some(hello), true, false), t0 + DISCOVERY_INTERVAL);
     }
 
     #[test]

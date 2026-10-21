@@ -339,8 +339,8 @@ event: vaults   data: {}                                          (cap vaults)
 | hello, discovery | `account_cursors` | run only if `vaults_unlisted` is true (or absent); without the cap, every hello runs it |
 | Sse-shape safety reconcile | `cursors` | 1800s counted from the later of the last reconcile and the last hello, so it fires only when no hello has come for 1800s (else 300s from the last reconcile) |
 | shared vault blob probe | Sse shape | only when hellos do not carry its verified contact token: 600s; with the token, only if the contact clock passes 1200s (hellos late) |
-| principal ledger | healthy stream + `agent_hashes` | on the event and on hellos (above), safety timer 1800s (else 120s); events spaced ≥2s |
-| vault discovery | healthy stream + `vaults` | on the event and on hellos (above), safety timer 1800s (else 120s); events spaced ≥5s |
+| principal ledger | healthy stream + `agent_hashes` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last pull and the last `account_cursors` hello, but a verified pull at least every 6h (the lease runs on pulls); events spaced ≥2s |
+| vault discovery | healthy stream + `vaults` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last run and the last `account_cursors` hello; events spaced ≥5s |
 | fallback (long-poll) shape | any | unchanged |
 
 - The local keyset cursor is compared with hello's `keyset_seq` only once a
@@ -372,8 +372,9 @@ event: vaults   data: {}                                          (cap vaults)
 - after (v1.2, all caps): per format-2 vault, private or shared, 0 while hellos
   arrive (one catch-up pull after a restart); a format-1 vault has no
   `keyset_seq`, so each hello pulls `/keys` + `/items`: 8. Per daemon, stream
-  connect 4 + ledger 2 + discovery 2 (their 1800s timers; hellos skip both when
-  nothing changed) = 8.
+  connect 4; ledger and discovery 0 while hellos report nothing changed (their
+  timers count from those hellos), plus one ledger pull every 6h for the
+  lease ≈ 4.2.
 - after, older backend without `account_cursors` / `contact_token`: ledger and
   discovery 4 each (one per hello); a shared vault probes its blob 6 times.
 

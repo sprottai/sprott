@@ -1416,12 +1416,26 @@ fn hello_account_wakes(hello: &serde_json::Value, local_ledger_seq: Option<u64>)
 fn notify_after_hello(hello: &serde_json::Value, state: Option<&Arc<crate::state::AppState>>) {
     let local = state.and_then(|s| crate::principal_ledger::verified_head_seq(&s.config.state_dir));
     let (ledger, vaults) = hello_account_wakes(hello, local);
+    if caps_list(hello.get("caps")).contains(&"account_cursors") {
+        // This hello re-checked the ledger head and the vault listing; the
+        // two safety timers count from it.
+        *LAST_ACCOUNT_HELLO.lock().unwrap() = Some(Instant::now());
+    }
     if ledger {
         notify_agent_hashes();
     }
     if vaults {
         notify_vaults();
     }
+}
+
+/// When the last hello carrying `account_cursors` was applied. It re-checked
+/// the ledger head and the vault listing (pulling whichever changed), so the
+/// ledger and discovery safety timers count from it.
+static LAST_ACCOUNT_HELLO: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub fn last_account_hello_at() -> Option<Instant> {
+    *LAST_ACCOUNT_HELLO.lock().unwrap()
 }
 
 /// When the last hello was applied. With hello cursors each hello re-checks
