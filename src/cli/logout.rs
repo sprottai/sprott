@@ -1,6 +1,6 @@
 //! `sc logout` — unpair this machine: the inverse of `sc login`.
 //!
-//! `sc login` writes three things: the `~/.safeclaw/device-key` (this host's
+//! `sc login` writes three things: the `~/.sprott/device-key` (this host's
 //! cloud credential), the active pairing in `config.toml` (custodian, vault,
 //! cloud_backend, frontend_origin), and the `known_vaults` history. `logout`
 //! undoes all of it and stops the daemon, so a re-pair starts clean and the
@@ -12,8 +12,8 @@
 //! in the dashboard. `--keep-remote` skips the cloud revoke (rare; only when
 //! something external still manages that key).
 //!
-//! What we deliberately DON'T touch: the agent's `SAFECLAW_VAULT_URL` /
-//! `SAFECLAW_API_KEY` env in the user's shell profile. That's the user's file
+//! What we deliberately DON'T touch: the agent's `SPROTT_VAULT_URL` /
+//! `SPROTT_API_KEY` env in the user's shell profile. That's the user's file
 //! to edit (per their config-ownership) — we print a reminder instead.
 
 use serde::Deserialize;
@@ -54,8 +54,8 @@ pub async fn run(args: LogoutArgs) -> Result<(), String> {
     wipe_local_account_state()?;
 
     // 3. Remove the device-key file (this host's identity to the cloud).
-    if let Some(home) = dirs::home_dir() {
-        let p = home.join(".safeclaw").join("device-key");
+    if let Some(dir) = crate::names::data_dir() {
+        let p = dir.join("device-key");
         if p.exists() {
             std::fs::remove_file(&p).map_err(|e| format!("remove {}: {}", p.display(), e))?;
         }
@@ -79,7 +79,7 @@ pub async fn run(args: LogoutArgs) -> Result<(), String> {
         eprintln!("Nothing was paired; cleared any stale local config.");
     }
     eprintln!();
-    eprintln!("  Your agent's SAFECLAW_* env (BROKER_URL / AGENT_IDENTITY) may");
+    eprintln!("  Your agent's SPROTT_* env (BROKER_URL / AGENT_IDENTITY) may");
     eprintln!("  still be persisted in its .env. It's stale now; remove it. Agents stay");
     eprintln!("  valid account-wide (logout revokes only this DEVICE). Revoke unused ones");
     eprintln!("  with `sprott agent rm`. Re-pair with `sprott login`.");
@@ -133,7 +133,7 @@ async fn revoke_device_cloud(cfg: &CliConfig) -> Result<Option<String>, String> 
     let cloud = cloud.trim_end_matches('/');
     let key = crate::sync::device_key().ok_or("no device-key to revoke")?;
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;

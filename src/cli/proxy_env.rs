@@ -12,12 +12,12 @@ use std::time::Duration;
 
 use crate::config::default_state_dir;
 
-/// Resident CA cert path: `$SAFECLAW_CA_PATH` when set (a hand-configured
+/// Resident CA cert path: `$SPROTT_CA_PATH` when set (a hand-configured
 /// remote daemon — the PUBLIC `ca.pem` copied over manually; the private
 /// `ca.key` never leaves the daemon), else `<state_dir>/ca.pem`, where the
 /// local daemon generated it on first start.
 pub fn resident_ca_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("SAFECLAW_CA_PATH") {
+    if let Some(p) = std::env::var_os("SPROTT_CA_PATH") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
@@ -225,7 +225,7 @@ fn with_loopback(current: &str) -> String {
 /// `active::control_root` — env-first host)? `sc run`'s liveness gate — the
 /// proxy shares the daemon process, so control up ⇒ proxy up.
 pub async fn control_plane_up(control_root: &str) -> bool {
-    let client = match reqwest::Client::builder()
+    let client = match crate::util::http_builder()
         .timeout(Duration::from_millis(500))
         .build()
     {

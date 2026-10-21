@@ -182,7 +182,7 @@ const LOCKED: &str = "the vault is locked; run `sprott unlock` first";
 
 /// The vault's definitions.
 async fn listing(custodian: &str, vault: &str) -> Result<Vec<Listed>, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {}", e))?;
@@ -612,7 +612,7 @@ pub async fn run_ls(args: ServiceLsArgs, json: bool) -> Result<(), String> {
 
 /// What the daemon has not applied for this vault (`GET /v/{vid}/held`).
 async fn held_notes(custodian: &str, vault: &str) -> Vec<String> {
-    match reqwest::Client::builder()
+    match crate::util::http_builder()
         .timeout(Duration::from_secs(5))
         .build()
     {

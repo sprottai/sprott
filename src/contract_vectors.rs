@@ -366,7 +366,7 @@ fn generate() -> Value {
 
     json!({
         "contract": "grant-v3",
-        "generator": "safeclaw core src/contract_vectors.rs",
+        "generator": "safeclaw core src/contract_vectors.rs", // rename:keep (pinned by the digest below)
         "conventions": {
             "lp": "u32_be(len) || bytes",
             "u64be": "8-byte big-endian",

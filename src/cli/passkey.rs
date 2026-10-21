@@ -1,4 +1,4 @@
-//! `safeclaw passkey ...` — manage the active vault's enrolled passkeys.
+//! `sprott passkey ...` — manage the active vault's enrolled passkeys.
 //!
 //! `ls` lists; `add` prints the console page (passkeys are enrolled in the
 //! browser, where the identity key lives). `rm` / `rename` are not built yet
@@ -59,7 +59,7 @@ async fn run_ls(json: bool) -> Result<(), String> {
         custodian.trim_end_matches('/'),
         urlencoding::encode(&vault)
     );
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|e| format!("client init: {}", e))?;

@@ -13,7 +13,7 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hpke::{Deserializable, Kem, Serializable};
-use safeclaw::crypto::envelope::{grant_seal_info, ScKeyPair, SuiteKem};
+use sprott::crypto::envelope::{grant_seal_info, ScKeyPair, SuiteKem};
 
 fn hex_encode(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()

@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let key = [0x42u8; 32];
-        let msg = b"hello safeclaw v1";
+        let msg = b"hello sprott v1";
         let aad = b"safeclaw/v1/test";
         let sealed = seal(&key, msg, aad).unwrap();
         let out = open(&key, &sealed, aad).unwrap();

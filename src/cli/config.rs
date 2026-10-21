@@ -1,9 +1,9 @@
 //! `sc config set/get/unset/ls` — persistent CLI preferences in
-//! `~/.safeclaw/config.toml` `[settings]`.
+//! `~/.sprott/config.toml` `[settings]`.
 //!
 //! Resolution chain for any setting:
 //!   1. CLI flag (per-invocation)
-//!   2. SAFECLAW_* env var (per-shell)
+//!   2. SPROTT_* env var (per-shell)
 //!   3. this config file (persistent)
 //!   4. clap default (built-in)
 //!

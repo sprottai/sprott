@@ -55,7 +55,7 @@ pub fn reload_egress_proxy() {
 /// `apply_to_env` pinned (custodian host + loopback), so a Google-only proxy
 /// can't sink cloud sync. A malformed proxy URL logs and goes direct.
 fn build_client(proxy: Option<&str>) -> reqwest::Client {
-    let b = reqwest::Client::builder()
+    let b = crate::util::http_builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT);
     crate::cli::egress_proxy::apply(b, proxy)

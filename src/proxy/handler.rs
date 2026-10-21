@@ -165,7 +165,7 @@ impl HttpHandler for BrokerHandler {
                 .into();
         }
 
-        self.pipeline(ctx, req).await
+        self.pipeline(ctx.client_addr.ip(), req).await
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
@@ -202,13 +202,12 @@ impl BrokerHandler {
         self.agent_id.clone()
     }
 
-    async fn pipeline(&mut self, ctx: &HttpContext, req: Request<Body>) -> RequestOrResponse {
+    async fn pipeline(&mut self, ip: IpAddr, req: Request<Body>) -> RequestOrResponse {
         let is_https = req.uri().scheme_str() == Some("https");
         let dest_host = match req.uri().host() {
             Some(h) => h.to_ascii_lowercase(),
             None => return req.into(), // origin-form / no authority: not ours
         };
-        let ip = ctx.client_addr.ip();
 
         let (mut parts, body) = req.into_parts();
         // `orig_body` is the un-scanned streaming body; `body_bytes` is the
@@ -236,8 +235,26 @@ impl BrokerHandler {
             }
         }
         // Authorization: Basic <b64> — decode before matching.
-        if let Some(decoded) = basic_auth_decoded(&parts.headers) {
-            merge_phantoms(&mut phantoms, resolver::collect_phantoms(&decoded));
+        let basic = basic_auth_decoded(&parts.headers);
+        if let Some(decoded) = &basic {
+            merge_phantoms(&mut phantoms, resolver::collect_phantoms(decoded));
+        }
+
+        // A phantom from before 2.0 (`__sc__…__`) is no phantom any more: left (rename:keep)
+        // alone it would leave unauthenticated and come back as a bare 401.
+        // Refuse it and name its replacement. Scanned on the original URL,
+        // headers and decoded Basic auth, outside every 2.0 phantom (2.0.x
+        // only; delete in 2.1).
+        let old = std::iter::once(pq.as_str())
+            .chain(parts.headers.values().filter_map(|v| v.to_str().ok()))
+            .chain(basic.as_deref())
+            .find_map(resolver::old_phantom);
+        if let Some((old, new)) = old {
+            return err_response(
+                ScCode::PhantomRenamed,
+                &format!("{old} is the phantom name from before Sprott 2.0; use {new}"),
+            )
+            .into();
         }
 
         // ── unified body boundary (P1) ───────────────────────────────────────
@@ -315,7 +332,7 @@ impl BrokerHandler {
                 host = %dest_host,
                 "routed to an anchored host but the request carries no phantom — \
                  forwarded unauthenticated; include the connection's phantom \
-                 (e.g. __sc__<conn>__) if brokering was intended"
+                 (e.g. __sprott__<conn>__) if brokering was intended"
             );
             let body = body_bytes
                 .map(Body::from)
@@ -459,7 +476,7 @@ impl BrokerHandler {
 
         // ── team serve gate (shared-vault offline lease, etc.) ───────────────
         // Serve-time team policy is team-EXCLUSIVE (team-edition §9) and lives in
-        // the closed `safeclaw-ee` overlay behind this hook. The open build wires
+        // the closed `sprott-ee` overlay behind this hook. The open build wires
         // `NoopHooks` → no gate, so a personal vault is never leased. The overlay
         // impl reads `vault_is_shared` + `cloud_contact_age_secs` (both kept as
         // neutral core bookkeeping) to enforce the offline lease.
@@ -471,7 +488,7 @@ impl BrokerHandler {
         // Resolve the connection record. An explicit aux.connections entry wins;
         // otherwise, if <conn> names a known service (compiled or custom) we
         // synthesize its DEFAULT connection (conn == service, hosts derived from
-        // the service) so a default-connection phantom `__sc__<service>__`
+        // the service) so a default-connection phantom `__sprott__<service>__`
         // resolves and the resident default-connection credential — bootstrapped
         // into the cache under the service id — is reachable. Only a genuinely
         // unknown id fails closed.
@@ -546,7 +563,7 @@ impl BrokerHandler {
         // instead of falling back to the connection id.
         //
         // No def (raw connection): the request's own phantom names the role. A
-        // role-qualified `__sc__<conn>__<role>__` on a multi-secret raw
+        // role-qualified `__sprott__<conn>__<role>__` on a multi-secret raw
         // connection MUST flow into the op target — without it the approval
         // resolved a secret named after the CONNECTION, 400'd at apply, and the
         // relay then recorded the op rejected: the user's real approval read
@@ -843,7 +860,7 @@ impl BrokerHandler {
         // position. `substitute` leaves a phantom it can't fill verbatim, so
         // re-scan the wire-bound URL + headers (incl. decoded Basic). A survivor
         // means a header/URL phantom the resolver declined; block it rather than
-        // let the literal `__sc__…__` reach upstream (which returns a bare 401 the
+        // let the literal `__sprott__…__` reach upstream (which returns a bare 401 the
         // agent misreads as a dead credential). The body is intentionally NOT
         // scanned: a phantom there is inert placeholder text, never a secret.
         let leaked_phantom = {
@@ -1128,9 +1145,9 @@ impl BrokerHandler {
                 let mut b = Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-safeclaw-error", ScCode::ApprovalNeeded.as_str())
-                    .header("x-safeclaw-approve-url", approve_url.as_str())
-                    .header("x-safeclaw-op-id", op_id.as_str())
+                    .header("x-sprott-error", ScCode::ApprovalNeeded.as_str())
+                    .header("x-sprott-approve-url", approve_url.as_str())
+                    .header("x-sprott-op-id", op_id.as_str())
                     .header(header::LOCATION, format!("/op/{}", op_id));
                 let interval = crate::approval::store::POLL_INTERVAL_HINT_SECS;
                 b = b.header(header::RETRY_AFTER, interval.to_string());
@@ -1216,9 +1233,9 @@ impl BrokerHandler {
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .header("x-safeclaw-approve-url", approve_url.as_str())
-                    .header("x-safeclaw-op-id", op_id.as_str())
-                    .header("x-safeclaw-error", ScCode::HostNotAnchored.as_str())
+                    .header("x-sprott-approve-url", approve_url.as_str())
+                    .header("x-sprott-op-id", op_id.as_str())
+                    .header("x-sprott-error", ScCode::HostNotAnchored.as_str())
                     .body(Body::from(body))
                     .unwrap_or_else(|_| plain(StatusCode::FORBIDDEN, "host not anchored"))
                     .into();
@@ -1347,7 +1364,7 @@ fn wait_hint(approve_url: &str, op_id: &str) -> String {
 enum ResolveErr {
     /// The credential isn't in the session cache — needs a passkey (→ portal).
     NeedsApproval,
-    /// Bare `__sc__conn__` on a connection exposing several secrets.
+    /// Bare `__sprott__conn__` on a connection exposing several secrets.
     Ambiguous,
     /// An oauth2 `exposes` role the mint doesn't surface yet.
     Exposes(String),
@@ -1580,7 +1597,7 @@ fn body_over_cap(declared: u64, cap: u64) -> Response<Body> {
             "this request names a phantom but its {} exceeds the broker's inspectable \
              cap ({} bytes). The proxy will not forward a credential alongside a body \
              policy cannot see. If the request is legitimate, raise the daemon's \
-             --body-cap / SAFECLAW_BODY_CAP.",
+             --body-cap / SPROTT_BODY_CAP.",
             what, cap
         ),
     )
@@ -1605,7 +1622,7 @@ fn egress_error_response(err: hudsucker::hyper_util::client::legacy::Error) -> R
     err_response(code, &msg)
 }
 
-/// The `(x-safeclaw-error code, body)` for a forward-hop failure. Pure so the
+/// The `(x-sprott-error code, body)` for a forward-hop failure. Pure so the
 /// branching (connect vs not, proxy configured vs not) is testable without a
 /// `hyper_util` error, which has no public constructor. Never echoes the proxy
 /// URL — it can carry userinfo — pointing at `sc proxy show` instead.
@@ -1654,7 +1671,7 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 
 /// A plain-text 4xx/5xx for the MITM plane. Status comes from the registry
 /// (`ScCode::row`, the same row every surface uses); the machine token rides
-/// `x-safeclaw-error` AND leads the body (`Sprott: <code>: <msg>`), so the
+/// `x-sprott-error` AND leads the body (`Sprott: <code>: <msg>`), so the
 /// error is attributable even when a tool surfaces only one of the two.
 /// text/plain is deliberate — a Sprott refusal must never parse as the
 /// upstream service's payload.
@@ -1663,7 +1680,7 @@ fn err_response(code: ScCode, msg: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header("x-safeclaw-error", code.as_str())
+        .header("x-sprott-error", code.as_str())
         .body(Body::from(format!(
             "Sprott: {}: {}\n",
             code.as_str(),
@@ -1683,7 +1700,7 @@ fn err_response(code: ScCode, msg: &str) -> Response<Body> {
 fn proxy_auth_challenge() -> Response<Body> {
     Response::builder()
         .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
-        .header(header::PROXY_AUTHENTICATE, "Basic realm=\"safeclaw\"")
+        .header(header::PROXY_AUTHENTICATE, "Basic realm=\"sprott\"")
         .header(header::CONTENT_LENGTH, "0")
         .body(Body::empty())
         .unwrap_or_else(|_| {
@@ -1743,6 +1760,93 @@ fn write_forward_audit(
 mod tests {
     use super::*;
 
+    const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    fn test_handler() -> BrokerHandler {
+        let cfg = crate::config::Config {
+            state_dir: std::path::PathBuf::from(format!(
+                "/tmp/sprott-test-h1-{}",
+                std::process::id()
+            )),
+            port: 0,
+            proxy_port: 0,
+            listen: "127.0.0.1".into(),
+            origin: "http://localhost".into(),
+            relying_party: crate::passkey::webauthn::RelyingParty::exact(
+                "http://localhost",
+                "localhost",
+            ),
+            admin_key: None,
+            relay_url: None,
+            body_cap: crate::config::DEFAULT_BODY_CAP,
+        };
+        let state = AppState::new(cfg);
+        state.open_ledger_for_tests(&[]);
+        BrokerHandler::new(Arc::new(state))
+    }
+
+    async fn refusal_code(req: Request<Body>) -> Option<String> {
+        match test_handler().pipeline(LOOPBACK, req).await {
+            RequestOrResponse::Response(r) => r
+                .headers()
+                .get("x-sprott-error")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string),
+            RequestOrResponse::Request(_) => None,
+        }
+    }
+
+    /// H1: a phantom from before 2.0 in the URL, a header or decoded Basic
+    /// auth is refused with its replacement named, never forwarded.
+    #[tokio::test]
+    async fn an_old_phantom_is_refused_and_named() {
+        let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
+        for req in [
+            Request::builder()
+                .uri("https://github.com/o/r.git/info/refs")
+                .header("authorization", format!("Basic {}", b64(b"x:__sc__github__")))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("https://api.telegram.org/bot__sc__telegram__/getMe")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("https://api.stripe.com/v1/charges")
+                .header("authorization", "Bearer __sc__stripe__")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let RequestOrResponse::Response(resp) = test_handler().pipeline(LOOPBACK, req).await
+            else {
+                panic!("forwarded");
+            };
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(resp.headers()["x-sprott-error"], "phantom_renamed");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&body);
+            assert!(
+                body.starts_with("Sprott: phantom_renamed: __sc__")
+                    && body.contains(" is the phantom name from before Sprott 2.0; use __sprott__"),
+                "{body}"
+            );
+        }
+    }
+
+    /// A 2.0 phantom for connection `sc` contains `__sc__token__`; it is a
+    /// phantom, not an old one.
+    #[tokio::test]
+    async fn a_new_phantom_for_connection_sc_is_not_refused_as_old() {
+        let req = Request::builder()
+            .uri("https://api.example.com/v1")
+            .header("authorization", "Bearer __sprott__sc__token__")
+            .body(Body::empty())
+            .unwrap();
+        let code = refusal_code(req).await;
+        assert_ne!(code.as_deref(), Some("phantom_renamed"), "{code:?}");
+        assert_eq!(code.as_deref(), Some("agent_key"), "it reaches the agent check");
+    }
+
     #[test]
     fn an_unknown_connection_names_a_changed_key_only_when_flagged() {
         let (code, message) = unknown_connection_refusal(false, "future");
@@ -1766,7 +1870,7 @@ mod tests {
         let resp = body_over_cap(50_000_000, 32 * 1024 * 1024);
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(
-            resp.headers().get("x-safeclaw-error").unwrap(),
+            resp.headers().get("x-sprott-error").unwrap(),
             "broker_body_limit"
         );
         // Chunked variant (length unknown while buffering) still explains.
@@ -1971,7 +2075,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
         assert_eq!(
             res.headers().get(header::PROXY_AUTHENTICATE).unwrap(),
-            "Basic realm=\"safeclaw\"",
+            "Basic realm=\"sprott\"",
         );
     }
 
@@ -1995,7 +2099,7 @@ mod tests {
     #[test]
     fn rewrite_headers_strips_proxy_auth_and_injects_basic() {
         let mut values = HashMap::new();
-        values.insert("__sc__github__".to_string(), "ghp_REAL".to_string());
+        values.insert("__sprott__github__".to_string(), "ghp_REAL".to_string());
         let mut h = HeaderMap::new();
         h.insert(
             header::PROXY_AUTHORIZATION,
@@ -2003,7 +2107,7 @@ mod tests {
         );
         h.insert(
             header::AUTHORIZATION,
-            format!("Basic {}", b64(b"x:__sc__github__"))
+            format!("Basic {}", b64(b"x:__sprott__github__"))
                 .parse()
                 .unwrap(),
         );
@@ -2022,15 +2126,15 @@ mod tests {
 
     #[test]
     fn rewrite_headers_substitutes_basic_username_position() {
-        // git clone https://__sc__github__@github.com → Basic b64("phantom:") —
+        // git clone https://__sprott__github__@github.com → Basic b64("phantom:") —
         // the phantom rides the USERNAME slot (password empty). Regression pair
         // to the password-position test above.
         let mut values = HashMap::new();
-        values.insert("__sc__github__".to_string(), "ghp_REAL".to_string());
+        values.insert("__sprott__github__".to_string(), "ghp_REAL".to_string());
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
-            format!("Basic {}", b64(b"__sc__github__:"))
+            format!("Basic {}", b64(b"__sprott__github__:"))
                 .parse()
                 .unwrap(),
         );
@@ -2067,11 +2171,11 @@ mod tests {
     #[test]
     fn rewrite_headers_substitutes_bearer_phantom() {
         let mut values = HashMap::new();
-        values.insert("__sc__stripe_key__".to_string(), "sk_live_X".to_string());
+        values.insert("__sprott__stripe_key__".to_string(), "sk_live_X".to_string());
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
-            "Bearer __sc__stripe_key__".parse().unwrap(),
+            "Bearer __sprott__stripe_key__".parse().unwrap(),
         );
         let out = rewrite_headers(&h, &values, false);
         assert_eq!(

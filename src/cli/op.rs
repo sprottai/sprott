@@ -88,7 +88,7 @@ fn next_delay(retry_after: Option<&str>) -> Duration {
 
 pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
     // Corrupt config degrades to defaults, NOT a hardcoded localhost that
-    // would ignore an agent's $SAFECLAW_BROKER_URL (same rule as custodian.rs).
+    // would ignore an agent's $SPROTT_BROKER_URL (same rule as custodian.rs).
     let root = control_root(&load().unwrap_or_default());
     let poll_url = format!(
         "{}/op/{}",
@@ -99,7 +99,7 @@ pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
     // The command that minted the op already printed its link.
     eprintln!("Waiting for approval in the browser.");
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client: {}", e))?;

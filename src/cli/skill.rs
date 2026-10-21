@@ -16,8 +16,8 @@ const NAME: &str = "sprott";
 /// Before 1.5 the skill was named `safeclaw`, with this author in its frontmatter
 /// (also when `npx skills add` installed it). An install removes that copy, so an
 /// upgrade leaves one skill; anything else at that path is someone else's.
-const LEGACY_NAME: &str = "safeclaw";
-const LEGACY_AUTHOR: &str = "getsafeclaw";
+const LEGACY_NAME: &str = "safeclaw"; // rename:keep (the pre-1.5 skill this install removes)
+const LEGACY_AUTHOR: &str = "getsafeclaw"; // rename:keep
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Manifest {
@@ -67,7 +67,11 @@ pub fn run(sub: SkillSubcommand) -> Result<(), String> {
 
 pub fn manifest_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("cannot locate home dir")?;
-    Ok(home.join(".safeclaw").join("skill-manifest.json"))
+    Ok(manifest_path_in(&home))
+}
+
+fn manifest_path_in(home: &Path) -> PathBuf {
+    crate::names::data_dir_in(home).join("skill-manifest.json")
 }
 
 pub fn install(force: bool) -> Result<InstallReport, String> {
@@ -78,7 +82,7 @@ pub fn install(force: bool) -> Result<InstallReport, String> {
 fn install_at(home: &Path, force: bool) -> Result<InstallReport, String> {
     let skill_dir = home.join(".agents/skills").join(NAME);
     let skill_path = skill_dir.join("SKILL.md");
-    let manifest_path = home.join(".safeclaw/skill-manifest.json");
+    let manifest_path = manifest_path_in(home);
     let old_manifest = read_manifest(&manifest_path)?;
     let new_hash = sha256(SKILL.as_bytes());
     let current_hash = fs::read(&skill_path).ok().map(|b| sha256(&b));
@@ -224,7 +228,7 @@ fn remove_legacy(home: &Path, report: &mut InstallReport) {
     }
 }
 
-/// True when the frontmatter is the old skill's: `name: safeclaw` by `getsafeclaw`.
+/// True when the frontmatter is the old skill's: `name: safeclaw` by `getsafeclaw`. rename:keep
 fn is_legacy_skill(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -266,7 +270,7 @@ pub fn remove(force: bool) -> Result<Vec<PathBuf>, String> {
 }
 
 fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
-    let manifest_path = home.join(".safeclaw/skill-manifest.json");
+    let manifest_path = manifest_path_in(home);
     let Some(manifest) = read_manifest(&manifest_path)? else {
         return Ok(Vec::new());
     };

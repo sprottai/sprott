@@ -86,7 +86,7 @@ async fn apply_live() -> Result<(), String> {
         "{}/proxy/reload",
         active::control_root(&cfg).trim_end_matches('/')
     );
-    let client = match reqwest::Client::builder()
+    let client = match crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
     {

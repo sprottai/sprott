@@ -583,8 +583,8 @@ async fn self_wipe_and_logout(state: &Arc<AppState>) -> ! {
     }
     // 2. Delete the device-key (this host's cloud credential): once gone, the bearer
     //    can never be matched again.
-    if let Some(home) = dirs::home_dir() {
-        let _ = std::fs::remove_file(home.join(".safeclaw").join("device-key"));
+    if let Some(dir) = crate::names::data_dir() {
+        let _ = std::fs::remove_file(dir.join("device-key"));
     }
     // 3. Clear the pairing from config + known-vaults (mirrors `sc logout`).
     if let Err(e) = crate::cli::active::clear_pairing() {
@@ -1406,7 +1406,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let signer = DeviceRequestSigner::new(dik, dev.clone());
-        let client = reqwest::Client::new();
+        let client = crate::util::http_builder().build().unwrap();
         let l = fetch_ledger(&client, &format!("http://{}", addr), &o.user_id(), &signer)
             .await
             .unwrap();

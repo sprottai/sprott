@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     let _ = match text.split_once('\0') {
-        Some((service, policy)) => safeclaw::service::gate::admit(None, service, Some(policy)),
-        None => safeclaw::service::gate::admit(None, &text, None),
+        Some((service, policy)) => sprott::service::gate::admit(None, service, Some(policy)),
+        None => sprott::service::gate::admit(None, &text, None),
     };
 });

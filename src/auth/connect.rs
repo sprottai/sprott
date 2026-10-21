@@ -1829,7 +1829,7 @@ refresh_token = "REFRESH_TOKEN"
         type S = sudp::primitives::StdPrimitives;
         let cfg = crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-connect-prec-{}",
+                "/tmp/sprott-test-connect-prec-{}",
                 std::process::id()
             )),
             port: 0,

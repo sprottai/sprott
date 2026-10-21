@@ -10,7 +10,7 @@
 //!
 //! The durable `snp_sk_live_` key can BUY THINGS (within the key's Snaplii-
 //! side daily cap); it is the mint's input and therefore never injectable —
-//! the agent only ever writes `Bearer __sc__<conn>__` and the broker injects
+//! the agent only ever writes `Bearer __sprott__<conn>__` and the broker injects
 //! the minted JWT at egress. Neither the key nor the JWT enters the agent.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

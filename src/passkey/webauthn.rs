@@ -13,9 +13,9 @@
 //!   7. ECDSA-P-256 verify of `authenticatorData ‖ SHA-256(clientDataJSON)`.
 //!
 //! Adapter responsibilities:
-//!   - Bridge sudp's `Error::AuthorizationInvalid` → safeclaw's
+//!   - Bridge sudp's `Error::AuthorizationInvalid` → Sprott's
 //!     `AppError::Unauthorized`.
-//!   - Adapt the positional API safeclaw call sites use (a [`RelyingParty`]:
+//!   - Adapt the positional API Sprott call sites use (a [`RelyingParty`]:
 //!     accepted origins and RP IDs) to sudp's `AuthenticatorContext` (one
 //!     origin, one RP ID): the reported origin when it is on the list, and the
 //!     listed RP ID the authenticator data names.
@@ -193,7 +193,7 @@ fn reported_origin(assertion: &AssertionData) -> Option<String> {
 
 /// Assertion data sent by the browser client.
 ///
-/// Re-export of [`sudp::passkey::WebAuthnAssertion`] so safeclaw's own call
+/// Re-export of [`sudp::passkey::WebAuthnAssertion`] so Sprott's own call
 /// sites and serde shapes remain unchanged.
 pub type AssertionData = WebAuthnAssertion;
 

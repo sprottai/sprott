@@ -2,8 +2,8 @@ setup = """
 CircleCI's v2 API takes the token in a Circle-Token header. Put the phantom
 there; the proxy substitutes it at egress, the token never enters the agent:
   sprott run -- curl https://circleci.com/api/v2/me \\
-    -H "Circle-Token: __sc__circleci__"
-Multi-account: switch the phantom value (__sc__circleci_work__).
+    -H "Circle-Token: __sprott__circleci__"
+Multi-account: switch the phantom value (__sprott__circleci_work__).
 """
 
 [service]

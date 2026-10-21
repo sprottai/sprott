@@ -13,8 +13,8 @@
 //!   - RAW (default): `--host <domain>` (repeatable). A raw connection's SLOT is
 //!     the vault KEY itself, so `--from-secret KEY` is its short form. Anchors
 //!     its own hosts; stores new values at their BARE uppercase KEY (the vault
-//!     is a flat env namespace). Reachable via `__sc__<name>__` (sole) or
-//!     `__sc__<name>__<role>__` (several).
+//!     is a flat env namespace). Reachable via `__sprott__<name>__` (sole) or
+//!     `__sprott__<name>__<role>__` (several).
 //!   - SERVICE-backed: `--service <id>` binds a catalog service — its hosts and
 //!     declared secret roles. SLOT is a role (case-insensitive), and
 //!     `--from-secret` needs the `ROLE=KEY` form. Every role must be filled: a

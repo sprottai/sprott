@@ -2,8 +2,8 @@ setup = """
 Neon's API takes a bearer API key. Put the phantom in the header; the proxy
 substitutes it at egress, the key never enters the agent:
   sprott run -- curl https://console.neon.tech/api/v2/projects \\
-    -H "Authorization: Bearer __sc__neon__"
-Multi-account: switch the phantom value (__sc__neon_work__).
+    -H "Authorization: Bearer __sprott__neon__"
+Multi-account: switch the phantom value (__sprott__neon_work__).
 """
 
 [service]

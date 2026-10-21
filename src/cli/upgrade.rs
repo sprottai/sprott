@@ -36,17 +36,18 @@ fn latest_base() -> String {
     format!("https://github.com/{}/releases/latest/download", REPO)
 }
 
-/// Map the build target to the release asset name (matches install.sh + CI).
-/// The names keep the `safeclaw-` prefix: every installed `sc upgrade`, back to
-/// the first release, downloads exactly these.
-fn asset_name() -> Result<&'static str, String> {
-    Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "safeclaw-linux-x86_64",
-        ("linux", "aarch64") => "safeclaw-linux-aarch64",
-        ("macos", "x86_64") => "safeclaw-macos-x86_64",
-        ("macos", "aarch64") => "safeclaw-macos-aarch64",
+/// Map the build target to the release asset name (matches install.sh + CI):
+/// `sprott-<os>-<arch>`. Releases from 2.0 on publish only these; a 1.x
+/// `sc upgrade` finds no checksum for its old name and changes nothing.
+fn asset_name() -> Result<String, String> {
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
+        ("macos", "aarch64") => "macos-aarch64",
         (os, arch) => return Err(format!("unsupported platform {}/{}", os, arch)),
-    })
+    };
+    Ok(format!("{}-{}", crate::names::ASSET_PREFIX, platform))
 }
 
 /// Decide the release channel and WHY, before any network call. Explicit flags
@@ -184,7 +185,6 @@ async fn resolve_base(client: &reqwest::Client, pre: bool) -> Result<(String, St
     let url = format!("https://api.github.com/repos/{}/releases?per_page=100", REPO);
     let resp = client
         .get(&url)
-        .header("User-Agent", "safeclaw-upgrade")
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -253,23 +253,87 @@ mod tests {
         assert_eq!(newest_tag(&serde_json::json!([])), None);
     }
 
-    /// Every installed `sc upgrade` looks for these exact asset names, so
-    /// install.sh and the release workflow must keep publishing them.
+    /// `sprott upgrade` looks for these exact asset names, so install.sh and
+    /// the release workflow must publish them, and only them.
     #[test]
     fn asset_names_match_install_sh_and_the_release_workflow() {
         let install = include_str!("../../install.sh");
         let workflow = include_str!("../../.github/workflows/release.yml");
         for asset in [
-            "safeclaw-linux-x86_64",
-            "safeclaw-linux-aarch64",
-            "safeclaw-macos-x86_64",
-            "safeclaw-macos-aarch64",
+            "sprott-linux-x86_64",
+            "sprott-linux-aarch64",
+            "sprott-macos-x86_64",
+            "sprott-macos-aarch64",
         ] {
             assert!(install.contains(&format!("ASSET=\"{asset}\"")), "{asset}");
             assert!(workflow.contains(&format!("artifact: {asset}")), "{asset}");
         }
-        assert!(workflow.contains("sha256sum safeclaw-* > SHA256SUMS"));
-        assert!(asset_name().unwrap().starts_with("safeclaw-"));
+        assert!(workflow.contains("sha256sum sprott-* > SHA256SUMS"));
+        assert_eq!(workflow.matches("artifact: ").count(), 4, "four assets, no aliases");
+        assert!(asset_name().unwrap().starts_with("sprott-"));
+    }
+
+    /// install.sh's own layout lines, run over each starting layout: `sprott`
+    /// ends up the file, `sc` and `safeclaw` links to it; a `safeclaw` that is
+    /// someone else's file is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn install_sh_makes_sprott_the_file_and_links_sc_and_safeclaw() {
+        let install = include_str!("../../install.sh");
+        let start = install.find("mv \"${DOWNLOAD}\" \"${DEST}/sprott\"").unwrap();
+        let end = start + install[start..].find("\nfi\n").unwrap() + 4;
+        let layout = &install[start..end];
+
+        type Seed = fn(&std::path::Path);
+        let layouts: [(&str, Seed, bool); 4] = [
+            ("fresh", |_| {}, true),
+            ("1.4", |d| std::fs::write(d.join("sc"), "old").unwrap(), true),
+            (
+                "1.5",
+                |d| {
+                    std::fs::write(d.join("sc"), "old").unwrap();
+                    std::os::unix::fs::symlink("sc", d.join("sprott")).unwrap();
+                    std::os::unix::fs::symlink("sc", d.join("safeclaw")).unwrap();
+                },
+                true,
+            ),
+            (
+                "foreign safeclaw",
+                |d| std::fs::write(d.join("safeclaw"), "theirs").unwrap(),
+                false,
+            ),
+        ];
+        for (name, seed, ours) in layouts {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
+            seed(d);
+            std::fs::write(d.join(".dl"), "new").unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-ec")
+                .arg(layout)
+                .env("DEST", d)
+                .env("DOWNLOAD", d.join(".dl"))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{name}: {out:?}");
+            let meta = std::fs::symlink_metadata(d.join("sprott")).unwrap();
+            assert!(meta.file_type().is_file(), "{name}: sprott is the file");
+            assert_eq!(std::fs::read_to_string(d.join("sprott")).unwrap(), "new", "{name}");
+            assert_eq!(
+                std::fs::read_link(d.join("sc")).unwrap(),
+                std::path::Path::new("sprott"),
+                "{name}"
+            );
+            if ours {
+                assert_eq!(
+                    std::fs::read_link(d.join("safeclaw")).unwrap(),
+                    std::path::Path::new("sprott"),
+                    "{name}"
+                );
+            } else {
+                assert_eq!(std::fs::read_to_string(d.join("safeclaw")).unwrap(), "theirs");
+            }
+        }
     }
 
     #[test]
@@ -316,7 +380,7 @@ mod tests {
 
 pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     let asset = asset_name()?;
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;
@@ -346,7 +410,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         .text()
         .await
         .map_err(|e| format!("read SHA256SUMS: {}", e))?;
-    let expected = expected_hash(&sums, asset)
+    let expected = expected_hash(&sums, &asset)
         .ok_or_else(|| format!("no checksum for {} in the latest release", asset))?;
 
     // 2. Download the asset.
@@ -375,7 +439,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     }
 
     // 4. No-op when the verified download equals the running binary. Follow
-    //    symlinks to the real file: `sc` and `safeclaw` may be links to
+    //    symlinks to the real file: `sc` and the other alias are links to
     //    `sprott`, and macOS reports the invoked (link) path, so replacing that
     //    path would turn one alias into a separate copy and leave the rest old.
     let current = std::env::current_exe().map_err(|e| format!("locate current binary: {}", e))?;
@@ -397,7 +461,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
     let dir = current
         .parent()
         .ok_or_else(|| "current binary has no parent dir".to_string())?;
-    let tmp = dir.join(format!(".sc-upgrade-{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(".sprott-upgrade-{}.tmp", std::process::id()));
     std::fs::write(&tmp, &bytes).map_err(|e| {
         format!(
             "write {} (need write access to {}): {}",
@@ -437,9 +501,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), String> {
         Some(v) => eprintln!(
             "Upgraded sprott {} → {} ({}).",
             crate::build_version(),
-            v.strip_prefix("sprott ")
-                .or_else(|| v.strip_prefix("safeclaw "))
-                .unwrap_or(v),
+            v.strip_prefix("sprott ").unwrap_or(v),
             &actual[..12]
         ),
         None => eprintln!("Upgraded {} ({}).", current.display(), &actual[..12]),

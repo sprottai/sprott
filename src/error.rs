@@ -100,6 +100,10 @@ pub enum ScCode {
     NoVault,
     OauthMint,
     PhantomPlainHttp,
+    /// A phantom from before Sprott 2.0 (`__sc__…__`) in a request to a (rename:keep)
+    /// brokered host; the message names its `__sprott__…__` replacement
+    /// (2.0.x only).
+    PhantomRenamed,
     PhantomUnresolved,
     PolicyDenied,
     RefreshForbidden,
@@ -310,6 +314,13 @@ impl ScCode {
                 400,
                 "phantom_plain_http",
                 "Phantom over plain HTTP",
+                "fix_request",
+                "request",
+            ),
+            PhantomRenamed => (
+                400,
+                "phantom_renamed",
+                "Phantom from before Sprott 2.0",
                 "fix_request",
                 "request",
             ),
@@ -666,6 +677,7 @@ mod tests {
             NoVault,
             OauthMint,
             PhantomPlainHttp,
+            PhantomRenamed,
             PhantomUnresolved,
             PolicyDenied,
             RefreshForbidden,

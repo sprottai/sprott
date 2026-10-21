@@ -1,10 +1,10 @@
-//! `safeclaw doctor` — quick self-check for "is my CLI set up right?"
+//! `sprott doctor` — quick self-check for "is my CLI set up right?"
 //!
 //! Read-only. Reports on:
 //!   - active profile (which custodian + vault)
 //!   - custodian reachability (`/health`)
 //!   - whether the vault dir exists on the custodian (vault id resolves)
-//!   - whether `$SAFECLAW_API_KEY` is set (informational — the agent's
+//!   - whether `$SPROTT_API_KEY` is set (informational — the agent's
 //!     identity; required for credential substitution, §8)
 //!
 //! Each check prints a single line `[ok|warn|fail] message`. Exits with
@@ -95,23 +95,23 @@ pub async fn run(json: bool) -> Result<(), String> {
         ),
     );
 
-    // Environment overrides (debug aid): stale/mistaken SAFECLAW_* env vars are a
+    // Environment overrides (debug aid): stale/mistaken SPROTT_* env vars are a
     // recurring cause of "why is it talking to the wrong port/host?" — a leftover
     // override silently wins over config. List the routing/location vars that are
     // actually set (names + values; these carry no secrets). Secrets are never
-    // printed here — $SAFECLAW_API_KEY has its own row below.
+    // printed here — $SPROTT_API_KEY has its own row below.
     {
         const OVERRIDE_VARS: &[&str] = &[
-            "SAFECLAW_PORT",
-            "SAFECLAW_PROXY_PORT",
-            "SAFECLAW_BROKER_URL",
-            "SAFECLAW_DAEMON_URL",
-            "SAFECLAW_CLOUD_URL",
-            "SAFECLAW_VAULT_URL",
-            "SAFECLAW_VAULT_ID",
-            "SAFECLAW_STATE_DIR",
-            "SAFECLAW_DATA",
-            "SAFECLAW_CA_PATH",
+            "SPROTT_PORT",
+            "SPROTT_PROXY_PORT",
+            "SPROTT_BROKER_URL",
+            "SPROTT_DAEMON_URL",
+            "SPROTT_CLOUD_URL",
+            "SPROTT_VAULT_URL",
+            "SPROTT_VAULT_ID",
+            "SPROTT_STATE_DIR",
+            "SPROTT_DATA",
+            "SPROTT_CA_PATH",
         ];
         let set: Vec<String> = OVERRIDE_VARS
             .iter()
@@ -127,6 +127,11 @@ pub async fn run(json: bool) -> Result<(), String> {
         } else {
             report.push(Mark::Ok, format!("env overrides: {}", set.join(", ")));
         }
+    }
+
+    // The 2.0 move (cli/migrate.rs): anything it left for a person to finish.
+    for finding in crate::cli::migrate::doctor_findings() {
+        report.push(Mark::Warn, finding);
     }
 
     // Config file
@@ -160,7 +165,7 @@ pub async fn run(json: bool) -> Result<(), String> {
     };
 
     // Custodian health
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("client init: {}", e))?;
@@ -190,7 +195,7 @@ pub async fn run(json: bool) -> Result<(), String> {
                     report.push(
                         Mark::Warn,
                         format!(
-                            "vault data: {} record(s) could not be read and were skipped (details in ~/.safeclaw/daemon.log)",
+                            "vault data: {} record(s) could not be read and were skipped (details in ~/.sprott/daemon.log)",
                             unreadable
                         ),
                     );
@@ -237,18 +242,18 @@ pub async fn run(json: bool) -> Result<(), String> {
     }
 
     // Agent identity (informational): a current agent authenticates by its AIK
-    // (`SAFECLAW_AGENT_IDENTITY`, a path to an identity file `sc run` signs with);
-    // a legacy agent may instead carry `SAFECLAW_API_KEY`. Either one lets this
+    // (`SPROTT_AGENT_IDENTITY`, a path to an identity file `sc run` signs with);
+    // a legacy agent may instead carry `SPROTT_API_KEY`. Either one lets this
     // shell broker credentials, and a human shell needs neither. Report whichever
     // is present so a fully set-up keyless agent is never told it has no agent env.
-    match std::env::var("SAFECLAW_AGENT_IDENTITY") {
+    match std::env::var("SPROTT_AGENT_IDENTITY") {
         Ok(v) if !v.is_empty() => {
-            report.push(Mark::Ok, format!("$SAFECLAW_AGENT_IDENTITY: set ({})", v))
+            report.push(Mark::Ok, format!("$SPROTT_AGENT_IDENTITY: set ({})", v))
         }
-        _ => match std::env::var("SAFECLAW_API_KEY") {
+        _ => match std::env::var("SPROTT_API_KEY") {
             Ok(v) if !v.is_empty() => report.push(
                 Mark::Ok,
-                format!("$SAFECLAW_API_KEY: set ({} chars, legacy)", v.len()),
+                format!("$SPROTT_API_KEY: set ({} chars, legacy)", v.len()),
             ),
             _ => report.push(
                 Mark::Ok,

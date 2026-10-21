@@ -7,7 +7,7 @@
 //! port-aware; wildcards never reach it (they only constrain what an instance
 //! may pin, checked at connect time via `wildcard_matches`).
 //!
-//! The phantom builders are the single source for the `__sc__<conn>__[<role>__]`
+//! The phantom builders are the single source for the `__sprott__<conn>__[<role>__]`
 //! strings the discovery surfaces hand agents, so the format lives in exactly
 //! one place.
 
@@ -193,13 +193,18 @@ pub fn host_union<'a>(
 /// The default shorthand phantom — the connection's sole injectable secret (or
 /// an oauth2 connection's minted access token).
 pub fn short_phantom(conn_id: &str) -> String {
-    format!("__sc__{}__", conn_id)
+    format!("{}{}__", crate::names::PHANTOM_PREFIX, conn_id)
 }
 
 /// A role-qualified phantom — one of several injectable secrets, or an oauth2
 /// `exposes` value. The role segment is the role lowercased.
 pub fn role_phantom(conn_id: &str, role: &str) -> String {
-    format!("__sc__{}__{}__", conn_id, role.to_ascii_lowercase())
+    format!(
+        "{}{}__{}__",
+        crate::names::PHANTOM_PREFIX,
+        conn_id,
+        role.to_ascii_lowercase()
+    )
 }
 
 fn insert_direct(map: &mut BTreeMap<String, String>, conn_id: &str, roles: &[String]) {
@@ -387,18 +392,18 @@ mod tests {
         let m = phantoms_for("github", &sole);
         assert_eq!(
             m.get("GITHUB_TOKEN").map(String::as_str),
-            Some("__sc__github__")
+            Some("__sprott__github__")
         );
 
         let multi = direct("bb", &["api.bitbucket.org"], &["USERNAME", "API_TOKEN"]);
         let m = phantoms_for("bb", &multi);
         assert_eq!(
             m.get("USERNAME").map(String::as_str),
-            Some("__sc__bb__username__")
+            Some("__sprott__bb__username__")
         );
         assert_eq!(
             m.get("API_TOKEN").map(String::as_str),
-            Some("__sc__bb__api_token__")
+            Some("__sprott__bb__api_token__")
         );
     }
 
@@ -421,10 +426,10 @@ client_id = "public-client"
 "#;
         let def: ServiceDef = crate::service::gate::admit_toml(toml).unwrap();
         let m = phantoms_for("gmail", &def);
-        assert_eq!(m.get("ACCESS").map(String::as_str), Some("__sc__gmail__"));
+        assert_eq!(m.get("ACCESS").map(String::as_str), Some("__sprott__gmail__"));
         assert_eq!(
             m.get("ACCOUNT_ID").map(String::as_str),
-            Some("__sc__gmail__account_id__")
+            Some("__sprott__gmail__account_id__")
         );
         // The refresh secret is never surfaced as an injectable phantom.
         assert!(!m.contains_key("GMAIL_REFRESH_TOKEN"));

@@ -3,6 +3,12 @@
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The builder every outbound HTTP client starts from: `User-Agent` names this
+/// binary (`sprott/<version>`). reqwest sends no User-Agent by default.
+pub fn http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().user_agent(crate::names::USER_AGENT)
+}
+
 /// Current wall-clock time in unix seconds, saturating to 0 before the epoch
 /// (never in practice). One shared definition for the identity-wave call sites
 /// (`device_auth`, `agent_pop`/`agent_shim`, the proxy handler) that each used to

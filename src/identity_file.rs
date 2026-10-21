@@ -8,10 +8,10 @@
 //! `sc login`.
 //!
 //! Paths (§5):
-//!   - AIK: `~/.safeclaw/agents/<name>/identity` — selected per wrapped child via
-//!     the env var `SAFECLAW_AGENT_IDENTITY` (a PATH, not a secret).
-//!   - DIK: `~/.safeclaw/device/identity` — daemon-local, one per machine, no env
-//!     (migrated from the legacy `~/.safeclaw/device-key` bearer file).
+//!   - AIK: `~/.sprott/agents/<name>/identity` — selected per wrapped child via
+//!     the env var `SPROTT_AGENT_IDENTITY` (a PATH, not a secret).
+//!   - DIK: `~/.sprott/device/identity` — daemon-local, one per machine, no env
+//!     (migrated from the legacy `~/.sprott/device-key` bearer file).
 //!
 //! File = 0600 JSON `{ "v":1, "kind":"agent"|"device", "id":"ag_…|dev_…",
 //! "seed":"<base64-32>" }`. The `seed` is the 32-byte secret; `id` is stored for
@@ -59,12 +59,11 @@ fn kind_from_str(s: &str) -> Result<IdKind, String> {
     }
 }
 
-/// The identity file path for an agent named `name` (§5). `<home>/.safeclaw/
+/// The identity file path for an agent named `name` (§5). `<home>/.sprott/
 /// agents/<dir>/identity`, where `<dir>` is [`agent_dir_name`].
 pub fn agent_identity_path(name: &str) -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
-    Ok(home
-        .join(".safeclaw")
+    let dir = crate::names::data_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
+    Ok(dir
         .join("agents")
         .join(agent_dir_name(name))
         .join("identity"))
@@ -100,11 +99,11 @@ pub fn agent_dir_name(name: &str) -> String {
     format!("{slug}-{tag}")
 }
 
-/// The daemon-local device identity file path (§5). `<home>/.safeclaw/device/
+/// The daemon-local device identity file path (§5). `<home>/.sprott/device/
 /// identity`.
 pub fn device_identity_path() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
-    Ok(home.join(".safeclaw").join("device").join("identity"))
+    let dir = crate::names::data_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
+    Ok(dir.join("device").join("identity"))
 }
 
 /// Resolve a stored `seed` (under `kind`) to its signing identity + self-

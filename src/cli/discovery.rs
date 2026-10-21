@@ -29,7 +29,7 @@ pub struct ConnRow {
 /// Fetch + project the vault's usable connections. `daemon` is the control-plane
 /// root (`http://host:CONTROL_PORT`); `vault` the vault id.
 pub async fn connections(daemon: &str, vault: &str) -> Result<Vec<ConnRow>, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("http client: {}", e))?;
@@ -128,10 +128,10 @@ mod tests {
             "connections": [
                 { "id": "github", "connected": true,
                   "hosts": ["api.github.com", "github.com"],
-                  "phantoms": ["__sc__github__"] },
+                  "phantoms": ["__sprott__github__"] },
                 // not connected → dropped
                 { "id": "stripe", "connected": false,
-                  "hosts": ["api.stripe.com"], "phantoms": ["__sc__stripe__"] },
+                  "hosts": ["api.stripe.com"], "phantoms": ["__sprott__stripe__"] },
                 // connected but no phantoms → dropped
                 { "id": "public", "connected": true, "hosts": ["x.com"] },
             ]
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "github");
         assert_eq!(rows[0].hosts, vec!["api.github.com", "github.com"]);
-        assert_eq!(rows[0].phantoms, vec!["__sc__github__".to_string()]);
+        assert_eq!(rows[0].phantoms, vec!["__sprott__github__".to_string()]);
     }
 
     #[test]

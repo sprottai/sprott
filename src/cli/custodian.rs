@@ -46,7 +46,7 @@ pub fn registry(json: bool) -> Result<(), String> {
 async fn fetch_print(_args: CommonArgs, path: &str) -> Result<(), String> {
     let daemon = resolve_daemon_url()?;
     let url = format!("{}{}", daemon.trim_end_matches('/'), path);
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("client init: {}", e))?;
@@ -72,7 +72,7 @@ async fn fetch_print(_args: CommonArgs, path: &str) -> Result<(), String> {
 
 /// The daemon control root. `resolve_active` errs only when no vault is
 /// selected — fall back to the SAME shared derivation (env-first host), not a
-/// hardcoded localhost that would ignore an agent's `$SAFECLAW_BROKER_URL`.
+/// hardcoded localhost that would ignore an agent's `$SPROTT_BROKER_URL`.
 fn resolve_daemon_url() -> Result<String, String> {
     if let Ok((c, _)) = resolve_active(None) {
         return Ok(c);

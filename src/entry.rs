@@ -1,6 +1,6 @@
 //! The daemon/CLI entrypoint, factored out of `main.rs` so BOTH binaries can
-//! reuse it: the open-source `sprott`/`sc`/`safeclaw` bins call [`run_cli`] with
-//! [`crate::team_hooks::NoopHooks`], and the closed `safeclaw-ee` overlay's bin
+//! reuse it: the open-source `sprott` bin calls [`run_cli`] with
+//! [`crate::team_hooks::NoopHooks`], and the closed `sprott-ee` overlay's bin
 //! calls it with its real hooks. `hooks` only reaches the daemon (`run_daemon` →
 //! `AppState::with_team_hooks`); every other verb is identical across builds.
 //! This is the ONE seam of the open/closed split (team-edition §9): a personal
@@ -21,28 +21,37 @@ use crate::team_hooks::TeamHooks;
 /// Parse argv and run the requested command. `hooks` is injected into the daemon
 /// (`serve`) path only; all other verbs ignore it.
 pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error::Error>> {
-    // A pre-1.5 install upgraded in place has only `sc`; add `sprott` beside it.
-    cli::command_name::ensure_canonical_beside();
     // Loopback is never proxied: pin localhost into NO_PROXY before any HTTP
     // client is built, so a corporate HTTPS_PROXY (or the one `sc run` injects)
     // can't trap our calls to the local daemon. reqwest honours env proxies by
     // default, so shaping the env here covers every client at once.
     cli::proxy_env::pin_localhost_no_proxy();
+
+    // Parse through `cli::help::command()` (not `Cli::parse()`) so the top-level
+    // `sc` / `sc --help` prints our grouped, gh-style help; per-command help is
+    // still clap's default. Help and `--version` exit inside parsing.
+    let matches = cli::help::command().get_matches();
+    let verbose = matches.get_count("verbose");
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // 2.0: a 1.x `~/.safeclaw` moves to `~/.sprott` before anything reads it. (rename:keep)
+    // A refused move stops the command, so nothing creates `~/.sprott` while the
+    // old directory still waits. `version`, `git-credential` and `serve` never
+    // move (cli/migrate.rs).
+    if let Err(msg) = cli::migrate::before_command(&cli.command) {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
+
     // Apply the device's configured EGRESS proxy (`sc proxy set`) to this
     // process's env before any client is built — the launchd/systemd daemon does
     // not inherit the operator's shell `HTTPS_PROXY`, so this is how the daemon's
     // backend sync, OAuth exchange, and MITM forward reach a corporate/on-demand
     // or region-required upstream. It covers every remote host (the Sprott
     // backend included, so `sc agent`/`sc login`/sync all honour it); a real
-    // shell `HTTPS_PROXY` still wins, and only loopback stays direct.
+    // shell `HTTPS_PROXY` still wins, and only loopback stays direct. After the
+    // move, so the first command after it reads the setting from `~/.sprott`.
     cli::egress_proxy::apply_to_env();
-
-    // Parse through `cli::help::command()` (not `Cli::parse()`) so the top-level
-    // `sc` / `sc --help` prints our grouped, gh-style help; per-command help is
-    // still clap's default.
-    let matches = cli::help::command().get_matches();
-    let verbose = matches.get_count("verbose");
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // Record the global `--vault` once; `resolve_active` reads it as the top of
     // the vault chain (flag > env pin > config default).
     cli::active::set_vault_flag(cli.vault.clone());
@@ -337,6 +346,17 @@ async fn run_daemon(
     verbose: u8,
     hooks: Arc<dyn TeamHooks>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // First, before anything touches the disk: while a 1.x `~/.safeclaw` waits (rename:keep)
+    // to be moved, a daemon would create `~/.sprott` with fresh keys and the
+    // move could never run. Exit 0, so neither systemd's Restart=on-failure nor
+    // launchd's KeepAlive{SuccessfulExit=false} loops on it.
+    if let Some(home) = dirs::home_dir() {
+        if cli::migrate::serve_must_wait(&home) {
+            eprintln!("{}", cli::migrate::SERVE_WAIT_MSG);
+            return Ok(());
+        }
+    }
+
     // A `-v/-vv/-vvv` on `sc serve` raises the daemon's own filter; an explicit
     // RUST_LOG still wins.
     tracing_subscriber::fmt()
@@ -363,7 +383,7 @@ async fn run_daemon(
     crate::sync::pull_on_start(&config.state_dir).await;
 
     // Inject the team-edition hooks (team-edition §9): the open build passes
-    // `NoopHooks`, the closed `safeclaw-ee` overlay its real ones. This is the
+    // `NoopHooks`, the closed `sprott-ee` overlay its real ones. This is the
     // single point where the official binary's team behavior enters the daemon.
     let state = Arc::new(AppState::new(config.clone()).with_team_hooks(hooks));
 
@@ -429,7 +449,7 @@ async fn run_daemon(
     // Two localhost listeners (2026-07-03 phantom-only proxy): the control/API
     // plane (op/approve/passkeys/registry/admin) on CONTROL_PORT here, and the
     // resident MITM credential proxy on PROXY_PORT (spawned above). The agent
-    // reaches control only via $SAFECLAW_VAULT_URL, so the port is env-addressed.
+    // reaches control only via $SPROTT_VAULT_URL, so the port is env-addressed.
     let addr = SocketAddr::new(listen_ip, config.port);
     let app = app_router(state.clone());
 
@@ -439,7 +459,7 @@ async fn run_daemon(
         rp_ids = %config.relying_party.rp_ids.join(","),
         webauthn_origins = %config.relying_party.origins.join(","),
         origin = %config.origin,
-        "safeclaw daemon starting"
+        "sprott daemon starting"
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

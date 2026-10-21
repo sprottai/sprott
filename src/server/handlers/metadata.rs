@@ -677,7 +677,7 @@ pub fn open_view_for_grant_keep_key(
             )?;
             // Team serve-time policy (the shared-vault owner lock-list: which
             // owner-only config the backend write-gates) is CLOSED: it lives in
-            // the private safeclaw-ee overlay behind this seam, so a personal /
+            // the private sprott-ee overlay behind this seam, so a personal /
             // open-source build (NoopHooks) registers nothing. team-edition §9.
             state.team.on_vault_unlocked(state, vault_id, &k);
             return Ok((view, k));

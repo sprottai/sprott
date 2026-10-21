@@ -9,7 +9,7 @@
 //! canonical-encoding contract.
 //!
 //! The matching client-side implementation lives in
-//! `safeclaw-pro-frontend/lib/vault-crypto.ts` (see `canonicalize`).
+//! the frontend's `lib/vault-crypto.ts` (see `canonicalize`).
 
 use serde_json::Value;
 use sudp::canonical as sudp_canonical;

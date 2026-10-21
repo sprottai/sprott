@@ -199,7 +199,7 @@ pub fn spawn_cancel(
 /// the `sc_device_` device-key — exactly the channel the Slice-3 blob sync
 /// already uses. Backend gate: `resolveAuth` + `isOwnedVaultId`.
 ///
-/// Fallback: an operator-supplied `SAFECLAW_RELAY_URL` + `SAFECLAW_ADMIN_KEY`
+/// Fallback: an operator-supplied `SPROTT_RELAY_URL` + `SPROTT_ADMIN_KEY`
 /// (self-host / SaaS-custodian deployments that pre-date pairing).
 ///
 /// `None` ⇒ no relay ⇒ purely local daemon; the local op-page ceremony stands.
@@ -570,7 +570,7 @@ impl ApplyFailure {
 }
 
 async fn apply_grant(state: Arc<AppState>, op_id: &str, grant: Value) -> Result<(), ApplyFailure> {
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| ApplyFailure::transport(format!("loopback client init: {}", e)))?;
@@ -627,7 +627,7 @@ fn refusal_keeps_op_pending(code: Option<&str>) -> bool {
 /// so `sc op wait` and the console never dress it up as "user rejected".
 async fn apply_reject(state: Arc<AppState>, op_id: &str, reason: Option<&str>) {
     let url = format!("http://127.0.0.1:{}/op/{}/reject", state.config.port, op_id);
-    if let Ok(client) = reqwest::Client::builder()
+    if let Ok(client) = crate::util::http_builder()
         .timeout(Duration::from_secs(10))
         .build()
     {
@@ -692,7 +692,7 @@ mod tests {
     fn test_state() -> AppState {
         AppState::new(crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-relay-{}",
+                "/tmp/sprott-test-relay-{}",
                 std::process::id()
             )),
             port: 0,

@@ -3,7 +3,7 @@ Snaplii pays real merchants (gift cards, bill pay) from a pre-funded wallet.
 Put the phantom in the bearer header; the broker exchanges the stored api key
 for a short-lived JWT at egress — neither ever enters the agent:
   sprott run -- curl https://aipayment.snaplii.com/v2/balance \\
-    -H "Authorization: Bearer __sc__snaplii__"
+    -H "Authorization: Bearer __sprott__snaplii__"
 Purchases (POST /v2/purchase) ask for approval by default.
 """
 

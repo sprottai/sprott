@@ -5,9 +5,9 @@ OAuth access token — put it in the bearer header; the proxy substitutes it at
 egress, the token never enters the agent:
   sprott run -- curl \\
     "https://compute.googleapis.com/compute/v1/projects/PROJECT/zones" \\
-    -H "Authorization: Bearer __sc__gcp__"
+    -H "Authorization: Bearer __sprott__gcp__"
 Scope is cloud-platform (full GCP). Multi-account: switch the phantom value
-(__sc__gcp_work__).
+(__sprott__gcp_work__).
 """
 
 [service]

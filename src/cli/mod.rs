@@ -1,4 +1,4 @@
-//! Short-lived CLI commands that talk to a `safeclaw start` daemon over HTTP.
+//! Short-lived CLI commands that talk to the local Sprott daemon over HTTP.
 //!
 //! Each subcommand is a small async fn — kept here (not in `handlers/`)
 //! because handlers are the daemon's HTTP request side; this is the
@@ -10,7 +10,6 @@ pub mod agent_detect;
 pub mod agent_shim;
 pub mod apierr;
 pub mod approve;
-pub mod command_name;
 pub mod config;
 pub mod conn;
 pub mod connect;
@@ -26,6 +25,7 @@ pub mod logging;
 pub mod login;
 pub mod logout;
 pub mod ls;
+pub mod migrate;
 pub mod neterr;
 pub mod pair_flow;
 pub mod op;

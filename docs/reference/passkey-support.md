@@ -1,6 +1,11 @@
+---
+description: "Which passkey providers, operating systems and browsers can encrypt a Sprott vault, and what to do when yours cannot."
+---
+
 # Passkey support
 
-This page lists the passkey and browser combinations that can encrypt a Sprott vault. It also explains what to do when a setup does not support the WebAuthn **PRF extension**.
+A passkey can seal a Sprott vault only if it supports the WebAuthn **PRF
+extension**. The tables show which do, and what to do when yours doesn't.
 
 > PRF is how the browser reaches the hardware-held secret that encrypts your
 > vault. This is **not** a browser-version problem: modern browsers support PRF.
@@ -36,11 +41,9 @@ Your passkey lives in one of these. This is the table that usually settles it.
 | Windows Hello | ⚠️ | Windows 11 25H2+ only | Needs the Feb-2026 update (KB5077181). **Windows 10: never.** |
 | Hardware security keys | ⚠️ | FIDO2 keys with hmac-secret | Newer keys work; older ones need PRF enabled when the passkey is first created |
 
-The fastest fix for any ❌ or ⚠️ below is to store your passkey in a provider
-that is ✅ here. **1Password** is the most reliable across platforms and works
-even on macOS 14 and earlier. Google Password Manager also carries PRF, but on
-desktop macOS Chrome may not offer it as a *create* target for Apple-only Google
-accounts (see the provider note above).
+The fastest fix for any ❌ or ⚠️ below is to store your passkey with a
+provider that is ✅ here. A cross-platform provider works independently of
+your OS version.
 
 ## By OS and browser
 
@@ -56,9 +59,9 @@ accounts (see the provider note above).
 
 This table is the **built-in / platform** path (iCloud Keychain through Safari,
 or the OS authenticator). A cross-platform provider adds PRF on top, independent
-of these OS versions: **1Password** works on macOS 14 and earlier where the
-built-in path does not. Firefox has no PRF on iOS or Android. Linux has no
-built-in authenticator with PRF: use a provider (1Password) or a hardware key.
+of these OS versions, including on macOS 14 and earlier where the built-in
+path does not. Firefox has no PRF on iOS or Android. Linux has no built-in
+authenticator with PRF: use a cross-platform provider or a hardware key.
 
 ## By transport
 
@@ -71,8 +74,8 @@ built-in authenticator with PRF: use a provider (1Password) or a hardware key.
 
 | What you see | What it means | What to do |
 |---|---|---|
-| "This passkey can't produce the vault's encryption key on this device" (creating or unlocking) | The passkey's store has no PRF: e.g. iCloud Keychain on macOS before 15.4, a local "Chrome profile" passkey, or Windows Hello before 25H2. Your browser is fine. | Use a passkey from a provider that carries PRF: **1Password** (any recent OS, including macOS 14), a synced Google Password Manager passkey, or a hardware security key. On macOS, upgrading to 15.4+ enables the built-in iCloud path. On Windows 11, update to 25H2. |
+| "This passkey can't produce the vault's encryption key on this device" (creating or unlocking) | The passkey's store has no PRF: e.g. iCloud Keychain on macOS before 15.4, a local "Chrome profile" passkey, or Windows Hello before 25H2. Your browser is fine. | Use a passkey from a provider that carries PRF (see the first table), a synced Google Password Manager passkey, or a hardware security key. On macOS, upgrading to 15.4+ enables the built-in iCloud path. On Windows 11, update to 25H2. |
 | "Your browser does not support the required passkey extensions" | The browser itself lacks WebAuthn PRF. Rare, and means a genuinely old browser. | Update to a current Chrome, Safari, or Firefox. |
 | Fails only when you scan a QR to approve from another device | PRF didn't survive the cross-device (hybrid) transport. | Approve on the device running Sprott, or enroll that device's own passkey, then retry. |
 
-Related: [Security model](../security-model.md) · [Diagnostics](diagnostics.md)
+Related: [Security model](../security-model.md) · [Error codes](diagnostics.md)

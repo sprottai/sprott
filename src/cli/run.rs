@@ -39,15 +39,16 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     let proxy_url = agent_proxy_url(&vid);
     // Friendly hint (user's request): a shell with NEITHER an AIK identity nor a
     // legacy api-key can't authenticate credential substitution, so it will 407.
-    // Say so once, up front. An AIK agent (SAFECLAW_AGENT_IDENTITY) takes the shim
-    // path below and needs no key, so the note must recognize it too, or a keyless
-    // agent that is fully set up gets a misleading warning.
+    // Say so once, up front, and name the file to load. An AIK agent
+    // (SPROTT_AGENT_IDENTITY) takes the shim path below and needs no key, so the
+    // note must recognize it too, or a keyless agent that is fully set up gets a
+    // misleading warning. A shell set up before 2.0 carries the old variable
+    // names, which are not read; this note is what it sees.
     if !args.export_env && !agent_has_key() && load_agent_signer().is_none() {
-        eprintln!(
-            "note: this shell carries no Sprott agent identity, so credential substitution \
-             will 407. Load your agent env (SAFECLAW_AGENT_IDENTITY, or a legacy SAFECLAW_API_KEY) \
-             and retry. This is not a daemon or port problem; non-credential traffic is unaffected."
-        );
+        let env_file = crate::names::data_dir()
+            .map(|d| agent_env_hint(&d))
+            .unwrap_or_else(|| AGENT_ENV_PLACEHOLDER.to_string());
+        eprintln!("{}", no_identity_note(&env_file));
     }
 
     if !args.export_env {
@@ -69,7 +70,7 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     // routes the proxy to B but the child's `sc git-credential` would resolve the
     // ambient/config vault (§5 env-pin) and look for the connection in the wrong
     // vault — silently defeating the override for git flows.
-    bundle.push(("SAFECLAW_VAULT_ID".to_string(), vid.clone()));
+    bundle.push(("SPROTT_VAULT_ID".to_string(), vid.clone()));
 
     if args.export_env {
         // --export-env stays on the direct path: a printed env can't own a
@@ -82,13 +83,13 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     }
 
     // hop-A (design/agent-device-identity-mtls.md §9.1): if this shell carries an
-    // AIK identity (`SAFECLAW_AGENT_IDENTITY` → an agent identity file), route the
+    // AIK identity (`SPROTT_AGENT_IDENTITY` → an agent identity file), route the
     // child through the sc-transport shim so NO credential lands in the child env
     // — the shim holds the AIK (mints a per-CONNECT PoP) and the api-key (injected
     // as the api-face Bearer), and we strip the inherited key from the child.
     // ADDITIVE / dual-auth: with no AIK identity file this is skipped entirely and
     // the child takes today's direct exec path, so nothing changes for existing
-    // agents (none set `SAFECLAW_AGENT_IDENTITY`).
+    // agents (none set `SPROTT_AGENT_IDENTITY`).
     if let Some(signer) = load_agent_signer() {
         return run_via_shim(&args.cmd, &vid, &ca_str, parent_count, signer).await;
     }
@@ -127,7 +128,7 @@ fn warn_git_url_specific_proxy(cmd: &[String]) {
     );
 }
 
-/// Load the agent's AIK signer from `SAFECLAW_AGENT_IDENTITY`. `None` when unset
+/// Load the agent's AIK signer from `SPROTT_AGENT_IDENTITY`. `None` when unset
 /// or not an agent identity, so `sc run` falls back to the direct path.
 fn load_agent_signer() -> Option<AgentProxyPopSigner> {
     crate::agent_pop::signer_from_env()
@@ -142,7 +143,7 @@ fn authority_of(url: &str) -> String {
 
 /// Run the child through the sc-transport shim (hop-A). Starts the shim on an
 /// ephemeral loopback port, points the child's `*_PROXY` at it with NO creds in
-/// the URL, STRIPS the inherited `SAFECLAW_API_KEY` from the child env (the shim
+/// the URL, STRIPS the inherited `SPROTT_API_KEY` from the child env (the shim
 /// authenticates by AIK PoP, so the child needs — and gets — no credential at
 /// all), then SPAWNS (not execs) the child so the shim task keeps serving in this
 /// process, waits, and propagates the exit code.
@@ -166,7 +167,7 @@ async fn run_via_shim(
     // Child proxy → the shim, NO creds in the URL (the shim injects them).
     let shim_url = format!("http://127.0.0.1:{}", port);
     let mut bundle = build_bundle(&shim_url, ca_str, parent_count);
-    bundle.push(("SAFECLAW_VAULT_ID".to_string(), vid.to_string()));
+    bundle.push(("SPROTT_VAULT_ID".to_string(), vid.to_string()));
 
     let (prog, rest) = cmd.split_first().ok_or("no command to run")?;
     let mut c = tokio::process::Command::new(prog);
@@ -175,7 +176,7 @@ async fn run_via_shim(
     // env. The parent shell exported it (that's how a legacy agent authenticates);
     // the shim authenticates by AIK PoP instead, so strip the key from what the
     // child inherits — the child carries no credential at all.
-    c.env_remove("SAFECLAW_API_KEY");
+    c.env_remove("SPROTT_API_KEY");
     for (k, v) in &bundle {
         c.env(k, v);
     }
@@ -188,7 +189,7 @@ async fn run_via_shim(
 }
 
 /// The proxy URL the child's `HTTPS_PROXY` gets (CREDENTIAL_BROKER.md §14).
-/// Always REBUILT for the resolved vid: the agent's own `$SAFECLAW_API_KEY`
+/// Always REBUILT for the resolved vid: the agent's own `$SPROTT_API_KEY`
 /// spliced into the CURRENT API-face root (same daemon host as everything else —
 /// the invariant), never a pre-baked full proxy URL copied verbatim. A snapshot
 /// would pin a stale host:port from an old `sc agent add` (a moved daemon → the
@@ -196,16 +197,57 @@ async fn run_via_shim(
 /// self-heals. `sc run` still never owns or persists the key — it reads the
 /// agent's own from the env and splices it in memory only.
 fn agent_proxy_url(vid: &str) -> String {
-    let key = std::env::var("SAFECLAW_API_KEY")
+    let key = std::env::var("SPROTT_API_KEY")
         .ok()
         .filter(|s| !s.is_empty());
     let cfg = load_config().unwrap_or_default();
     proxy_url_for_vault(&api_face_root(&cfg), vid, key.as_deref())
 }
 
-/// Does this shell carry an agent identity? Its `$SAFECLAW_API_KEY`.
+const AGENT_ENV_PLACEHOLDER: &str = "~/.sprott/agents/<name>/agent.env";
+
+/// The note `sprott run` prints when the shell carries no agent identity.
+fn no_identity_note(env_file: &str) -> String {
+    format!(
+        "note: this shell carries no Sprott agent identity, so credential substitution will 407. \
+         Load your agent env, then retry: set -a; . {env_file}; set +a (it sets \
+         SPROTT_AGENT_IDENTITY). This is not a daemon or port problem; non-credential traffic \
+         is unaffected."
+    )
+}
+
+/// `~/.sprott/agents/<name>/agent.env`, with `<name>` filled in (shell-quoted)
+/// when exactly one agent directory under `data_dir` has an agent.env.
+fn agent_env_hint(data_dir: &Path) -> String {
+    let names: Vec<String> = std::fs::read_dir(data_dir.join("agents"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().join("agent.env").is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    match names.as_slice() {
+        [name] => {
+            let word = if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                name.clone()
+            } else {
+                format!("'{}'", name.replace('\'', "'\\''"))
+            };
+            format!("~/{}/agents/{}/agent.env", crate::names::DATA_DIR, word)
+        }
+        _ => AGENT_ENV_PLACEHOLDER.to_string(),
+    }
+}
+
+/// Does this shell carry an agent identity? Its `$SPROTT_API_KEY`.
 fn agent_has_key() -> bool {
-    std::env::var("SAFECLAW_API_KEY")
+    std::env::var("SPROTT_API_KEY")
         .map(|s| !s.is_empty())
         .unwrap_or(false)
 }
@@ -230,7 +272,7 @@ async fn preflight(ca: &Path, control_root: &str) -> Result<(), String> {
     // names the env var only, never its value (URL-shaped vars can carry creds).
     // (A stale PORT alone can't reach here: `control_root` takes only the env
     // HOST and resolves the port itself.)
-    if let Some(name) = ["SAFECLAW_BROKER_URL", "SAFECLAW_DAEMON_URL"]
+    if let Some(name) = ["SPROTT_BROKER_URL", "SPROTT_DAEMON_URL"]
         .into_iter()
         .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()).map(|_| k))
     {
@@ -256,7 +298,7 @@ async fn report_ambient_proxy(control_root: &str) {
     }
     let proxy = crate::cli::egress_proxy::ambient();
     let url = format!("{}/proxy/ambient", control_root.trim_end_matches('/'));
-    let Ok(client) = reqwest::Client::builder()
+    let Ok(client) = crate::util::http_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     else {
@@ -314,4 +356,41 @@ fn exec_child(cmd: &[String], bundle: &[(String, String)]) -> Result<(), String>
     }
     let status = c.status().map_err(|e| format!("spawn {}: {}", prog, e))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_note_names_the_agent_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(agent_env_hint(dir.path()), "~/.sprott/agents/<name>/agent.env");
+
+        let put = |name: &str| {
+            let d = dir.path().join("agents").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("agent.env"), "SPROTT_BROKER_URL=x\n").unwrap();
+        };
+        put("Claude Code (VM)");
+        assert_eq!(
+            agent_env_hint(dir.path()),
+            "~/.sprott/agents/'Claude Code (VM)'/agent.env"
+        );
+        put("codex");
+        assert_eq!(
+            agent_env_hint(dir.path()),
+            "~/.sprott/agents/<name>/agent.env",
+            "two agents: the placeholder"
+        );
+
+        let note = no_identity_note("~/.sprott/agents/codex/agent.env");
+        assert_eq!(
+            note,
+            "note: this shell carries no Sprott agent identity, so credential substitution will 407. \
+             Load your agent env, then retry: set -a; . ~/.sprott/agents/codex/agent.env; set +a \
+             (it sets SPROTT_AGENT_IDENTITY). This is not a daemon or port problem; \
+             non-credential traffic is unaffected."
+        );
+    }
 }

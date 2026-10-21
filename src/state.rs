@@ -367,7 +367,7 @@ pub struct AppState {
     pub vault_tombstones: Mutex<HashMap<String, crate::vault_runtime::Tombstone>>,
     /// Team-edition extension hooks (team-edition §9 open/closed split). The
     /// open build leaves the [`crate::team_hooks::NoopHooks`] default (no team
-    /// policy); the closed `safeclaw-ee` overlay injects real ones via
+    /// policy); the closed `sprott-ee` overlay injects real ones via
     /// [`AppState::with_team_hooks`]. Serve-time team policy (the offline lease,
     /// etc.) lives behind these, never inline in open core.
     pub team: std::sync::Arc<dyn crate::team_hooks::TeamHooks>,
@@ -525,7 +525,7 @@ fn load_host_unions(state_dir: &std::path::Path) -> (HashMap<String, Vec<String>
 }
 
 impl AppState {
-    /// Inject the closed `safeclaw-ee` team hooks (team-edition §9). The open
+    /// Inject the closed `sprott-ee` team hooks (team-edition §9). The open
     /// build leaves the [`crate::team_hooks::NoopHooks`] default; the overlay's
     /// `main` calls this on the fresh `AppState` before it is wrapped in `Arc`.
     /// Chainable.
@@ -551,7 +551,7 @@ impl AppState {
             })
             .collect();
         let sc = crate::crypto::envelope::ScKeyPair::load_or_generate()
-            .expect("sc_sk load/generate failed. Check ~/.safeclaw/crypto perms");
+            .expect("sc_sk load/generate failed. Check ~/.sprott/crypto perms");
         Self {
             config,
             vaults,
@@ -2355,7 +2355,7 @@ mod tests {
 
     fn test_state() -> AppState {
         let cfg = Config {
-            state_dir: PathBuf::from(format!("/tmp/safeclaw-test-{}", std::process::id())),
+            state_dir: PathBuf::from(format!("/tmp/sprott-test-{}", std::process::id())),
             port: 0,
             proxy_port: 0,
             listen: "127.0.0.1".into(),

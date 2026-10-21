@@ -52,13 +52,13 @@ async fn warn_if_stale_after_restart() {
         return; // nothing paired — no daemon state to verify
     };
     let want = crate::build_version();
-    let want = want.trim().trim_start_matches("safeclaw ").trim();
+    let want = want.trim();
     // ensure_unlocked already waited for the daemon; a couple of cheap retries
     // cover a still-settling health endpoint.
     for _ in 0..5 {
         let d = crate::cli::status::probe_local_daemon(&custodian).await;
         if d.up {
-            match d.version.as_deref().map(|v| v.trim().trim_start_matches("safeclaw ").trim()) {
+            match d.version.as_deref().map(str::trim) {
                 Some(v) if v == want => return, // ✓ the new binary is serving
                 Some(v) => {
                     eprintln!(

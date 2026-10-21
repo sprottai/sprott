@@ -425,7 +425,7 @@ fn is_valid_service_id(s: &str) -> bool {
 }
 
 /// A secret role key: env-style `[A-Z0-9_]`, starts with a letter, and,
-/// because its lowercase becomes a phantom role segment (`__sc__<conn>__<role>__`),
+/// because its lowercase becomes a phantom role segment (`__sprott__<conn>__<role>__`),
 /// it carries no `__` (the delimiter) and no trailing `_` (which would fuse
 /// into the delimiter as `___` and make the advertised phantom unparseable).
 fn is_valid_role(s: &str) -> bool {

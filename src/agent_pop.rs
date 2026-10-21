@@ -94,11 +94,11 @@ pub fn verify_op_pop(
     verify_agent_proxy_pop(token.trim(), vault_id, &target, now, DEFAULT_MAX_SKEW_SECS)
 }
 
-/// The agent's AIK signer from `SAFECLAW_AGENT_IDENTITY` (a PATH to the agent
+/// The agent's AIK signer from `SPROTT_AGENT_IDENTITY` (a PATH to the agent
 /// identity file, per the locked naming, NOT a secret). `None` when unset,
 /// unreadable, or not an agent identity.
 pub fn signer_from_env() -> Option<AgentProxyPopSigner> {
-    let path = std::env::var_os("SAFECLAW_AGENT_IDENTITY").filter(|p| !p.is_empty())?;
+    let path = std::env::var_os("SPROTT_AGENT_IDENTITY").filter(|p| !p.is_empty())?;
     let loaded = crate::identity_file::load(std::path::Path::new(&path)).ok()?;
     if loaded.kind != IdKind::Agent {
         return None;

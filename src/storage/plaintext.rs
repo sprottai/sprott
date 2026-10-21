@@ -285,7 +285,7 @@ impl VaultAux {
 ///   - each service record's declared roles at their bound (or identity) key,
 ///     the service resolved custom-first through `defs`;
 ///   - the DEFAULT connection of every service `defs` knows that has no record
-///     of its own (the proxy brokers `__sc__<service>__` for it without one):
+///     of its own (the proxy brokers `__sprott__<service>__` for it without one):
 ///     its roles at their identity keys, claimed by the service id. Removing
 ///     that service's own record (`exclude` == its id) removes this claim too.
 ///
@@ -857,7 +857,7 @@ mod tests {
     }
 
     /// A key a service's DEFAULT connection can use (its identity role, with
-    /// no record of its own: the proxy brokers `__sc__<service>__` for it) is
+    /// no record of its own: the proxy brokers `__sprott__<service>__` for it) is
     /// claimed by that service, so removing another connection that wrote it
     /// keeps it. Removing the service's own record drops that claim.
     #[test]

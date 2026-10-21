@@ -11,7 +11,7 @@
 //!   AEAD: ChaCha20-Poly1305
 //!
 //! Storage:
-//!   `~/.safeclaw/crypto/sc_sk.bin` — raw 32-byte X25519 scalar
+//!   `~/.sprott/crypto/sc_sk.bin` — raw 32-byte X25519 scalar
 //!
 //! Lifecycle: generated once on first daemon start, persists across restarts.
 //! Loss = clients pinning the old `sc_pk` see a fingerprint mismatch on next
@@ -100,6 +100,10 @@ pub struct ScKeyPair {
 impl ScKeyPair {
     /// Load from disk, or generate + persist if missing. Idempotent.
     pub fn load_or_generate() -> Result<Self> {
+        // One caller at a time per process: the key file is created with
+        // `create_new`, so two states built in parallel (tests) would race.
+        static LOAD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = LOAD.lock().unwrap_or_else(|e| e.into_inner());
         let path = sk_path()?;
         if path.exists() {
             let bytes =
@@ -150,8 +154,8 @@ impl ScKeyPair {
 }
 
 fn sk_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Internal("no home dir".into()))?;
-    Ok(home.join(".safeclaw").join("crypto").join("sc_sk.bin"))
+    let dir = crate::names::data_dir().ok_or_else(|| AppError::Internal("no home dir".into()))?;
+    Ok(dir.join("crypto").join("sc_sk.bin"))
 }
 
 #[cfg(test)]

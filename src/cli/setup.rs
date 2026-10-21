@@ -105,7 +105,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
             .unwrap_or_else(|| Path::new("."))
             .join("agent.env");
         let env_body = format!(
-            "SAFECLAW_BROKER_URL={}\nSAFECLAW_AGENT_IDENTITY={}\n",
+            "SPROTT_BROKER_URL={}\nSPROTT_AGENT_IDENTITY={}\n",
             broker_url,
             crate::cli::agent::env_value(&identity_path.display().to_string())
         );
@@ -154,7 +154,7 @@ async fn preconditions(
         (
             format!("Sprott configuration could not be read: {}", e),
             format!(
-                "Fix ~/.safeclaw/config.toml, then re-run: {}",
+                "Fix ~/.sprott/config.toml, then re-run: {}",
                 setup_command(&name, profile.as_deref())
             ),
             1,
@@ -202,13 +202,13 @@ async fn preconditions(
             1,
         )
     })?;
-    let safeclaw_dir = home.join(".safeclaw");
-    let setup_dir = safeclaw_dir.join("setup");
+    let data_dir = crate::names::data_dir_in(&home);
+    let setup_dir = data_dir.join("setup");
     let retry = format!(
         "Re-run outside the sandbox with network access: {}",
         setup_command(&name, profile.as_deref())
     );
-    if let Err(e) = human_action::ensure_private_dir(&safeclaw_dir)
+    if let Err(e) = human_action::ensure_private_dir(&data_dir)
         .and_then(|_| human_action::ensure_private_dir(&setup_dir))
     {
         return Err((
@@ -298,7 +298,7 @@ async fn wait_for_existing(
     pid: u32,
     json_output: bool,
 ) -> Result<Progress, i32> {
-    let seconds = std::env::var("SAFECLAW_SETUP_WAIT_SECS")
+    let seconds = std::env::var("SPROTT_SETUP_WAIT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(90);
@@ -606,7 +606,7 @@ async fn pair_missing_and_persist(name: &str, profile: Option<&str>) -> Result<(
         None
     };
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;
@@ -740,7 +740,7 @@ async fn run_background(args: SetupArgs) -> Result<(), i32> {
                 (
                     "failed",
                     Some(format!(
-                        "The {} setup background process failed. See ~/.safeclaw/setup/background.log.",
+                        "The {} setup background process failed. See ~/.sprott/setup/background.log.",
                         phase_text
                     )),
                     1,
@@ -1106,8 +1106,8 @@ mod setup_tests {
     #[test]
     fn shell_word_quotes_only_when_needed() {
         assert_eq!(
-            shell_word("/home/me/.safeclaw/agents/codex/agent.env"),
-            "/home/me/.safeclaw/agents/codex/agent.env"
+            shell_word("/home/me/.sprott/agents/codex/agent.env"),
+            "/home/me/.sprott/agents/codex/agent.env"
         );
         assert_eq!(shell_word("/Users/Mia Li/agent.env"), "'/Users/Mia Li/agent.env'");
         assert_eq!(shell_word("it's"), "'it'\\''s'");

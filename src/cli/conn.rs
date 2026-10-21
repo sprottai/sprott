@@ -58,7 +58,7 @@ pub fn slugify_conn_id(input: &str) -> String {
 
 /// A secret role KEY on a connection: env-style `[A-Za-z0-9_]` starting with a
 /// letter. Because its lowercase becomes a phantom role segment
-/// (`__sc__<conn>__<role>__`), it may carry no `__` (the delimiter) and no
+/// (`__sprott__<conn>__<role>__`), it may carry no `__` (the delimiter) and no
 /// trailing `_` (which would fuse into the delimiter as `___`, making the
 /// advertised phantom unparseable).
 pub fn valid_role(s: &str) -> bool {

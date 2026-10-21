@@ -7,7 +7,7 @@
 //! it pins that owner as `account_uik`. Then:
 //!
 //!   1. Persist `device_key` (a `sc_device_<rand>` token) to
-//!      `~/.safeclaw/device-key` (mode 0600): the daemon→cloud credential,
+//!      `~/.sprott/device-key` (mode 0600): the daemon→cloud credential,
 //!      distinct from any agent credential. The agent never sees it.
 //!   2. Persist the cloud coordinates and the verified owner (`account_uik` +
 //!      its key) in config.
@@ -22,11 +22,11 @@ use zeroize::Zeroizing;
 use crate::cli::active::put_cloud_coords;
 use crate::config::LoginArgs;
 
-/// Default daemon control-plane port (matches `ServeArgs` `SAFECLAW_PORT`).
+/// Default daemon control-plane port (matches `ServeArgs` `SPROTT_PORT`).
 const DEFAULT_DAEMON_PORT: u16 = crate::config::CONTROL_PORT;
 
 /// Resolve which cloud this machine pairs with. Precedence:
-///   1. `SAFECLAW_CLOUD_URL` — runtime self-host escape hatch (any URL; HTTPS
+///   1. `SPROTT_CLOUD_URL` — runtime self-host escape hatch (any URL; HTTPS
 ///      enforced below). Undocumented; for people running their own custodian.
 ///   2. `--profile {prod,dev}` — the FIRST-PARTY selector the console's install
 ///      prompt uses. It is a SYMBOL, not a URL: it resolves only against the
@@ -36,13 +36,13 @@ const DEFAULT_DAEMON_PORT: u16 = crate::config::CONTROL_PORT;
 ///      first-party domains means a hostile prompt can at worst flip you
 ///      between your OWN prod/dev, never to a third party. The prod console
 ///      omits the flag (→ default prod); the dev console appends `--profile dev`.
-///   3. `SAFECLAW_BAKED_CLOUD_URL` — compile-time self-host bake.
+///   3. `SPROTT_BAKED_CLOUD_URL` — compile-time self-host bake.
 ///   4. Default: prod. Every real user only ever deals with prod.
 /// The resolved value is only the target at `sc login` time; once paired, the
 /// machine is pinned to the backend persisted in config.toml, so this never
 /// matters again for that machine.
 pub(crate) fn resolve_custodian(env_flag: Option<&str>) -> Result<String, String> {
-    if let Ok(u) = std::env::var("SAFECLAW_CLOUD_URL") {
+    if let Ok(u) = std::env::var("SPROTT_CLOUD_URL") {
         if !u.is_empty() {
             return Ok(u);
         }
@@ -50,7 +50,7 @@ pub(crate) fn resolve_custodian(env_flag: Option<&str>) -> Result<String, String
     if let Some(env) = env_flag {
         return env_selector_to_url(env);
     }
-    if let Some(u) = option_env!("SAFECLAW_BAKED_CLOUD_URL") {
+    if let Some(u) = option_env!("SPROTT_BAKED_CLOUD_URL") {
         if !u.is_empty() {
             return Ok(u.to_string());
         }
@@ -199,14 +199,14 @@ pub async fn pair_and_persist(args: LoginArgs, allow_account_switch: bool) -> Re
     let device_name = device_name(args.device_name.clone());
 
     // Dedicated 10s timeout per request (each pairing call is one round-trip).
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client init: {}", e))?;
 
     // ── Device identity (DIK): reuse this machine's keypair or mint a fresh one
     // (identity wave §5). Stable across re-logins so a device keeps one `dev_…`
-    // id. The private SEED stays on disk (0600, `~/.safeclaw/device/identity`);
+    // id. The private SEED stays on disk (0600, `~/.sprott/device/identity`);
     // only the PUBLIC key is registered with the cloud (authorized-devices set),
     // additive to the legacy device-key bearer that still authenticates
     // daemon↔cloud during the dual-auth window (§7).
@@ -285,7 +285,7 @@ pub(crate) fn persist_device_approval(
             .map_err(|e| format!("clear the previous account's local state: {}", e))?;
     }
 
-    // ── Persist the device-key to ~/.safeclaw/device-key (0600) ──────────
+    // ── Persist the device-key to ~/.sprott/device-key (0600) ──────────
     let key_path = device_key_path()?;
     write_device_key(&key_path, &parsed.device_key)?;
 
@@ -317,7 +317,7 @@ pub(crate) fn persist_device_approval(
         .unwrap_or(&custodian)
         .trim_end_matches('/')
         .to_string();
-    let daemon_port = std::env::var("SAFECLAW_PORT")
+    let daemon_port = std::env::var("SPROTT_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_DAEMON_PORT);
@@ -409,15 +409,15 @@ fn is_localhost_http(url: &str) -> bool {
     host == "localhost" || host == "127.0.0.1"
 }
 
-/// `~/.safeclaw/device-key` — the cloud-side device key (Token 2,
+/// `~/.sprott/device-key` — the cloud-side device key (Token 2,
 /// a `sc_device_...` token) persisted after `sc login`. Distinct from
-/// `~/.safeclaw/api-key` (the local agent→daemon broker key, Token 1):
+/// `~/.sprott/api-key` (the local agent→daemon broker key, Token 1):
 /// this one is used by the daemon itself to authenticate against the SaaS
 /// op-relay once Slice C wires daemon→cloud registration. The agent never
 /// sees it.
 fn device_key_path() -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
-    Ok(home.join(".safeclaw").join("device-key"))
+    let dir = crate::names::data_dir().ok_or_else(|| "cannot locate home dir".to_string())?;
+    Ok(dir.join("device-key"))
 }
 
 fn write_device_key(path: &std::path::Path, device_key: &str) -> Result<(), String> {

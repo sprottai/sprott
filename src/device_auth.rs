@@ -19,13 +19,13 @@ use data_encoding::BASE64;
 
 /// The `dev_…` self-id of the signing device (tells the backend which registered
 /// pubkey to check).
-pub const HDR_DEVICE_ID: &str = "x-sc-device-id";
+pub const HDR_DEVICE_ID: &str = "x-sprott-device-id";
 /// Unix-seconds timestamp the signature was produced at (freshness / replay
 /// window; the backend bounds how far it may drift).
-pub const HDR_DEVICE_TS: &str = "x-sc-device-ts";
+pub const HDR_DEVICE_TS: &str = "x-sprott-device-ts";
 /// Base64 (standard, padded) of the raw-64 Ed25519 signature over
 /// [`device_request_signature_input`].
-pub const HDR_DEVICE_SIG: &str = "x-sc-device-sig";
+pub const HDR_DEVICE_SIG: &str = "x-sprott-device-sig";
 
 /// A device's request signer: its DIK plus its self-id. Cheap to hold; clone per
 /// request or share behind the daemon state. Construct once from the loaded

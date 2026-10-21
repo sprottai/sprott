@@ -36,12 +36,15 @@ pub mod error;
 mod generated_services;
 pub mod identity;
 pub mod identity_file;
+pub mod names;
 pub mod passkey;
 pub mod pairing;
 pub mod principal_ledger;
 pub mod protocol;
 pub mod proxy;
 pub mod relay;
+#[cfg(test)]
+mod rename_guard;
 pub mod server;
 pub mod service;
 pub mod state;

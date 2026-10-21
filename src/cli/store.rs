@@ -1,4 +1,4 @@
-//! `safeclaw store ...` — external store inspection.
+//! `sprott store ...` — external store inspection.
 //!
 //! Today: `store ls` only. `connect` / `disconnect` need the Write op
 //! path (vault re-encryption), which isn't shipped on the CLI yet — see
@@ -47,7 +47,7 @@ async fn ls(custodian: &str, vault: &str, json: bool) -> Result<(), String> {
         custodian.trim_end_matches('/'),
         urlencoding::encode(vault)
     );
-    let client = reqwest::Client::builder()
+    let client = crate::util::http_builder()
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|e| format!("client init: {}", e))?;

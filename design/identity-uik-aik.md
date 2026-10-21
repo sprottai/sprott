@@ -119,7 +119,7 @@ off-box — which a string prefix cannot.
 
 Per team-edition §16 + [[feedback_no_paid_signing_now]]:
 
-1. **v1** — `~/.safeclaw/keyring` file, `0600`. Stops casual/accidental
+1. **v1** — `~/.sprott/keyring` file, `0600`. Stops casual/accidental
    exfiltration. Same threat posture as `~/.ssh`.
 2. **v2** — OS keychain (binary-scoped ACL) stops same-user *targeted* reads;
    same-binary self-attestation (`SO_PEERCRED`/`getpeereid`, SPIRE-style) so the

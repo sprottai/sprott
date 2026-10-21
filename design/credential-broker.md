@@ -15,7 +15,7 @@
 
 Give an agent the **use** of a credential without letting it **hold** the
 credential. There is **one surface**: a **local HTTPS proxy** on the user's
-machine. The agent writes a **phantom placeholder** (`__sc__<conn>__`) wherever the
+machine. The agent writes a **phantom placeholder** (`__sprott__<conn>__`) wherever the
 credential belongs — an env var its tool reads, a request header it sends. The
 proxy is the only thing that ever sees the real value: it resolves the phantom →
 connection → secret, checks the destination host against the connection's
@@ -136,8 +136,8 @@ tomls, carrying NO connection state — and `connections[]` — 1:1 with
 `aux.connections`, each row a DERIVED `connected` flag plus a ready-made
 `phantoms` **list**. A phantom names a CONNECTION, so it lives only on the
 connection row. `phantoms` is a **list** of ready-made strings the agent copies
-verbatim (form A: sole injectable → the short `__sc__<conn>__`; several →
-role-qualified `__sc__<conn>__<role>__` — one form per role, never both):
+verbatim (form A: sole injectable → the short `__sprott__<conn>__`; several →
+role-qualified `__sprott__<conn>__<role>__` — one form per role, never both):
 
 ```jsonc
 // GET /v/{vid}/registry  (agent-facing projection — derived, not stored)
@@ -147,13 +147,13 @@ role-qualified `__sc__<conn>__<role>__` — one form per role, never both):
   "connections": [
     { "id": "github", "service": "github",
       "hosts": ["api.github.com", "github.com"],
-      "connected": true, "phantoms": ["__sc__github__"] },        // sole → short form
+      "connected": true, "phantoms": ["__sprott__github__"] },        // sole → short form
     { "id": "stripe_key",                                          // RAW: no service…
       "hosts": ["api.stripe.com"], "secrets": ["STRIPE_KEY"],     // …carries explicit secrets
-      "connected": true, "phantoms": ["__sc__stripe_key__"] }
+      "connected": true, "phantoms": ["__sprott__stripe_key__"] }
   ] }
-// multi-secret:  "phantoms": ["__sc__bb__username__", "__sc__bb__api_token__"]
-// oauth2:        "phantoms": ["__sc__gmail__", "__sc__gmail__account_id__"]  // ACCESS + exposes
+// multi-secret:  "phantoms": ["__sprott__bb__username__", "__sprott__bb__api_token__"]
+// oauth2:        "phantoms": ["__sprott__gmail__", "__sprott__gmail__account_id__"]  // ACCESS + exposes
 ```
 
 (There is NO routing preflight anywhere — the broker is opt-in, §14: the agent
@@ -213,8 +213,8 @@ refresh_token = "GMAIL_REFRESH_TOKEN"        # RFC 6749 field → the vault secr
                                              # durable refresh token is stored under
 # id_token = "GMAIL_ID_TOKEN"                # only if the provider returns a stored id token
 # exposes = ["account_id"]                   # optional extra minted/derived values →
-                                             # __sc__<conn>__account_id__ (openai-codex case)
-# __sc__<conn>__ resolves to the MINTED access token; the refresh key is durable
+                                             # __sprott__<conn>__account_id__ (openai-codex case)
+# __sprott__<conn>__ resolves to the MINTED access token; the refresh key is durable
 # storage for the mint ⇒ internal by construction, never an injectable phantom.
 ```
 
@@ -233,9 +233,9 @@ table; with real URLs the route is in the traffic, and policy matches
      proxy decodes it natively, finds the phantom, substitutes, re-encodes —
      zero declared information needed. Constructing a pair is just another
      phantom PLACEMENT, which is the agent's job: git → URL userinfo
-     (`https://x:__sc__github__@github.com/…`; a validated username — Bitbucket,
+     (`https://x:__sprott__github__@github.com/…`; a validated username — Bitbucket,
      case-sensitive — is instance data the agent types there); docker →
-     `docker login -u <user> -p __sc__dockerhub__` (the phantom lands in
+     `docker login -u <user> -p __sprott__dockerhub__` (the phantom lands in
      docker's config.json and rides every registry call). `sc git-credential`
      survives only as an OPTIONAL zero-schema convenience with one documented
      global rule: for the asked host's connection emit
@@ -264,27 +264,27 @@ safety**: it must survive env values, URL path/query, JSON, headers, and base64
 round-tripping).
 
 ```
-__sc__<conn>__<role>__          // <conn>,<role> ∈ [a-z0-9_], no double-underscore inside (__ is the delimiter)
-__sc__<conn>__                   // DEFAULT shorthand — the connection's sole injectable secret
+__sprott__<conn>__<role>__          // <conn>,<role> ∈ [a-z0-9_], no double-underscore inside (__ is the delimiter)
+__sprott__<conn>__                   // DEFAULT shorthand — the connection's sole injectable secret
 ```
 
 - Most connections expose exactly **one** injectable secret (OAuth-refresh is
-  internal/hidden), so `__sc__<conn>__` is the everyday form; the `__<role>__`
+  internal/hidden), so `__sprott__<conn>__` is the everyday form; the `__<role>__`
   suffix appears only when a connection genuinely exposes several.
 - `<conn>` is the id the user gave at connect time and sees in the UI
   (`github`, `gmail_work`) — nothing new to learn. Connect enforces env-safe ids.
 - Storage keys are ALL bare env-valid names; the connection record's `keys`
   map binds role → KEY (connection-schema.md §3). The phantom stays the only
   Sprott-invented string on any surface.
-- The `__sc__…__` shell is a **leak breadcrumb**: an un-substituted phantom is
+- The `__sprott__…__` shell is a **leak breadcrumb**: an un-substituted phantom is
   recognizable in logs/upstream errors.
-- Multi-account is disambiguated by **conn name** (`__sc__gmail__` vs
-  `__sc__gmail_work__`), never by host.
-- Parse: strip the `__sc__` prefix and trailing `__`, split the remainder on
+- Multi-account is disambiguated by **conn name** (`__sprott__gmail__` vs
+  `__sprott__gmail_work__`), never by host.
+- Parse: strip the `__sprott__` prefix and trailing `__`, split the remainder on
   `__` → 1 or 2 segments; unambiguous because ids may not contain `__`.
 - No industry standard for phantom tokens exists; `__X__` is the folk
   placeholder idiom (scaffolding/templating), and vendor prefixes are the modern
-  secret-string convention (`ghp_`, `sk_live_`, secret-scanning). `__sc__…__`
+  secret-string convention (`ghp_`, `sk_live_`, secret-scanning). `__sprott__…__`
   carries both signals: *"I am a placeholder"* + *"Sprott substitutes me."*
 
 **Multi-profile is selected by phantom VALUE — never by env var name.** The env
@@ -293,11 +293,11 @@ var *name* is the consuming tool's contract (`gh` reads only
 so the selector must live in the value — which matches how the ecosystem already
 does profiles (`AWS_PROFILE`, kubectl contexts, per-project `.env`/direnv):
 
-- persistent: per-project `.env` (`GITHUB_TOKEN=__sc__github_work__` in the work
+- persistent: per-project `.env` (`GITHUB_TOKEN=__sprott__github_work__` in the work
   repo; recorded in the manifest);
-- ad-hoc: per-command prefix (`GITHUB_TOKEN=__sc__github_work__ gh pr list`);
+- ad-hoc: per-command prefix (`GITHUB_TOKEN=__sprott__github_work__ gh pr list`);
 - git (no env var): **the phantom itself goes in the URL username slot** —
-  `git clone https://__sc__github_work__@github.com/owner/repo` → git sends it as
+  `git clone https://__sprott__github_work__@github.com/owner/repo` → git sends it as
   the Basic username → the proxy substitutes. Same one concept, zero extra rules.
   The credential helper covers only the default case (the host's default
   connection). What the user puts in a URL username otherwise is their own
@@ -592,13 +592,13 @@ redeems. Body-field binding is the Phase-2 `[requests]`/vars/scope design.
 **The agent's env = its SSOT — two dotenv vars, minted as ONE block:**
 
 ```
-SAFECLAW_BROKER_URL=http://127.0.0.1:23294               # broker/API face
-SAFECLAW_API_KEY=<key>                                   # identity — Bearer (API face) + proxy password
+SPROTT_BROKER_URL=http://127.0.0.1:23294               # broker/API face
+SPROTT_API_KEY=<key>                                   # identity — Bearer (API face) + proxy password
 ```
 
 No vault var (design/vault-addressing.md): vault is per-call — the discovery
 path param and proxy username carry it, and `sc run` injects
-`$SAFECLAW_VAULT_ID` into the child it launches. Nothing durable mints the
+`$SPROTT_VAULT_ID` into the child it launches. Nothing durable mints the
 pin; a mint-time vault froze the device default of mint day into a shadow
 default `sc vault use` could never beat.
 
@@ -614,17 +614,17 @@ add >> .env` + a CLAUDE.md reminder.
 
 **Atoms are truth, `_url`s are derived** — `src/cli/active.rs` is the single
 derivation point. Device atoms: config `daemon` host + the port constants +
-the default vault; vault history lives in `~/.safeclaw/known_vaults.toml`
+the default vault; vault history lives in `~/.sprott/known_vaults.toml`
 (known_hosts-style). THE invariant: **proxy and control always derive from
-the same daemon host** — when `$SAFECLAW_BROKER_URL` is set, its HOST feeds
+the same daemon host** — when `$SPROTT_BROKER_URL` is set, its HOST feeds
 `control_root` and every derived proxy URL, so an agent's shelled `sc` and
 its own HTTP cannot target different daemons; worst case is a uniformly
 stale snapshot, never a split. Vault precedence at the one choke point
-(`resolve_active`): `--vault > $SAFECLAW_VAULT_ID (env pin) > config >
+(`resolve_active`): `--vault > $SPROTT_VAULT_ID (env pin) > config >
 single-known auto-select`. Mint-time projections (`sc env`, `sc agent add`)
 read DEVICE atoms only — never the env pins (a re-eval must not freeze its
 own prior output). Remote is config, not code: hand-edit the daemon atom,
-copy the PUBLIC `ca.pem` (`$SAFECLAW_CA_PATH`); `ca.key` never leaves.
+copy the PUBLIC `ca.pem` (`$SPROTT_CA_PATH`); `ca.key` never leaves.
 
 **Auth:** the api-key is the AGENT's identity (agent ≡ api-key,
 account-level) and the proxy verifies it **before any substitution** —

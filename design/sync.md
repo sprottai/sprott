@@ -57,7 +57,7 @@ recreate. Split them:
 
 | op | id | `K` | items | what devices do |
 |---|---|---|---|---|
-| **Clear contents** | same | same | emptied | normal content pull (blob now empty); nothing else changes — the agent's `SAFECLAW_VAULT_URL` keeps working |
+| **Clear contents** | same | same | emptied | normal content pull (blob now empty); nothing else changes — the agent's `SPROTT_VAULT_URL` keeps working |
 | **Delete vault** | **retired forever** | gone | gone | pull sees a **tombstone** → drop local `vault.dat`, lock, forget, zeroize `K`; the agent's URL now 404s (re-pair expected) |
 | **Create / recreate** | **brand-new id** | fresh | fresh | a new vault to enroll — re-pair, `sc env` again |
 

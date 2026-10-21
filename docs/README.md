@@ -1,55 +1,72 @@
-# Sprott Docs
+---
+description: "Sprott is the access layer for AI agents: your agents get access, never the keys, and you get a live picture of every agent, with control over every permission. What it is, how it works, and where to start."
+---
 
-This documentation explains Sprott through concepts, task guides, security
-pages, and reference pages. Contributor design docs live outside this tree in
-[`design/`](https://github.com/sprottai/sprott/tree/main/design).
+# What is Sprott
 
-New here? Read [Overview](overview.md), then do the
-[Quickstart](quickstart.md).
+**The access layer for AI agents.**
 
-## Concepts
+Your agents get access, never the keys. You get a live picture of every
+agent on your team, with control over every permission.
 
-| Page | The module |
+1. **Credential broker.** The agent works with a placeholder, and Sprott
+   swaps in the real key on the way out, right on the agent's machine. It
+   works on any network, and our cloud never sees your traffic.
+2. **Overview.** Every agent, live, in one picture, and control of any in
+   one click: the [overview](activity.md#the-overview).
+3. **Passkey approvals.** Everyday calls pass your rules. Only the risky call
+   waits for your face or fingerprint.
+4. **Activity log.** Every call: which agent, on which machine, for whom,
+   and who approved it.
+5. **Know your agent.** Every action is signed by the agent that took it and
+   by the person who approved it. SUDP, our published protocol, ties each
+   approval to that one call.
+6. **Connect once.** Connect a service once, and every agent you allow can
+   use it, on every machine. OAuth tokens renew on their own.
+
+## Start
+
+| | |
 |---|---|
-| [Overview](overview.md) | The whole model on one page: phantoms, the broker, passkey approvals |
-| [Vault](vault.md) | Where credentials live: sealed under your passkey, synced blind |
-| [Connections](connections.md) | The catalog, host anchors, and how a secret becomes a phantom |
-| [Broker](broker.md) | `sprott run`: one local egress point that swaps phantoms for values |
-| [Approvals & policy](approvals.md) | Who decides what runs: levels, rules, single-use grants |
-| [Agents](agents.md) | Agent identities: attribution without possession |
+| [Quickstart](quickstart.md) | Install, pair, add a key and make the first call. |
+| [Set up with your agent](for-your-agent.md) | One prompt, and your agent runs the setup. |
+| [Work as a team](team.md) | One shared vault for the whole team's agents. |
+| [Secrets by link](drop.md) | Ask someone for a secret, or share one, with a one-time link. They need no account. |
+| [FAQ](faq.md) | Short answers. |
 
-## Guides
+Are you an AI agent? Run `curl -fsSL https://sprott.ai/install.sh | sh` and
+follow what it prints.
 
-| Page | The task |
+## How it works
+
+The agent never holds a key. It puts a **phantom** where the key goes, and
+runs the command through Sprott:
+
+```bash
+GITHUB_TOKEN=__sprott__github__ sprott run -- gh pr list
+```
+
+A broker on your machine checks the agent's signature, the destination and
+your policy, then swaps in the real token on the way to `api.github.com`. The
+agent gets the response, never the key. That check, on every request and
+before any key is used, is zero trust for agents.
+
+| Part | What it does |
 |---|---|
-| [Quickstart](quickstart.md) | Zero to first brokered call in five minutes |
-| [`sprott run` and phantoms](sc-run.md) | The patterns, and the `sprott get` anti-pattern |
-| [For your agent](for-your-agent.md) | Handing Sprott to an agent: skill file, paste-ready prompt |
+| [Vaults](vault.md) | Hold your credentials, sealed under your passkey. Personal, or shared with your team. |
+| [Connections](connections.md) | Bind a credential to a service's hosts and give it a phantom. |
+| [Phantoms and the proxy](broker.md) | Swap the phantom for the real value as the request leaves your machine. |
+| [Identity](agents.md) | Give every agent, machine and person its own key. |
+| [Policy and approvals](approvals.md) | Decide each request. Sensitive ones wait for your passkey. |
+| [Activity](activity.md) | Record every call: which agent, which machine, who approved. |
 
-## Security
-
-| Page | The question |
-|---|---|
-| [Design principles](design-principles.md) | The rules the whole system is built on |
-| [Security model](security-model.md) | Where keys live, what the cloud sees, what compromise costs |
+Approvals are built on SUDP, our protocol for passkey-signed, single-use
+grants ([paper](https://arxiv.org/pdf/2604.24920)). The guarantees:
+[Security model](security-model.md).
 
 ## Reference
 
-For users and service authors, in [`reference/`](reference/):
-[services.md](reference/services.md) (writing a `service.toml`),
-[policy.md](reference/policy.md) (per-action decisions),
-[diagnostics.md](reference/diagnostics.md) (every error code, with fixes),
-[passkey-support.md](reference/passkey-support.md) (which devices can encrypt a vault),
-[platform-support.md](reference/platform-support.md) (which OSes run the `sprott` binary),
-[consent-templates.md](reference/consent-templates.md) (approval-copy grammar).
-
-## Design docs
-
-For contributors reading the source, outside this tree in
-[`design/`](https://github.com/sprottai/sprott/tree/main/design):
-[protocol.md](https://github.com/sprottai/sprott/blob/main/design/protocol.md) (SUDP cryptographic profile),
-[credential-broker.md](https://github.com/sprottai/sprott/blob/main/design/credential-broker.md) (the broker architecture),
-[connection-schema.md](https://github.com/sprottai/sprott/blob/main/design/connection-schema.md) (vault data shapes),
-[sync.md](https://github.com/sprottai/sprott/blob/main/design/sync.md) / [sse-sync.md](https://github.com/sprottai/sprott/blob/main/design/sse-sync.md) (cloud sync),
-[request-scope.md](https://github.com/sprottai/sprott/blob/main/design/request-scope.md) (approval scope binding),
-[stores-and-items.md](https://github.com/sprottai/sprott/blob/main/design/stores-and-items.md) (stores and vault content model).
+[CLI](reference/cli.md) · [service.toml](reference/services.md) ·
+[Policy rules](reference/policy.md) · [Error codes](reference/diagnostics.md) ·
+[Platforms](reference/platform-support.md) ·
+[Passkeys](reference/passkey-support.md) · [Plans](reference/plans.md)

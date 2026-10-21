@@ -36,7 +36,7 @@ fn cloud_and_key() -> Result<(String, String), String> {
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::util::http_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client init: {}", e))
@@ -142,9 +142,9 @@ async fn add_cli(args: AgentAddArgs) -> Result<(), String> {
     // emitted (it was legacy dual-auth cruft the shim stripped anyway). So there's
     // no secret to guard: this output can be shown, and appended to the agent's env
     // file directly. The daemon still holds an account-roster row for this AIK.
-    println!("SAFECLAW_BROKER_URL={}", added.broker_url);
+    println!("SPROTT_BROKER_URL={}", added.broker_url);
     println!(
-        "SAFECLAW_AGENT_IDENTITY={}",
+        "SPROTT_AGENT_IDENTITY={}",
         env_value(&added.identity_path.display().to_string())
     );
 
@@ -304,8 +304,8 @@ mod env_value_tests {
     #[test]
     fn a_path_with_a_space_is_quoted_once() {
         assert_eq!(
-            super::env_value("/home/a/.safeclaw/agents/claude/identity"),
-            "/home/a/.safeclaw/agents/claude/identity"
+            super::env_value("/home/a/.sprott/agents/claude/identity"),
+            "/home/a/.sprott/agents/claude/identity"
         );
         assert_eq!(super::env_value("/Users/Jo Lee/x"), "'/Users/Jo Lee/x'");
         assert_eq!(super::env_value("/it's"), "'/it'\\''s'");

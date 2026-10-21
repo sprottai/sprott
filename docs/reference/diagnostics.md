@@ -1,97 +1,131 @@
-# Diagnostics: error codes and surfaces
+---
+description: "Every Sprott error code, what it means and what to do next, plus where codes appear, CLI exit codes and the cases with no code."
+---
 
-This page lists Sprott error codes, response shapes, actions, and known blind spots. Sprott reports problems loudly and leaves unrelated upstream errors without a Sprott marker.
+# Error codes
 
-`src/error.rs::ScCode` is the single registry; this table is its rendering and
-changes in the same commit. Codes are snake_case and stable, so never renumber
-or reuse them.
+Sprott reports every refusal with a stable code and leaves upstream errors
+that are not its own unmarked. Codes are snake_case and never reused.
 
-## Wire shapes (one row, three renderings)
+## Where you see a code
 
-| Surface | Shape |
+| Where | Shape |
 |---|---|
-| Control port :23293 + API face :23294 | RFC 9457 `application/problem+json`: `type` (`https://sprott.ai/errors/<code>`), `title`, `status`, `detail` + extensions `code`, `action`, `cause`. Legacy `error`/`message` dual-emitted for one transition window. |
-| Proxy MITM plane :23294 | `text/plain` (deliberately never parseable as the upstream's payload), body first line `Sprott: <code>: <message>`, header `x-safeclaw-error: <code>`. Captive bodies (approval / widen) keep their text+JSON-tail format and carry the code header. |
-| CLI stderr | `<code>: <message>` (`cli/apierr.rs`), same code the wire carried. |
+| A command run through `sprott run` | The response body starts with `Sprott: <code>: <message>`, and carries the header `x-sprott-error: <code>`. The body is plain text, so it is never mistaken for the service's own reply. |
+| The daemon's local API | RFC 9457 `application/problem+json` with `type` (`https://sprott.ai/errors/<code>`), `title`, `status`, `detail`, and the extensions `code`, `action` and `cause`. |
+| CLI output | `<code>: <message>` on stderr. |
 
-`action` = what the agent does next: `unlock` (have the user unlock), `approve`
-(follow the approve URL in the body), `retry`, `configure` (a knob, named in
-the message), `fix_request`, `none` (explicit refusal, do not work around it).
-`cause` = attribution: `request`/`auth`/`vault`/`policy`/`config`/`internal`,
-plus `environment` and `upstream` which are NOT Sprott problems, reported by
-Sprott because it is the hop that observed them.
+`action` says what to do next:
+
+- `unlock`: unlock the vault;
+- `approve`: open the approval link in the body;
+- `retry`: try again;
+- `configure`: change the setting the message names;
+- `fix_request`: change the request;
+- `none`: a deliberate refusal; don't work around it.
+
+`cause` says whose problem it is: `request`, `auth`, `vault`, `policy`,
+`config` or `internal`. `environment` and `upstream` are not Sprott problems;
+Sprott reports them because it saw them happen.
 
 ## Codes
 
-| code | status | action | cause | meaning |
-|---|---|---|---|---|
-| `bad_request` | 400 | fix_request | request | malformed request |
-| `unauthorized` | 401 | configure | auth | missing/invalid credential on a control/API call |
-| `forbidden` | 403 | none | auth | authenticated but not allowed |
-| `not_found` | 404 | fix_request | request | no such resource |
-| `method_not_allowed` | 405 | fix_request | request | API face is GET-only |
-| `conflict` | 409 | fix_request | request | state conflict |
-| `vault_locked` | 423 | unlock | vault | vault has no in-memory key; canonical hint: run `sprott up` |
-| `vault_access_revoked` | 403 | configure | auth | this account is no longer a member of the vault; ask a vault admin to add it back |
-| `vault_deleted` | 410 | none | vault | this vault was deleted |
-| `vault_key_changed` | 409 | unlock | vault | the vault was re-keyed after its members changed; approve `sprott unlock` to read rows sealed under the new key |
-| `rate_limited` | 429 | retry | request | slow down |
-| `internal` | 500 | retry | internal | daemon bug/failure |
-| `ca_unavailable` | 500 | retry | internal | resident CA unreadable |
-| `agent_key` | 407 | configure | auth | phantom-bearing request without a verified agent identity (run the agent through `sprott run`; set it up with `sprott setup --name <name>` or `sprott agent add`) |
-| `agent_not_admitted` | 403 | configure | auth | the agent proved its identity, but the account's ledger does not admit it (never approved, or revoked); refused on every vault, whatever its Agent access page lists. Fix: run `sprott setup --name <name>` or `sprott agent add` |
-| `agent_not_in_account` | 403 | configure | auth | (cloud op relay) the agent isn't registered to the account this machine is signed in to. The daemon itself answers `agent_not_admitted`. Fix: run `sprott setup --name <name>` or `sprott agent add` on this machine |
-| `ambiguous_phantom` | 400 | fix_request | request | bare phantom on a multi-secret connection; use a role phantom |
-| `approval_needed` | 401 | approve | policy | policy asks; body carries approve/poll URLs + op id |
-| `approval_register` | 503 | retry | internal | could not open the approval op |
-| `approver_not_authorized` | 403 | none | auth | the passkey that approved is neither the requester nor an admin of this shared vault; the request stays pending |
-| `wk_refused_v2` | 400 | none | request | an approval delivered an unlock secret instead of the vault key and the approver's signature; an approver's identity key never leaves their browser, so the daemon refuses it. The request stays pending; reload the approval page (it needs the current console) |
-| `grant_id_invalid` | 403 | none | auth | the approval's identity signature is missing, does not verify, or names someone other than the owner of the passkey that approved; the request stays pending |
-| `device_not_admitted` | 403 | configure | auth | this device has no valid owner-signed admit over its device and daemon keys, so no approval can be sealed to it. Fix: run `sprott setup --name <name>` or `sprott login` |
-| `ledger_stale` | 423 | retry | environment | Sprott could not pull a verified device list from your account for 7 days; vaults are locked (data stays) until it reconnects |
-| `ledger_device_revoked` | 403 | configure | auth | the account owner revoked this device (a verified revoke in the device list; a newer admit of a re-paired device follows its revoke). The daemon latches it. Fix: run `sprott setup --name <name>` or `sprott login` to pair again |
-| `ledger_head_invalid` | 403 | none | auth | the account's device list does not match its owner-signed head (a forged or truncated list); the daemon keeps its previous view |
-| `broker_body_limit` | 413 | configure | config | body exceeds the inspectable cap; raise `--body-cap` if legitimate |
-| `egress_unreachable` | 502 | configure | environment | forward hop failed to connect (NOT a credential problem) |
-| `exposes_unsupported` | 400 | fix_request | request | role not mintable yet |
-| `host_forbidden` | 403 | none | policy | destination fails the private/metadata egress floor |
-| `host_not_anchored` | 403 | approve | policy | connection not anchored to this host; body carries a one-tap widen |
-| `multi_connection` | 400 | fix_request | request | one request named several connections |
-| `no_vault` | 403 | configure | config | no vault bound to the request |
-| `oauth_mint` | 502 | retry | upstream | token mint failed at the provider |
-| `phantom_plain_http` | 400 | fix_request | request | phantom requires HTTPS |
-| `policy_denied` | 403 | none | policy | blocked by an explicit `deny` rule |
-| `refresh_forbidden` | 403 | fix_request | policy | refresh tokens never leave the vault |
-| `secret_encoding` | 500 | none | internal | resolved credential not valid UTF-8 |
-| `store_unavailable` | 502 | retry | upstream | an external secret store (e.g. GCP Secret Manager) failed while resolving; daemon logs have the full error |
-| `unknown_connection` | 400 | fix_request | request | phantom names no known connection |
-| `upstream_body` | 502 | retry | upstream | request body could not be read |
-| `upstream_error` | 502 | retry | upstream | upstream answered but the exchange failed (NOT a credential problem) |
+### Vault and setup
 
-CLI exit codes: 0 ok, 1 error, 2 usage; `sprott op wait`: 0 approved, 3 expired
-or unknown, 4 timed out waiting, 5 not approved (a person said no, or a stated
-cause), 6 ended without a decision (withdrawn by the requester or superseded
-by a newer request). `sprott doctor` exits non-zero if any check fails.
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `vault_locked` | 423 | The vault is locked. | Run `sprott unlock`, then retry. |
+| `no_vault` | 403 | No vault is bound to the request. | Route credential traffic with `sprott run`. |
+| `vault_access_revoked` | 403 | This account is no longer a member of the vault. | Ask a vault admin to add it back. |
+| `vault_deleted` | 410 | The vault was deleted. | None. |
+| `vault_key_changed` | 409 | The vault's members changed and its key was replaced. This device doesn't have the new key yet. | Run `sprott unlock`. |
+| `team_lease_expired` | 403 | This machine has not reached the cloud for too long, so the shared vault's credentials stop serving. | Restore the network; it serves again once it reconnects. |
+| `ledger_stale` | 423 | Sprott could not reach your account for 7 days, so vaults are locked. Data stays. | Check the network, then `sprott up`. |
+| `upgrade_required` | 426 | This vault needs a newer Sprott. | Run `sprott upgrade`. |
 
-Op terminal states: the poll body's `status` stays `pending | ok | consumed |
-rejected`; a rejected op carries `reason`, and waiters distinguish a USER
-rejection from a withdrawal by the requester or a newer request replacing it:
-those say so and ask for a re-run, never "rejected".
-First-class wire statuses (`cancelled` / `superseded` / `expired`) need the
-console's chips to change in the same release: parked as follow-up.
+### Identity
 
-## Blind spots (the broker cannot yell here)
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `unauthorized` | 401 | The request carries no valid agent identity or credential. | Run the agent through `sprott run`, or set it up with `sprott agent add`. |
+| `agent_key` | 407 | A request with a phantom has no verified agent identity. | Run the agent through `sprott run`; set it up with `sprott setup --name <name>`. |
+| `agent_not_admitted` | 403 | The agent proved who it is, but your account does not admit it (never approved, or removed). It is refused on every vault. | Run `sprott setup --name <name>` or `sprott agent add`. |
+| `agent_not_in_account` | 403 | The agent is not registered to the account this machine is signed in to. | Run `sprott agent add` on this machine. |
+| `agent_not_authorized` | 403 | The agent is not turned on for this vault. | Turn it on in the vault's Agent access page; the message has the link. |
+| `mask_not_enabled` | 403 | The connection exists, but is not turned on for this agent. | The responsible member turns it on in the vault's Agent access page. |
+| `device_not_admitted` | 403 | This machine needs to be paired again. | Run `sprott login`. |
+| `ledger_device_revoked` | 403 | This machine was removed from the account. | Run `sprott login` to pair it again. |
+| `ledger_head_invalid` | 403 | The account's device list does not match its signed head. The daemon keeps its previous view. | None. |
 
-1. **Not in the path**: the process wasn't routed (no `sprott run` / env bundle):
-   the phantom reaches the upstream literally. Upstreams reject (401) or
-   silently degrade; either way there is no Sprott marker. The phantom
-   string itself (`__sc__*__`) is the greppable brand; the skill's routing
-   check covers this.
-2. **Locked before ever unlocking (this boot)**: anchor hosts live in the
-   sealed blob, so a daemon restarted while locked cannot recognize brokered
-   hosts and blind-tunnels them. Once a vault has been unlocked once, its
-   anchors are remembered across Lock (`state.last_host_unions`) and a phantom
-   sent while locked gets an explicit `vault_locked` instead.
+### Approvals
 
-Invariant for new proxy branches: every outcome is either **passthrough**
-(not ours) or a **registry-coded error**: no third state, no silent drop.
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `approval_needed` | 401 | Policy asks for an approval. The body has the approval link and the op id. | Open the link, or run `sprott op wait <op_id>`, then retry. |
+| `approval_register` | 503 | The approval request could not be opened. | Retry. |
+| `approver_not_authorized` | 403 | The person who approved is neither the requester nor an admin of this shared vault. The request stays pending. | Ask the requester or an admin to approve. |
+| `grant_id_invalid` | 403 | The approval's identity signature is missing, does not verify, or names someone other than the passkey's owner. The request stays pending. | Approve again from the approval page. |
+| `wk_refused_v2` | 400 | An approval delivered an unlock secret instead of the vault key and the approver's signature. The request stays pending. | Reload the approval page and approve again. |
+| `batch_verify_failed` | 409 | A batch approval could not be verified against the requests it covers. | Approve again from the Approvals page. |
+
+### Policy and hosts
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `policy_denied` | 403 | A `deny` rule blocks this request. | None. |
+| `host_not_anchored` | 403 | The destination is not one of the connection's hosts. The body offers an approval to add it. | Approve the new host, or fix the URL. |
+| `host_forbidden` | 403 | The destination is a private or cloud-metadata address. | None. |
+| `refresh_forbidden` | 403 | A refresh token never leaves the vault. | Use the connection's main phantom. |
+| `broker_body_limit` | 413 | The request body is larger than the broker inspects. | Raise `--body-cap` on `sprott serve` if the body is legitimate. |
+| `forbidden` | 403 | Authenticated, but not allowed. | None. |
+
+### Phantoms and requests
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `unknown_connection` | 400 | The phantom names no connection. | Copy the phantom from `sprott connection ls`. |
+| `phantom_unresolved` | 424 | A phantom could not be resolved, so the request was blocked before it left. | Check the name with `sprott connection ls`, or run `sprott unlock`. |
+| `ambiguous_phantom` | 400 | A bare phantom on a connection with several values. | Use the per-key phantom, `__sprott__<conn>__<key>__`. |
+| `multi_connection` | 400 | One request named several connections. | Send one connection per request. |
+| `phantom_plain_http` | 400 | Phantoms need HTTPS. | Use an `https://` URL. |
+| `phantom_renamed` | 400 | The request uses a phantom from before Sprott 2.0 (`__sc__<conn>__`). | Use the name in the message (`__sprott__<conn>__`). |
+| `exposes_unsupported` | 400 | That value can't be produced for this connection. | Use one of the connection's listed phantoms. |
+| `bad_request` | 400 | Malformed request. | Fix the request. |
+| `not_found` | 404 | No such resource. | Fix the request. |
+| `method_not_allowed` | 405 | The local API accepts only GET. | Fix the request. |
+| `conflict` | 409 | State conflict. | Fix the request. |
+| `rate_limited` | 429 | Too many requests. | Slow down. |
+
+### Network and services
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `egress_unreachable` | 502 | The daemon could not connect onward. Not a credential problem. | Check the network, or `sprott proxy set` behind a corporate proxy. |
+| `upstream_error` | 502 | The service answered, but the exchange failed. Not a credential problem. | Retry. |
+| `upstream_body` | 502 | The request body could not be read. | Retry. |
+| `oauth_mint` | 502 | The provider refused to issue a token. | Retry; reconnect the account in the console if it keeps failing. |
+| `store_unavailable` | 502 | An external secret store failed while resolving a value. | Retry; `sprott log` has the full error. |
+
+### Internal
+
+| Code | Status | What it means | What to do |
+|---|---|---|---|
+| `internal` | 500 | Daemon failure. | Retry; `sprott log` for details. |
+| `ca_unavailable` | 500 | The local certificate authority could not be read. | Retry; `sprott restart`. |
+| `secret_encoding` | 500 | The stored value is not valid UTF-8. | Store the value again. |
+
+## Exit codes
+
+All commands exit `0` on success, `1` on error and `2` on a usage error.
+`sprott doctor` exits non-zero if any check fails. `sprott op wait` has its
+own codes: [CLI](cli.md#exit-codes).
+
+## When there is no Sprott code
+
+- **The command was not routed.** Without `sprott run`, the phantom reaches
+  the service as a literal string. The service refuses it (usually 401) and
+  there is no `Sprott:` line. Check that the command runs under `sprott run`.
+- **The daemon restarted and the vault was never unlocked.** The broker
+  can't recognise a connection's hosts until the vault has been unlocked
+  once, so it passes that traffic through. Run `sprott unlock`. After the
+  first unlock, a phantom sent while locked gets `vault_locked`.

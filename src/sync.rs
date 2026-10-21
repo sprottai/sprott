@@ -9,7 +9,7 @@
 //! left untouched and a web edit shows up on the next daemon (re)start.
 //!
 //! The cloud never decrypts: the blob is passkey-sealed (W_c is not in it).
-//! Auth is the daemon's device-key (`~/.safeclaw/device-key`, a `sc_device_`
+//! Auth is the daemon's device-key (`~/.sprott/device-key`, a `sc_device_`
 //! token), distinct from the agent→daemon broker api-key.
 //!
 //! Best-effort by design: ordinary failures log and leave local state untouched.
@@ -164,11 +164,11 @@ pub enum PullOutcome {
     Deleted,
 }
 
-/// Read the persisted device-key (`~/.safeclaw/device-key`, written by
+/// Read the persisted device-key (`~/.sprott/device-key`, written by
 /// `sc login`). Returns None when the device hasn't been paired.
 pub fn device_key() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let raw = std::fs::read_to_string(home.join(".safeclaw").join("device-key")).ok()?;
+    let dir = crate::names::data_dir()?;
+    let raw = std::fs::read_to_string(dir.join("device-key")).ok()?;
     let trimmed = raw.trim().to_string();
     if trimmed.is_empty() {
         None
@@ -1896,11 +1896,11 @@ fn event_from_row(row: &crate::audit::ApprovalRow) -> AuditEventWire {
 /// The `audit_ceremonies` switch: ship control-plane terminal outcomes
 /// alongside Use ops? Default ON (user decision 2026-07-14: the console's
 /// approved tile counts every consent terminal). Same shape as
-/// `sync_stream_enabled` — env `SAFECLAW_AUDIT_CEREMONIES` beats the config
+/// `sync_stream_enabled` — env `SPROTT_AUDIT_CEREMONIES` beats the config
 /// key, `off`-family synonyms disable, anything unrecognized stays on the
 /// default but warns once.
 fn audit_ceremonies_enabled(cfg: &crate::cli::active::CliConfig) -> bool {
-    let v = std::env::var("SAFECLAW_AUDIT_CEREMONIES")
+    let v = std::env::var("SPROTT_AUDIT_CEREMONIES")
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
@@ -9672,7 +9672,7 @@ mod tests {
 
     /// `forget_vault` removes a known vault by vid alone and is idempotent.
     /// (Drives the cloud-sync delete path's CLI-config cleanup.) Runs against a
-    /// temp HOME so the developer's real `~/.safeclaw/config.toml` is untouched.
+    /// temp HOME so the developer's real `~/.sprott/config.toml` is untouched.
     #[test]
     fn forget_vault_by_vid_is_idempotent() {
         use crate::cli::active::{self, CliConfig, KnownVault};

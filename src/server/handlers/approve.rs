@@ -62,7 +62,7 @@ pub async fn get_op(
 
 /// Request header carrying an Export's waiter secret (E1,
 /// design/approvals-inbox.md D2). Never logged.
-pub const WAITER_HEADER: &str = "x-safeclaw-waiter";
+pub const WAITER_HEADER: &str = "x-sprott-waiter";
 
 async fn get_op_json(
     state: Arc<AppState>,
@@ -91,7 +91,7 @@ async fn get_op_json(
 /// sees identical JSON whether it hit the control plane or the proxy port. Pure
 /// read — briefly locks `approvals`, no I/O.
 ///
-/// `waiter` = the `x-safeclaw-waiter` header, if any. An Export's plaintext is
+/// `waiter` = the `x-sprott-waiter` header, if any. An Export's plaintext is
 /// released (and consumed) ONLY to a poll presenting the op's waiter secret
 /// (E1): every other poll sees status but no `value`, and consumes nothing.
 pub fn op_poll_value(state: &AppState, op_id: &str, waiter: Option<&str>) -> Result<Value> {
@@ -3140,7 +3140,7 @@ mod tests {
     fn test_state_in(tag: &str) -> AppState {
         let cfg = crate::config::Config {
             state_dir: std::path::PathBuf::from(format!(
-                "/tmp/safeclaw-test-approve-{}{}",
+                "/tmp/sprott-test-approve-{}{}",
                 std::process::id(),
                 tag
             )),
