@@ -23,6 +23,13 @@
 //! signals below instead. Same hints-not-data rule: the signals carry
 //! nothing; the consumers re-run their existing fetch/poll paths, which stay
 //! the source of truth.
+//!
+//! v1.2 (idle traffic) adds two optional hello caps. `cursors`: each hello
+//! row also carries `items_seq` / `keyset_seq`, so a vault whose cursors match
+//! costs no pull at all on a reconnect. `vaults`: an account `vaults` event
+//! when the account gains a vault, which wakes vault discovery. A vault
+//! discovered after startup joins the stream (the dispatcher re-dials with
+//! the new `?vids`). Without a cap every consumer keeps its older cadence.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
@@ -165,6 +172,20 @@ pub enum StreamHealth {
 /// free functions with no AppState handle.
 static AGENT_HASH_EVENTS: Notify = Notify::const_new();
 static DEVICE_AUTH_REJECTED: Notify = Notify::const_new();
+/// Wakes `sync::discovery_reconcile_loop` (the account gained a vault). Fired
+/// on a `vaults` stream event and after every hello, like the agent-hash
+/// signal: a reconnect is where a lost event is recovered.
+static VAULT_EVENTS: Notify = Notify::const_new();
+
+/// Arm a wake on the account-vaults signal (`notify_one` semantics, see
+/// [`agent_hashes_notified`]).
+pub fn vaults_notified() -> tokio::sync::futures::Notified<'static> {
+    VAULT_EVENTS.notified()
+}
+
+fn notify_vaults() {
+    VAULT_EVENTS.notify_one();
+}
 
 /// Arm a wake on the agent-hash signal. `notify_one` semantics: a fire with
 /// no waiter parks a permit, so an event landing while the consumer is
@@ -336,6 +357,12 @@ struct StreamCaps {
     vids: std::collections::HashSet<String>,
     op_events: bool,
     agent_hash_events: bool,
+    /// `cursors`: hello rows carry `items_seq` / `keyset_seq`, so a hello
+    /// can say "nothing changed" per vault instead of forcing a pull round.
+    cursors: bool,
+    /// `vaults`: the backend emits an account `vaults` event whenever the
+    /// account gains a vault (create, or seated as a member).
+    vault_events: bool,
 }
 
 static STREAM_CAPS: LazyLock<Mutex<StreamCaps>> =
@@ -355,14 +382,32 @@ pub fn agent_hash_events_live() -> bool {
     STREAM_CAPS.lock().unwrap().agent_hash_events
 }
 
-fn set_stream_caps(vids: std::collections::HashSet<String>, caps: Option<&serde_json::Value>) {
-    let list: Vec<&str> = caps
-        .and_then(|c| c.as_array())
+/// Does the connected backend put per-vault cursors in hello? Gates both the
+/// cursor-gated hello (no pull for an unchanged vault) and the relaxed
+/// per-vault safety reconcile of the Sse shape.
+pub fn hello_cursors_live() -> bool {
+    STREAM_CAPS.lock().unwrap().cursors
+}
+
+/// Does the connected backend emit account `vaults` events? Gates vault
+/// discovery's relaxed cadence.
+pub fn vault_events_live() -> bool {
+    STREAM_CAPS.lock().unwrap().vault_events
+}
+
+fn caps_list(caps: Option<&serde_json::Value>) -> Vec<&str> {
+    caps.and_then(|c| c.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn set_stream_caps(vids: std::collections::HashSet<String>, caps: Option<&serde_json::Value>) {
+    let list = caps_list(caps);
     let mut s = STREAM_CAPS.lock().unwrap();
     s.op_events = list.contains(&"op");
     s.agent_hash_events = list.contains(&"agent_hashes");
+    s.cursors = list.contains(&"cursors");
+    s.vault_events = list.contains(&"vaults");
     s.vids = vids;
 }
 
@@ -376,11 +421,30 @@ pub struct Work {
     pub vault: Option<(u64, VaultStatus)>,
     pub items: bool,
     pub keys: bool,
+    /// A hello cursor (`items_seq`): pull items only if it is ahead of the
+    /// local cursor. `items` (unconditional) wins when both are set.
+    pub items_seq: Option<u64>,
+    /// A hello cursor (`keyset_seq`): pull the keyset only if it is ahead of
+    /// the local cursor. `keys` (unconditional) wins when both are set.
+    pub keyset_seq: Option<u64>,
 }
 
 impl Work {
     pub fn is_empty(&self) -> bool {
-        self.vault.is_none() && !self.items && !self.keys
+        self.vault.is_none()
+            && !self.items
+            && !self.keys
+            && self.items_seq.is_none()
+            && self.keyset_seq.is_none()
+    }
+}
+
+/// Max-merge two optional cursor hints (cursors only advance).
+fn max_hint(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
     }
 }
 
@@ -389,6 +453,8 @@ struct Pending {
     vault: Option<(u64, VaultStatus)>,
     items: bool,
     keys: bool,
+    items_seq: Option<u64>,
+    keyset_seq: Option<u64>,
     mode: Mode,
     /// ★★ "deleted" is STICKY for the cell's LIFETIME (survives `take_work`):
     /// backend emits from concurrent write handlers aren't serialized with
@@ -423,6 +489,8 @@ impl WakeCell {
                 vault: None,
                 items: false,
                 keys: false,
+                items_seq: None,
+                keyset_seq: None,
                 mode: Mode::Fallback,
                 deleted_sticky: false,
             }),
@@ -481,9 +549,21 @@ impl WakeCell {
         self.notify.notify_one();
     }
 
+    /// A hello row's cursors (`cursors` cap): the owning task pulls items /
+    /// the keyset only where the hint is ahead of its local cursor. Max-merged,
+    /// so a stale hello can never lower a fresher hint.
+    pub fn merge_cursors(&self, items_seq: Option<u64>, keyset_seq: Option<u64>) {
+        {
+            let mut p = self.pending.lock().unwrap();
+            p.items_seq = max_hint(p.items_seq, items_seq);
+            p.keyset_seq = max_hint(p.keyset_seq, keyset_seq);
+        }
+        self.notify.notify_one();
+    }
+
     pub fn has_work(&self) -> bool {
         let p = self.pending.lock().unwrap();
-        p.vault.is_some() || p.items || p.keys
+        p.vault.is_some() || p.items || p.keys || p.items_seq.is_some() || p.keyset_seq.is_some()
     }
 
     /// Drain the pending work (mode and the deleted-sticky bit stay).
@@ -493,7 +573,18 @@ impl WakeCell {
             vault: p.vault.take(),
             items: std::mem::take(&mut p.items),
             keys: std::mem::take(&mut p.keys),
+            items_seq: p.items_seq.take(),
+            keyset_seq: p.keyset_seq.take(),
         }
+    }
+
+    /// Merge a whole [`Work`] (a hello row) and wake the owner.
+    pub fn merge_work(&self, w: Work) {
+        if w.is_empty() {
+            return;
+        }
+        self.reinject(w);
+        self.notify.notify_one();
     }
 
     /// Put drained-but-unprocessed work back (the Sse shape's bounded retry:
@@ -512,6 +603,8 @@ impl WakeCell {
         }
         p.items |= w.items;
         p.keys |= w.keys;
+        p.items_seq = max_hint(p.items_seq, w.items_seq);
+        p.keyset_seq = max_hint(p.keyset_seq, w.keyset_seq);
     }
 }
 
@@ -663,12 +756,97 @@ fn find_line(buf: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+// ── The streamed vault set ───────────────────────────────────────────────────
+
+/// Every vault watcher's cell, registered by `sync::ensure_watcher` (at
+/// startup and on live discovery). WEAK refs only: a watcher that exits
+/// (tombstone, teardown) drops the sole strong ref, and the next (re)connect
+/// leaves its vid out of `?vids` with no back-channel.
+static STREAM_SET: LazyLock<Mutex<Vec<(String, Weak<WakeCell>)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+/// Fired when a registration changes [`STREAM_SET`]. The dispatcher re-dials
+/// when the vid selection differs from the one the live stream carries, so a
+/// vault discovered after startup joins the stream instead of staying on
+/// long-poll until a restart.
+static STREAM_SET_CHANGED: Notify = Notify::const_new();
+
+/// Offer a watcher's cell to the stream. Idempotent for the same cell; a new
+/// cell for a known vid replaces the old one.
+pub fn register_stream_vault(vid: &str, cell: Weak<WakeCell>) {
+    if cell.strong_count() == 0 {
+        return;
+    }
+    let changed = {
+        let mut set = STREAM_SET.lock().unwrap();
+        set.retain(|(_, w)| w.strong_count() > 0);
+        match set.iter_mut().find(|(v, _)| v == vid) {
+            Some((_, w)) if w.ptr_eq(&cell) => false,
+            Some((_, w)) => {
+                *w = cell;
+                true
+            }
+            None => {
+                set.push((vid.to_string(), cell));
+                true
+            }
+        }
+    };
+    if changed {
+        STREAM_SET_CHANGED.notify_one();
+    }
+}
+
+/// The registered cells still alive, in registration order (startup vaults
+/// first, so a later discovery never pushes one of them over the cap).
+fn live_stream_set() -> Vec<(String, Arc<WakeCell>)> {
+    let mut set = STREAM_SET.lock().unwrap();
+    set.retain(|(_, w)| w.strong_count() > 0);
+    set.iter()
+        .filter_map(|(v, w)| w.upgrade().map(|c| (v.clone(), c)))
+        .collect()
+}
+
+/// Which vids one stream carries (pure): shape-valid, in the given order, at
+/// most [`MAX_STREAM_VIDS`]. A vault left out stays on its long-poll.
+fn select_stream_vids<'a>(vids: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for vid in vids {
+        if out.len() >= MAX_STREAM_VIDS {
+            tracing::debug!(vault = %vid, "sync stream: over the {}-vid route cap; vault stays on long-poll", MAX_STREAM_VIDS);
+            continue;
+        }
+        if vid_shape_ok(vid) {
+            out.push(vid);
+        } else {
+            tracing::debug!(vault = %vid, "sync stream: vid fails the route shape; vault stays on long-poll");
+        }
+    }
+    out
+}
+
+/// The `?vids=` value for a selection: sorted, so the parameter is stable
+/// across reconnects and comparable for the re-subscribe check.
+fn vids_param<'a>(selected: impl IntoIterator<Item = &'a str>) -> String {
+    let mut vids: Vec<&str> = selected.into_iter().collect();
+    vids.sort_unstable();
+    vids.join(",")
+}
+
+/// The `?vids=` the stream SHOULD carry right now.
+fn desired_vids_param() -> String {
+    let live = live_stream_set();
+    vids_param(select_stream_vids(live.iter().map(|(v, _)| v.as_str())))
+}
+
 // ── Dispatcher — the connection owner ────────────────────────────────────────
 
 /// How one stream attempt ended.
 enum StreamEnd {
     /// hello was reached; the stream then lived `healthy_for` before dying.
     Died { healthy_for: Duration, why: String },
+    /// The registered vault set changed under a live stream: closed on
+    /// purpose to re-dial with the new `?vids`.
+    Resubscribe,
     /// Never reached hello.
     Failed(ConnectFail),
 }
@@ -682,10 +860,13 @@ enum ConnectFail {
     Transient(String),
 }
 
-/// The SSE connection owner, spawned once by `sync::spawn_watchers` next to
-/// the per-vault watch tasks. Holds only WEAK cell refs: a vault task that
-/// exits (tombstone) drops the sole strong ref, and the failed upgrade at the
-/// next (re)connect is how the vid leaves `?vids` — no back-channel needed.
+/// The SSE connection owner, spawned once by `sync::spawn_watchers`. The
+/// vault set is [`STREAM_SET`] (weak refs, read at every (re)connect): a
+/// vault task that exits (tombstone) drops the sole strong ref, and the
+/// failed upgrade at the next (re)connect is how the vid leaves `?vids`; a
+/// vault registered later (live discovery) makes the live stream re-dial
+/// with it (`StreamEnd::Resubscribe`, handled like a rotation). With no
+/// vault registered the dispatcher waits for the first one.
 ///
 /// State machine (design/sse-sync.md, backoff/flap discipline):
 ///  - connect budget 10s-to-headers + 5s-to-hello; 45s no-bytes liveness.
@@ -699,7 +880,6 @@ pub async fn dispatcher(
     state: Arc<crate::state::AppState>,
     cloud: String,
     dk: String,
-    cells: Vec<(String, Weak<WakeCell>)>,
     health: watch::Sender<StreamHealth>,
 ) {
     let cloud = cloud.trim_end_matches('/').to_string();
@@ -707,19 +887,22 @@ pub async fn dispatcher(
     let mut never_healthy: u32 = 0;
     let mut rotating = false;
     let mut announced_off = false;
-    tracing::debug!(vaults = cells.len(), "sync stream: dispatcher started");
+    tracing::debug!("sync stream: dispatcher started");
     loop {
         // Prune: a tombstoned vault's task exited and dropped its cell.
-        let live: Vec<(String, Arc<WakeCell>)> = cells
-            .iter()
-            .filter_map(|(vid, w)| w.upgrade().map(|c| (vid.clone(), c)))
-            .collect();
+        // Arm the set-change wake BEFORE reading the set (missed-wakeup
+        // pattern): a registration landing in between completes it at once.
+        let set_changed = STREAM_SET_CHANGED.notified();
+        let live = live_stream_set();
         if live.is_empty() {
             clear_stream_caps();
             let _ = health.send(StreamHealth::Down);
-            tracing::debug!("sync stream: no vaults left to stream; dispatcher exiting");
-            return;
+            rotating = false;
+            tracing::debug!("sync stream: no vaults to stream; waiting for one");
+            set_changed.await;
+            continue;
         }
+        drop(set_changed);
 
         // ★★ The switch is read at EVERY (re)connect.
         if !sync_stream_enabled() {
@@ -741,26 +924,18 @@ pub async fn dispatcher(
         // This attempt's vid-to-cell table is connection-local routing for one
         // shared SSE request. The cells themselves remain owned by runtimes.
         // See MAX_STREAM_VIDS for why we filter.
-        let mut stream_cells: HashMap<String, Arc<WakeCell>> = HashMap::new();
-        for (vid, cell) in &live {
-            if stream_cells.len() >= MAX_STREAM_VIDS {
-                tracing::debug!(vault = %vid, "sync stream: over the {}-vid route cap; vault stays on long-poll", MAX_STREAM_VIDS);
-                continue;
-            }
-            if vid_shape_ok(vid) {
-                stream_cells.insert(vid.clone(), Arc::clone(cell));
-            } else {
-                tracing::debug!(vault = %vid, "sync stream: vid fails the route shape; vault stays on long-poll");
-            }
-        }
+        let selected = select_stream_vids(live.iter().map(|(v, _)| v.as_str()));
+        let stream_cells: HashMap<String, Arc<WakeCell>> = live
+            .iter()
+            .filter(|(v, _)| selected.contains(&v.as_str()))
+            .map(|(v, c)| (v.clone(), Arc::clone(c)))
+            .collect();
         if stream_cells.is_empty() {
             go_down(&health, live.iter().map(|(_, c)| c));
             tokio::time::sleep(OFF_RECHECK).await;
             continue;
         }
-        let mut vids: Vec<&str> = stream_cells.keys().map(|s| s.as_str()).collect();
-        vids.sort_unstable(); // stable param across reconnects
-        let vids_param = vids.join(",");
+        let vids_param = vids_param(selected);
 
         match run_stream(
             &state,
@@ -773,6 +948,16 @@ pub async fn dispatcher(
         )
         .await
         {
+            StreamEnd::Resubscribe => {
+                // Our own close to pick up a newly registered vault: re-dial
+                // at once like a rotation (health stays Up, the new hello
+                // reconciles every vault, cursor-gated where the backend
+                // allows). Backoff state is untouched: this says nothing
+                // about the path's health.
+                rotating = true;
+                tracing::debug!("sync stream: vault set changed; re-dialing with the new set");
+                continue;
+            }
             StreamEnd::Died { healthy_for, why } => {
                 if healthy_for >= PROVEN_HEALTHY {
                     // ★★ ROTATION, not failure: Railway caps any request at
@@ -960,8 +1145,10 @@ async fn run_stream(
     // turns the failure mode into the recovery. With Railway rotating every
     // stream ≤15 min, the platform itself becomes the revocation backstop: a
     // revoke whose event fell into a gap goes unseen for at most one
-    // rotation before this resync picks it up.
+    // rotation before this resync picks it up. The `vaults` signal (vault
+    // discovery) gets the same treatment for the same reason.
     notify_agent_hashes();
+    notify_vaults();
     health.send_if_modified(|h| {
         if *h == StreamHealth::Up {
             false
@@ -981,8 +1168,25 @@ async fn run_stream(
     }
 
     let hello_at = Instant::now();
+    let mut live_until = tokio::time::Instant::now() + LIVENESS;
     loop {
-        match tokio::time::timeout(LIVENESS, stream.next()).await {
+        let next = tokio::select! {
+            r = tokio::time::timeout_at(live_until, stream.next()) => r,
+            _ = STREAM_SET_CHANGED.notified() => {
+                // A vault registered since this stream's dial. Re-dial only
+                // if the selection it would carry differs (the cap, or a
+                // registration of an already streamed vid, can leave it
+                // unchanged).
+                if desired_vids_param() != vids_param {
+                    return StreamEnd::Resubscribe;
+                }
+                continue;
+            }
+        };
+        if matches!(next, Ok(Some(Ok(_)))) {
+            live_until = tokio::time::Instant::now() + LIVENESS;
+        }
+        match next {
             // 45s with no bytes (heartbeats come every 20s): the stream is
             // dead even if the socket hasn't noticed.
             Err(_) => {
@@ -1066,6 +1270,7 @@ where
 /// how many vids hello confirmed.
 fn apply_hello(cells: &HashMap<String, Arc<WakeCell>>, hello: &serde_json::Value) -> usize {
     let vaults = hello.get("vaults").and_then(|v| v.as_object());
+    let cursors = caps_list(hello.get("caps")).contains(&"cursors");
     let mut n = 0usize;
     let mut confirmed = std::collections::HashSet::new();
     for (vid, cell) in cells {
@@ -1073,10 +1278,7 @@ fn apply_hello(cells: &HashMap<String, Arc<WakeCell>>, hello: &serde_json::Value
             Some(row) => {
                 n += 1;
                 confirmed.insert(vid.clone());
-                let (version, status) = parse_vault_hint(row);
-                cell.merge_vault(version, status);
-                cell.set_items();
-                cell.set_keys();
+                cell.merge_work(hello_row_work(row, cursors));
                 cell.set_mode(Mode::Sse);
             }
             None => cell.set_mode(Mode::Fallback),
@@ -1087,6 +1289,35 @@ fn apply_hello(cells: &HashMap<String, Arc<WakeCell>>, hello: &serde_json::Value
     // the Up edge must never read stale reach.
     set_stream_caps(confirmed, hello.get("caps"));
     n
+}
+
+/// The work one hello row asks of its vault task. Without the `cursors` cap
+/// (an older backend) every confirmed vault runs a full pull round: the
+/// vault slot plus unconditional items + keys flags. With it, the row's
+/// `items_seq` / `keyset_seq` become cursor hints the task compares with its
+/// local cursors, so an unchanged vault costs nothing; a cursor the row does
+/// not carry is unknown and keeps the unconditional flag. The vault slot is
+/// version-gated by the task either way.
+fn hello_row_work(row: &serde_json::Value, cursors: bool) -> Work {
+    let (version, status) = parse_vault_hint(row);
+    let vault = Some((version, status));
+    if !cursors {
+        return Work {
+            vault,
+            items: true,
+            keys: true,
+            ..Work::default()
+        };
+    }
+    let items_seq = row.get("items_seq").and_then(|v| v.as_u64());
+    let keyset_seq = row.get("keyset_seq").and_then(|v| v.as_u64());
+    Work {
+        vault,
+        items: items_seq.is_none(),
+        keys: keyset_seq.is_none(),
+        items_seq,
+        keyset_seq,
+    }
 }
 
 /// Route one parsed record into its vault's cell, or (v1.1) an
@@ -1111,6 +1342,11 @@ fn dispatch_record_with_context(
     // this routes before the JSON gate — a garbled body must still wake it.
     if rec.event == "agent_hashes" {
         notify_agent_hashes();
+        return;
+    }
+    // Same shape: account-scoped, payload-free; discovery re-lists.
+    if rec.event == "vaults" {
+        notify_vaults();
         return;
     }
     let Ok(data) = serde_json::from_str::<serde_json::Value>(&rec.data) else {
@@ -1162,6 +1398,7 @@ fn dispatch_record_with_context(
         // connect-time hello does (design: after EVERY apply_hello).
         apply_hello(cells, &data);
         notify_agent_hashes();
+        notify_vaults();
         return;
     }
     if rec.event == "op" {
@@ -1288,7 +1525,114 @@ mod tests {
         set_stream_caps(vids, None);
         assert!(!op_events_for("aaaa"));
         assert!(!agent_hash_events_live());
+        assert!(!hello_cursors_live());
+        assert!(!vault_events_live());
+        // v1.2 caps: each is its own proof, nothing implies another.
+        set_stream_caps(Default::default(), Some(&serde_json::json!(["cursors"])));
+        assert!(hello_cursors_live());
+        assert!(!vault_events_live());
+        set_stream_caps(Default::default(), Some(&serde_json::json!(["vaults", "op"])));
+        assert!(!hello_cursors_live());
+        assert!(vault_events_live());
         clear_stream_caps();
+        assert!(!hello_cursors_live());
+        assert!(!vault_events_live());
+    }
+
+    // ── v1.2: cursor-gated hello, dynamic vault set ──
+
+    #[test]
+    fn hello_row_without_cursors_cap_pulls_everything() {
+        // An older backend: every confirmed vault runs a full round, even if
+        // the row happens to carry cursor fields.
+        let row = serde_json::json!({"version": 7, "status": "live", "items_seq": 3, "keyset_seq": 2});
+        let w = hello_row_work(&row, false);
+        assert_eq!(w.vault, Some((7, VaultStatus::Live)));
+        assert!(w.items && w.keys);
+        assert_eq!((w.items_seq, w.keyset_seq), (None, None));
+    }
+
+    #[test]
+    fn hello_row_with_cursors_cap_carries_hints() {
+        let row = serde_json::json!({"version": 7, "status": "live", "items_seq": 3, "keyset_seq": 2});
+        let w = hello_row_work(&row, true);
+        assert_eq!(w.vault, Some((7, VaultStatus::Live)));
+        assert!(!w.items && !w.keys);
+        assert_eq!((w.items_seq, w.keyset_seq), (Some(3), Some(2)));
+        // A cursor the row does not carry is unknown: that pull stays
+        // unconditional.
+        let row = serde_json::json!({"version": 7, "items_seq": 3});
+        let w = hello_row_work(&row, true);
+        assert!(!w.items && w.keys);
+        assert_eq!((w.items_seq, w.keyset_seq), (Some(3), None));
+        // A tombstone row still reaches the vault slot.
+        let row = serde_json::json!({"version": 9, "status": "deleted", "items_seq": 0, "keyset_seq": 0});
+        assert_eq!(
+            hello_row_work(&row, true).vault,
+            Some((9, VaultStatus::Deleted))
+        );
+    }
+
+    #[test]
+    fn cell_cursor_hints_max_merge_and_drain() {
+        let cell = WakeCell::new();
+        assert!(!cell.has_work());
+        cell.merge_cursors(Some(5), None);
+        cell.merge_cursors(Some(3), Some(4)); // a stale hello never lowers a hint
+        assert!(cell.has_work());
+        let w = cell.take_work();
+        assert_eq!((w.items_seq, w.keyset_seq), (Some(5), Some(4)));
+        assert!(!w.items && !w.keys && w.vault.is_none());
+        assert!(!cell.has_work());
+        // A failed round puts the hints back; a fresher one wins.
+        cell.merge_cursors(Some(8), None);
+        cell.reinject(w);
+        let w = cell.take_work();
+        assert_eq!((w.items_seq, w.keyset_seq), (Some(8), Some(4)));
+        // merge_work on an empty Work is a no-op.
+        cell.merge_work(Work::default());
+        assert!(!cell.has_work());
+    }
+
+    #[test]
+    fn stream_vid_selection_caps_and_filters_in_order() {
+        let vids: Vec<String> = (0..40).map(|i| format!("{:04x}", i)).collect();
+        let mut input: Vec<&str> = vec!["NOT-A-VID"];
+        input.extend(vids.iter().map(|v| v.as_str()));
+        let sel = select_stream_vids(input);
+        assert_eq!(sel.len(), MAX_STREAM_VIDS);
+        // Registration order decides who fits: the earliest 32 valid vids.
+        assert_eq!(sel[0], "0000");
+        assert_eq!(sel[MAX_STREAM_VIDS - 1], format!("{:04x}", MAX_STREAM_VIDS - 1));
+        assert!(!sel.contains(&"NOT-A-VID"));
+        // The param is order-independent, so the re-subscribe check compares
+        // sets, not registration order.
+        assert_eq!(vids_param(["bb", "aa"]), vids_param(["aa", "bb"]));
+        assert_eq!(vids_param(["bb", "aa"]), "aa,bb");
+    }
+
+    #[test]
+    fn stream_set_registration_is_weak_and_idempotent() {
+        let vid = "5e7-0000-0000-test-only";
+        let a = Arc::new(WakeCell::new());
+        register_stream_vault(vid, Arc::downgrade(&a));
+        register_stream_vault(vid, Arc::downgrade(&a)); // same cell: no-op
+        let count = |v: &str| live_stream_set().iter().filter(|(x, _)| x == v).count();
+        assert_eq!(count(vid), 1);
+        // A new cell for the same vid replaces the old one.
+        let b = Arc::new(WakeCell::new());
+        register_stream_vault(vid, Arc::downgrade(&b));
+        assert_eq!(count(vid), 1);
+        assert!(live_stream_set()
+            .iter()
+            .any(|(x, c)| x == vid && Arc::ptr_eq(c, &b)));
+        // A watcher that exits drops its cell, and the vid leaves the set.
+        drop(a);
+        drop(b);
+        assert_eq!(count(vid), 0);
+        // A dead weak is never registered.
+        register_stream_vault(vid, Weak::new());
+        assert_eq!(count(vid), 0);
     }
 
     // ── SSE parser ──
@@ -1506,6 +1850,22 @@ mod tests {
             agent_hashes_notified().now_or_never().is_none(),
             "permit consumed"
         );
+    }
+
+    /// `vaults` (v1.2) is account-scoped and payload-free like
+    /// `agent_hashes`: it wakes vault discovery, garbled body or not.
+    #[test]
+    fn dispatch_routes_vaults_to_discovery_notify() {
+        let cells = HashMap::new();
+        dispatch_record(
+            &cells,
+            &SseRecord {
+                event: "vaults".into(),
+                data: "{}".into(),
+            },
+        );
+        assert!(vaults_notified().now_or_never().is_some());
+        assert!(vaults_notified().now_or_never().is_none(), "permit consumed");
     }
 
     /// `op` events route by op_id to the registered poller; unknown or
