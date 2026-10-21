@@ -2329,6 +2329,22 @@ refresh_token = "REFRESH_TOKEN"
         std::path::PathBuf,
         String,
     ) {
+        rotation_fixture_at("refresh_token", value, cache_holding(value))
+    }
+
+    /// [`rotation_fixture`] with the slot `slot` and the session `cache`.
+    fn rotation_fixture_at(
+        slot: &str,
+        value: &str,
+        cache: crate::state::SecretsCache,
+    ) -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        &'static str,
+        Vec<u8>,
+        std::path::PathBuf,
+        String,
+    ) {
         use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
         use crate::storage::sealed_vault::write_per_item_atomic;
         type S = sudp::primitives::StdPrimitives;
@@ -2344,15 +2360,15 @@ refresh_token = "REFRESH_TOKEN"
                 keys,
                 vid,
                 ItemNs::Secret,
-                "refresh_token",
+                slot,
                 1,
-                &ItemPayload::secret_live("refresh_token", value),
+                &ItemPayload::secret_live(slot, value),
             )
             .unwrap();
         pv.items.get_mut(&id).unwrap().synced_version = 1;
         let path = state.vaults.per_item_path(vid).unwrap();
         write_per_item_atomic(&path, &pv).unwrap();
-        state.unlock_vault(vid.into(), cache_holding(value), zeroize::Zeroizing::new(material.clone()));
+        state.unlock_vault(vid.into(), cache, zeroize::Zeroizing::new(material.clone()));
         (dir, state, vid, material, path, id)
     }
 
@@ -2465,6 +2481,95 @@ refresh_token = "REFRESH_TOKEN"
             .await
             .unwrap();
         assert_eq!(minted, b"at-1");
+    }
+
+    /// Two mints that read the same refresh token at once, on a provider that
+    /// rotates it: exactly one refresh reaches the token endpoint (the other
+    /// would send a token the provider already replaced), and both get the
+    /// same access token.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_mints_on_a_rotating_provider_refresh_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        // A rotating token endpoint: rt-0 → rt-1 (+ at-1); a replaced token
+        // is refused, as a provider with reuse detection would.
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |body: String| {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    // Hold the response so the second mint is waiting meanwhile.
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if body.contains("refresh_token=rt-0") {
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "access_token": "at-1", "expires_in": 3600, "refresh_token": "rt-1"
+                            })),
+                        )
+                    } else {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({ "error": "invalid_grant" })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut def = crate::service::gate::admit_toml(
+            r#"
+[service]
+id = "acme"
+name = "Acme"
+hosts = ["api.acme.dev"]
+secrets = ["ACME_REFRESH_TOKEN"]
+[auth]
+type = "oauth2"
+authorization_url = "https://auth.acme.dev/authorize"
+token_url = "https://auth.acme.dev/token"
+client_id = "acme-public"
+refresh_token = "ACME_REFRESH_TOKEN"
+"#,
+        )
+        .unwrap();
+        match def.auth.as_mut() {
+            Some(crate::service::AuthDef::Oauth2(o)) => {
+                o.token_url = Some(format!("http://{}/token", addr));
+            }
+            _ => panic!("an oauth2 def"),
+        }
+        let mut cache = cache_holding("rt-0");
+        cache.custom_services.insert("acme".into(), def);
+        let (_dir, state, vid, material, path, _) =
+            rotation_fixture_at("ACME_REFRESH_TOKEN", "rt-0", cache);
+
+        let (a, b) = tokio::join!(
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0"),
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0"),
+        );
+        assert_eq!(a.unwrap(), b"at-1");
+        assert_eq!(b.unwrap(), b"at-1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one refresh");
+        // The rotation was stored, and a later mint reading the replaced
+        // token (a stale fresh decrypt) still needs no refresh.
+        type S = sudp::primitives::StdPrimitives;
+        let stored = crate::storage::sealed_vault::read_per_item(&path)
+            .unwrap()
+            .unwrap()
+            .fold_view::<S>(crate::storage::item::VaultKeys::from_material(&material), vid)
+            .unwrap();
+        assert_eq!(stored.native_secrets["ACME_REFRESH_TOKEN"], b"rt-1");
+        let again = crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0")
+            .await
+            .unwrap();
+        assert_eq!(again, b"at-1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// A slot row this session's key cannot open is never written over: the

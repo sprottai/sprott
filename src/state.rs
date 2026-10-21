@@ -144,6 +144,15 @@ impl SecretsCache {
     }
 }
 
+/// `sha256(token)` hex: how a refresh token is keyed in memory.
+fn refresh_token_hash(token: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
 /// A provider-rotated refresh token not stored in the vault yet: `new` is the
 /// only valid copy (the provider refuses `old` now), `old` is the value the
 /// store still holds at its slot.
@@ -449,6 +458,12 @@ pub struct AppState {
     /// sha256(authorization code) → when this daemon first tried to exchange
     /// it and failed transiently (the retry window counts from it).
     pub oauth_code_first_tried: Mutex<HashMap<String, std::time::Instant>>,
+    /// (vault, sha256(refresh token)) → the token a refresh in this process
+    /// rotated it to, and when: a mint that read the replaced token (before
+    /// it waited for the vault write lock, or from a fresh decrypt) follows
+    /// it instead of sending a token the provider refuses (some revoke the
+    /// whole token family on such a reuse). Entries self-reap.
+    pub oauth_rotated_to: Mutex<HashMap<(String, String), (zeroize::Zeroizing<String>, std::time::Instant)>>,
     /// Random per daemon PROCESS (hex). Rides every op-relay register so the
     /// backend can cancel a previous process's pending rows: the op store is
     /// in-memory and poll tasks spawn only at mint, so a pre-restart row can
@@ -601,6 +616,7 @@ impl AppState {
             external_fill_lock: tokio::sync::Mutex::new(()),
             oauth_redeemed_codes: Mutex::new(HashMap::new()),
             oauth_code_first_tried: Mutex::new(HashMap::new()),
+            oauth_rotated_to: Mutex::new(HashMap::new()),
             boot_id: {
                 use rand::RngCore as _;
                 let mut b = [0u8; 16];
@@ -2003,6 +2019,50 @@ impl AppState {
             .iter()
             .find(|((c, _), p)| c == conn_id && p.old.as_slice() == value)
             .map(|(_, p)| p.new.clone())
+    }
+
+    /// How long a rotation is remembered for [`Self::current_refresh_token`]:
+    /// past it every reader holds the rotated token anyway.
+    const ROTATED_TO_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// A refresh in this process rotated `old` to `new` (`vault_id`).
+    pub fn note_rotated_to(&self, vault_id: &str, old: &[u8], new: &str) {
+        let mut m = self.oauth_rotated_to.lock().unwrap();
+        let now = std::time::Instant::now();
+        m.retain(|_, (_, at)| now.duration_since(*at) < Self::ROTATED_TO_TTL);
+        m.insert(
+            (vault_id.to_string(), refresh_token_hash(old)),
+            (zeroize::Zeroizing::new(new.to_string()), now),
+        );
+    }
+
+    /// The refresh token connection `conn_id` holds NOW, given a `value` read
+    /// earlier: `value` followed through the rotations made since (by this
+    /// process, then any still pending a store). `None` when `value` is
+    /// current.
+    pub fn current_refresh_token(
+        &self,
+        vault_id: &str,
+        conn_id: &str,
+        value: &[u8],
+    ) -> Option<zeroize::Zeroizing<String>> {
+        let mut current: Option<zeroize::Zeroizing<String>> = None;
+        // Bounded: a chain is a handful of rotations; never loop on a cycle.
+        for _ in 0..16 {
+            let at = current.as_ref().map(|c| c.as_bytes()).unwrap_or(value);
+            let next = {
+                let m = self.oauth_rotated_to.lock().unwrap();
+                m.get(&(vault_id.to_string(), refresh_token_hash(at)))
+                    .filter(|(_, when)| when.elapsed() < Self::ROTATED_TO_TTL)
+                    .map(|(t, _)| t.clone())
+            }
+            .or_else(|| self.pending_rotation_of(vault_id, conn_id, at));
+            match next {
+                Some(n) if n.as_bytes() != at => current = Some(n),
+                _ => break,
+            }
+        }
+        current
     }
 
     /// Any rotated refresh token of `vault_id` not stored yet?
