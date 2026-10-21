@@ -86,10 +86,12 @@ pub fn write_atomic(path: &Path, vault: &SealedVault) -> Result<()> {
 
 /// Replace `path` with `bytes` atomically AND durably: write a uniquely named
 /// temp file, fsync it, rename it over `path`, then fsync the directory so the
-/// rename itself survives a crash. Without the two fsyncs a crash shortly
-/// after the rename can leave the old file or an empty one, which for a
+/// rename itself survives a crash. Without the file fsync a crash shortly
+/// after the rename can leave an empty or partial file, which for a
 /// provider-rotated refresh token means losing the only valid copy. On any
-/// error the temp file is removed.
+/// error before the rename lands the temp file is removed and the write is
+/// an error; once the rename landed the write is reported done (the directory
+/// fsync is best effort, logged).
 pub fn write_file_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
@@ -99,7 +101,7 @@ pub fn write_file_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     let written = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        sync_file(&f)?;
         drop(f);
         std::fs::rename(&tmp, path)
     })();
@@ -107,15 +109,41 @@ pub fn write_file_durable(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
-    // The directory entry: best effort where a directory cannot be opened
-    // for syncing (Windows); the file content is already on disk.
+    // The new content is in place: the directory entry's own flush cannot
+    // undo that, so its failure is logged, never reported as a failed write.
+    // (Windows cannot open a directory for syncing; nothing to do there.)
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            dir.sync_all()?;
+        if let Err(e) = std::fs::File::open(parent).and_then(|dir| sync_file(&dir)) {
+            tracing::warn!(dir = %parent.display(), "directory fsync after replace failed: {}", e);
         }
     }
     Ok(())
+}
+
+/// fsync `f`. On Apple platforms `File::sync_all` is `F_FULLFSYNC`, which
+/// network and FUSE file systems (SMB, NFS) reject: fall back to a plain
+/// fsync there instead of failing every write.
+fn sync_file(f: &std::fs::File) -> std::io::Result<()> {
+    match f.sync_all() {
+        #[cfg(unix)]
+        Err(e) if cfg!(target_vendor = "apple") && full_sync_unsupported(e.raw_os_error()) => {
+            rustix::fs::fsync(f).map_err(std::io::Error::from)
+        }
+        other => other,
+    }
+}
+
+/// Is `errno` the refusal of a file system that does not support
+/// `F_FULLFSYNC` (pure)?
+#[cfg(unix)]
+fn full_sync_unsupported(errno: Option<i32>) -> bool {
+    use rustix::io::Errno;
+    errno.is_some_and(|n| {
+        [Errno::NOTSUP, Errno::OPNOTSUPP, Errno::INVAL]
+            .iter()
+            .any(|e| e.raw_os_error() == n)
+    })
 }
 
 /// Look up a credential's WebAuthn public key from the registry.
@@ -1281,15 +1309,16 @@ fn digest_hex(d: &[u8; 32]) -> String {
     d.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Where [`PerItemVault::write_rotated_secret`] put the new value.
+/// What [`PerItemVault::write_rotated_secret`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RotatedWrite {
-    /// The secret's own row (item id).
-    InPlace(String),
-    /// A keep-both conflict copy (item id), because the secret's own row
-    /// cannot be read with this session's key; `None` when an identical
-    /// copy is already stored.
-    ConflictCopy(Option<String>),
+    /// The secret's row now holds the value (item id).
+    Written(String),
+    /// The row already held the value: nothing written.
+    AlreadyStored,
+    /// The row no longer holds the value the rotation replaced (a newer one
+    /// was written since, or the secret is gone): nothing written.
+    Superseded,
 }
 
 /// What [`PerItemVault::reconcile_from_view`] did: the item ids it wrote; the
@@ -2293,34 +2322,47 @@ impl PerItemVault {
     /// The caller holds the vault write lock across the refresh and this
     /// write, and every pull adopts rows under that same lock, so the row
     /// held now is the one the refresh started from: writing over it is the
-    /// plain "replace". The one exception is a row this key cannot open (a
-    /// keyset this session has not caught up with) that is not confirmed
-    /// unreadable: it is never written over, and the new value lands as its
-    /// keep-both conflict copy instead, still in this store, so it is durable
-    /// either way and nothing is silently replaced.
+    /// plain "replace". `replaces`: write only while the row still holds that
+    /// value (a delayed retry; a newer value written since wins and ours is
+    /// `Superseded`). A row this key cannot open (a keyset this session has
+    /// not caught up with) that is not confirmed unreadable is never written
+    /// over: `Err`, retried once the keyset is pulled or at unlock.
     pub fn write_rotated_secret<S: PrimitiveSuite>(
         &mut self,
         keys: VaultKeys,
         vault_id: &str,
         name: &str,
         value: &str,
+        replaces: Option<&str>,
     ) -> Result<RotatedWrite> {
         let ns = ItemNs::Secret;
         let wire = wire_id_for::<S>(keys.id_seed, ns, name)?;
-        let previous = match self.open_item::<S>(keys, vault_id, ns, name) {
-            Ok(p) => p.filter(|p| !p.is_tombstone()),
-            Err(_) if self.items.get(&wire).is_some_and(|s| s.unreadable_confirmed) => None,
+        let (previous, confirmed_unreadable) = match self.open_item::<S>(keys, vault_id, ns, name) {
+            Ok(p) => (p.filter(|p| !p.is_tombstone()), false),
+            // Confirmed unreadable after a keyset refresh: it may be written
+            // over, and holds nothing a precondition could match.
+            Err(_) if self.items.get(&wire).is_some_and(|s| s.unreadable_confirmed) => (None, true),
             Err(_) => {
-                let ours = ItemPayload::live(ns, name.to_string(), secret_body(value, None));
-                let copy = self.keep_conflict_copy::<S>(keys, vault_id, &ours)?;
-                return Ok(RotatedWrite::ConflictCopy(copy));
+                return Err(AppError::Conflict(unreadable_refusal(&format!(
+                    "secret {}",
+                    name
+                ))))
             }
         };
-        // A body that does not parse has no notes this build can keep.
-        let notes = previous
-            .as_ref()
-            .and_then(|p| parse_secret_body(&p.body).ok())
-            .and_then(|(_, notes)| notes);
+        // A body that does not parse has neither a value to compare nor notes
+        // this build can keep.
+        let (current, notes) = match previous.as_ref().and_then(|p| parse_secret_body(&p.body).ok()) {
+            Some((v, n)) => (Some(v), n),
+            None => (None, None),
+        };
+        if current.as_deref() == Some(value) {
+            return Ok(RotatedWrite::AlreadyStored);
+        }
+        if let Some(expected) = replaces {
+            if !confirmed_unreadable && current.as_deref() != Some(expected) {
+                return Ok(RotatedWrite::Superseded);
+            }
+        }
         let payload = ItemPayload::live(ns, name.to_string(), secret_body(value, notes.as_deref()));
         let was_clean = self
             .items
@@ -2336,7 +2378,7 @@ impl PerItemVault {
                     .map(|p| digest_hex(&item_body_digest(ns, name, &p.body)));
             }
         }
-        Ok(RotatedWrite::InPlace(id))
+        Ok(RotatedWrite::Written(id))
     }
 
     /// Whether the row at `(ns, name)` may be written over: absent, or one
@@ -7051,68 +7093,79 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    /// A provider-rotated secret is ONE row write: in place over a row this
-    /// key reads (notes kept, the base recorded, the row dirty); as a
-    /// keep-both conflict copy over one it cannot read; in place again once
-    /// that row is confirmed unreadable.
+    /// A provider-rotated secret is ONE row write: over a row this key reads
+    /// (notes and the keep-both base kept, the row dirty); never over a row
+    /// it cannot read (an error: stays pending); over it once that row is
+    /// confirmed unreadable. With `replaces`, only while the row still holds
+    /// the value the rotation replaced.
     #[test]
-    fn a_rotated_secret_is_one_row_in_place_or_a_conflict_copy() {
+    fn a_rotated_secret_is_one_row_and_never_goes_over_what_it_cannot_read() {
         use sudp::primitives::StdPrimitives;
         type S = StdPrimitives;
         let k = [0x5au8; 32];
         let keys = VaultKeys::single(&k);
         let vid = "vault-rotate";
         let name = "OPENAI_REFRESH_TOKEN";
+        let old_body = secret_body("old-rt", Some("work account"));
 
-        // In place, over a readable synced row with notes.
         let mut pv = v1_store();
         let id = pv
-            .plant::<S>(
-                keys,
-                vid,
-                ItemNs::Secret,
-                name,
-                4,
-                &ItemPayload::live(ItemNs::Secret, name, secret_body("old-rt", Some("work account"))),
-            )
+            .plant::<S>(keys, vid, ItemNs::Secret, name, 4, &ItemPayload::live(ItemNs::Secret, name, old_body.clone()))
             .unwrap();
         pv.items.get_mut(&id).unwrap().synced_version = 4;
-        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "new-rt").unwrap();
-        assert_eq!(wrote, RotatedWrite::InPlace(id.clone()));
+        // A delayed retry whose value was replaced since: nothing written.
+        assert_eq!(
+            pv.write_rotated_secret::<S>(keys, vid, name, "rt-2", Some("not-old")).unwrap(),
+            RotatedWrite::Superseded
+        );
+        assert_eq!(pv.get_item(&id).unwrap().version, 4);
+        // The rotation of the value it holds: written in place.
+        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "new-rt", Some("old-rt")).unwrap();
+        assert_eq!(wrote, RotatedWrite::Written(id.clone()));
         let row = pv.get_item(&id).unwrap();
         assert_eq!((row.version, row.synced_version), (5, 4), "bumped, dirty");
         assert_eq!(
             row.base.as_deref(),
-            Some(digest_hex(&item_body_digest(ItemNs::Secret, name, &secret_body("old-rt", Some("work account")))).as_str())
+            Some(digest_hex(&item_body_digest(ItemNs::Secret, name, &old_body)).as_str())
         );
         let view = pv.fold_view::<S>(keys, vid).unwrap();
         assert_eq!(view.native_secrets[name], b"new-rt");
         assert_eq!(view.native_secret_notes[name], "work account");
+        // Already there: nothing written.
+        assert_eq!(
+            pv.write_rotated_secret::<S>(keys, vid, name, "new-rt", None).unwrap(),
+            RotatedWrite::AlreadyStored
+        );
+        assert_eq!(pv.get_item(&id).unwrap().version, 5);
 
-        // Over a row this key cannot open: never written over; the new value
-        // is a conflict copy in the same store.
+        // A row this key cannot open: never written over; an error.
         let mut pv = v1_store();
         let wire = wire_id_for::<S>(&k, ItemNs::Secret, name).unwrap();
         let garbage = vec![7u8; 60];
         pv.put_raw(wire.clone(), 3, garbage.clone());
-        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "new-rt").unwrap();
-        assert!(matches!(wrote, RotatedWrite::ConflictCopy(Some(_))), "{:?}", wrote);
+        assert!(pv.write_rotated_secret::<S>(keys, vid, name, "new-rt", None).is_err());
         let row = pv.get_item(&wire).unwrap();
         assert_eq!((row.version, &row.ct), (3, &garbage), "left as it is");
-        let view = pv.fold_view::<S>(keys, vid).unwrap();
-        assert!(
-            view.native_secrets
-                .iter()
-                .any(|(n, v)| n != name && n.starts_with(name) && v.as_slice() == b"new-rt"),
-            "{:?}",
-            view.native_secrets.keys().collect::<Vec<_>>()
-        );
 
-        // Confirmed unreadable after a keyset refresh: in place.
+        // Confirmed unreadable after a keyset refresh: written over.
         assert!(pv.confirm_unreadable::<S>(keys, vid));
-        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "newer-rt").unwrap();
-        assert_eq!(wrote, RotatedWrite::InPlace(wire.clone()));
+        let wrote = pv.write_rotated_secret::<S>(keys, vid, name, "newer-rt", Some("old-rt")).unwrap();
+        assert_eq!(wrote, RotatedWrite::Written(wire.clone()));
         assert_eq!(pv.fold_view::<S>(keys, vid).unwrap().native_secrets[name], b"newer-rt");
+    }
+
+    /// F_FULLFSYNC refusals (unsupported file systems) fall back to fsync;
+    /// any other error still fails the write.
+    #[cfg(unix)]
+    #[test]
+    fn full_fsync_refusals_are_recognized() {
+        use rustix::io::Errno;
+        assert!(full_sync_unsupported(Some(Errno::NOTSUP.raw_os_error())));
+        assert!(full_sync_unsupported(Some(Errno::OPNOTSUPP.raw_os_error())));
+        assert!(full_sync_unsupported(Some(Errno::INVAL.raw_os_error())));
+        assert!(!full_sync_unsupported(Some(Errno::IO.raw_os_error())));
+        assert!(!full_sync_unsupported(Some(Errno::NOSPC.raw_os_error())));
+        assert!(!full_sync_unsupported(None));
     }
 
     /// The durable replace leaves exactly the new bytes and no temp file.

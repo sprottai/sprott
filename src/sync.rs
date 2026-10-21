@@ -6738,7 +6738,7 @@ mod peritem_tests {
         state.mark_vault_key_changed(vault);
         state.note_sync(vault, "item", crate::state::SyncNote::Refused("x".into()));
         state.note_catch_up(vault, "x");
-        state.note_rotation_pending(vault, "conn", "role", "token", "x");
+        state.note_rotation_pending(vault, "conn", "role", b"old", "token", "x");
         let runtime = state.runtime(vault).unwrap();
         runtime
             .pending_format_mark

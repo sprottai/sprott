@@ -369,7 +369,12 @@ event: vaults   data: {}                                          (cap vaults)
   45s, 2 min, then every 5 min; `src/auth/retry.rs`) that does not pull. A
   code still failing after 10 min (RFC 6749 §4.1.2) marks the connection
   failed. A rotated refresh token is written on receipt as one fsynced row of
-  the vault's store, so the timer only covers environmental failures.
+  the vault's store; the timer covers what is left (a store that cannot be
+  read or written, or a slot row this key cannot read until the keyset is
+  pulled). A retry writes only while the slot still holds the value the
+  rotation replaced, and a pending token is kept in every cache rebuilt from
+  the store until it lands. Locking first tries to store pending tokens; one
+  that still cannot be stored stays in memory until the next unlock.
 
 **Idle cost per hour, healthy stream, Railway rotation every ~15 min:**
 - before (v1.1): per vault, hello pull round 4 × 3 (`/keys` 409, `/membership`,

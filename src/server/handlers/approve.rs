@@ -1345,6 +1345,11 @@ pub async fn approve_op(
             // attacker with the user's session token can't DOS-lock without
             // a passkey gesture.
             "vault-lock" => {
+                // K is evicted below: store any rotated refresh token still
+                // pending first (this handler holds the vault write lock). One
+                // that still cannot be stored stays in memory as the only
+                // copy until the next unlock (see the function).
+                crate::auth::connect::store_pending_rotations_before_lock(&state, &vault_id);
                 state.lock_vault(&vault_id);
                 tracing::info!(vault = %vault_id, "vault locked");
                 (json!({ "ok": true, "act": "vault-lock" }), None)

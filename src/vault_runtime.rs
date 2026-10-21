@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use zeroize::Zeroizing;
 
 use crate::audit::AuditStore;
 use crate::state::{AppState, ApprovalEvent, SyncNote, VaultState};
@@ -109,7 +108,7 @@ pub struct VaultRuntime {
     pub key_changed: AtomicBool,
     pub sync_conflicts: Mutex<BTreeMap<String, SyncNote>>,
     pub catch_up_failure: Mutex<Option<String>>,
-    pub pending_rotations: Mutex<BTreeMap<(String, String), Zeroizing<String>>>,
+    pub pending_rotations: Mutex<BTreeMap<(String, String), crate::state::PendingRotation>>,
     /// Retry timers of connect work left behind ([`crate::auth::retry`]).
     pub retries: Mutex<crate::auth::retry::Retries>,
     pub pending_format_mark: AtomicBool,

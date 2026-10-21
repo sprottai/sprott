@@ -125,6 +125,34 @@ impl OpGrantKey {
     }
 }
 
+impl SecretsCache {
+    /// Replace connection `conn_id`'s credential value `old` with `new`
+    /// wherever this cache holds it (its entry, its named secrets).
+    pub fn replace_value(&mut self, conn_id: &str, old: &[u8], new: &[u8]) {
+        if let Some(e) = self.entries.get_mut(conn_id) {
+            if e.value.as_slice() == old {
+                e.value = new.to_vec();
+            }
+        }
+        if let Some(secrets) = self.allow_secrets.get_mut(conn_id) {
+            for v in secrets.values_mut() {
+                if v.as_slice() == old {
+                    *v = new.to_vec();
+                }
+            }
+        }
+    }
+}
+
+/// A provider-rotated refresh token not stored in the vault yet: `new` is the
+/// only valid copy (the provider refuses `old` now), `old` is the value the
+/// store still holds at its slot.
+#[derive(Debug, Clone)]
+pub struct PendingRotation {
+    pub old: zeroize::Zeroizing<Vec<u8>>,
+    pub new: zeroize::Zeroizing<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SecretsCache {
     /// service_id → cached auth value with per-entry expiry. Filled by:
@@ -1096,13 +1124,19 @@ impl AppState {
     pub fn unlock_vault(
         &self,
         vault_id: String,
-        cache: SecretsCache,
+        mut cache: SecretsCache,
         state_key: zeroize::Zeroizing<Vec<u8>>,
     ) {
         let Ok(runtime) = self.runtime(&vault_id) else {
             tracing::warn!(vault = %vault_id, "unlock refused: vault access was revoked");
             return;
         };
+        // Every cache is built from the store, which still holds the value a
+        // pending rotation replaced: the session keeps using the rotated one
+        // (the provider refuses the old one).
+        for ((conn_id, _), p) in runtime.pending_rotations.lock().unwrap().iter() {
+            cache.replace_value(conn_id, &p.old, p.new.as_bytes());
+        }
         // A parked or locked device holds no K (I3): a refresh or apply that
         // cloned K before the park must not write it back.
         if self.ledger.lock().unwrap().device != crate::principal_ledger::DeviceGate::Open {
@@ -1899,13 +1933,17 @@ impl AppState {
         vault_id: &str,
         conn_id: &str,
         role: &str,
+        old: &[u8],
         token: &str,
         why: &str,
     ) {
         if let Ok(runtime) = self.runtime(vault_id) {
             runtime.pending_rotations.lock().unwrap().insert(
                 (conn_id.to_string(), role.to_string()),
-                zeroize::Zeroizing::new(token.to_string()),
+                PendingRotation {
+                    old: zeroize::Zeroizing::new(old.to_vec()),
+                    new: zeroize::Zeroizing::new(token.to_string()),
+                },
             );
         }
         self.note_sync(
@@ -1919,14 +1957,31 @@ impl AppState {
     }
 
     /// The rotated refresh tokens of `vault_id` not stored yet, taken.
-    pub fn take_pending_rotations(
-        &self,
-        vault_id: &str,
-    ) -> Vec<((String, String), zeroize::Zeroizing<String>)> {
+    pub fn take_pending_rotations(&self, vault_id: &str) -> Vec<((String, String), PendingRotation)> {
         self.runtime_if_present(vault_id)
             .map(|runtime| std::mem::take(&mut *runtime.pending_rotations.lock().unwrap()))
             .map(|m| m.into_iter().collect())
             .unwrap_or_default()
+    }
+
+    /// The rotated refresh token of `(conn_id, role)` was stored (or a newer
+    /// one was): nothing is pending for that slot any more, and its note is
+    /// settled.
+    pub fn drop_pending_rotation(&self, vault_id: &str, conn_id: &str, role: &str) {
+        if let Some(runtime) = self.runtime_if_present(vault_id) {
+            runtime
+                .pending_rotations
+                .lock()
+                .unwrap()
+                .remove(&(conn_id.to_string(), role.to_string()));
+        }
+        self.clear_rotation_note(vault_id, conn_id);
+    }
+
+    /// Any rotated refresh token of `vault_id` not stored yet?
+    pub fn has_pending_rotations(&self, vault_id: &str) -> bool {
+        self.runtime_if_present(vault_id)
+            .is_some_and(|runtime| !runtime.pending_rotations.lock().unwrap().is_empty())
     }
 
     /// A pending rotation of `conn_id` was stored: its note is settled.
@@ -1943,18 +1998,7 @@ impl AppState {
         };
         let mut state = runtime.state.lock().unwrap();
         if let VaultState::Unlocked { cache, .. } = &mut *state {
-            if let Some(e) = cache.entries.get_mut(conn_id) {
-                if e.value.as_slice() == old {
-                    e.value = new.to_vec();
-                }
-            }
-            if let Some(secrets) = cache.allow_secrets.get_mut(conn_id) {
-                for v in secrets.values_mut() {
-                    if v.as_slice() == old {
-                        *v = new.to_vec();
-                    }
-                }
-            }
+            cache.replace_value(conn_id, old, new);
         }
     }
 
