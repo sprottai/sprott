@@ -59,7 +59,9 @@ It holds phantoms, which are worthless outside Sprott's proxy. Through the
 proxy it can use a credential only toward that connection's own hosts, under
 your policy, and sensitive calls wait for your passkey. It cannot read a
 value, send a credential to its own server, or approve its own requests.
-Every attempt is in Activity.
+Every attempt is in Activity. It can act as another agent that runs as the
+same OS user, so run agents as separate OS users to keep them apart
+([Identity](agents.md#the-agent-identity)).
 
 ## Is Sprott intercepting all my traffic?
 

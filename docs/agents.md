@@ -37,6 +37,10 @@ Neither is a credential: neither can reveal a value. Keep one identity per
 agent; don't share an identity file between agents. The vault is not in the
 env: each request names its vault, and `sprott run --vault <vault>` picks one.
 
+Agents that run as the same OS user can read each other's identity files,
+the way they can read each other's `~/.ssh` keys. To keep agents apart, run
+each as its own OS user, so each can read only its own identity.
+
 ### Subagents
 
 An agent is an identity, not a process. Subagents, background jobs and
