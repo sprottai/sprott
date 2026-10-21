@@ -110,10 +110,8 @@ pub struct VaultRuntime {
     pub sync_conflicts: Mutex<BTreeMap<String, SyncNote>>,
     pub catch_up_failure: Mutex<Option<String>>,
     pub pending_rotations: Mutex<BTreeMap<(String, String), Zeroizing<String>>>,
-    /// The last connect run left an OAuth code exchange to retry (transient
-    /// failure). With `pending_rotations`, what keeps this vault's sync on the
-    /// short reconcile cadence ([`crate::state::AppState::connect_work_pending`]).
-    pub connect_retry: AtomicBool,
+    /// Retry timers of connect work left behind ([`crate::auth::retry`]).
+    pub retries: Mutex<crate::auth::retry::Retries>,
     pub pending_format_mark: AtomicBool,
     pub pending_config_ids: Mutex<Vec<String>>,
     pub oauth_reauth_needed: Mutex<HashSet<String>>,
@@ -140,7 +138,7 @@ impl VaultRuntime {
             sync_conflicts: Mutex::new(BTreeMap::new()),
             catch_up_failure: Mutex::new(None),
             pending_rotations: Mutex::new(BTreeMap::new()),
-            connect_retry: AtomicBool::new(false),
+            retries: Mutex::new(Default::default()),
             pending_format_mark: AtomicBool::new(false),
             pending_config_ids: Mutex::new(Vec::new()),
             oauth_reauth_needed: Mutex::new(HashSet::new()),

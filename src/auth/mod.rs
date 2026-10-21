@@ -11,4 +11,5 @@
 pub mod connect;
 pub mod loopback;
 pub mod oauth2;
+pub mod retry;
 pub mod snaplii;

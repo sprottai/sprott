@@ -514,12 +514,6 @@ impl WakeCell {
         self.pending.lock().unwrap().mode
     }
 
-    /// Wake the owning task with no work, so it re-reads its timers (a
-    /// vault-level fact that sizes them changed).
-    pub fn nudge(&self) {
-        self.notify.notify_one();
-    }
-
     /// When the latest hello carried a verified contact token for this vault.
     pub fn hello_contact_at(&self) -> Option<Instant> {
         self.pending.lock().unwrap().hello_contact

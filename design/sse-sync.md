@@ -338,7 +338,6 @@ event: vaults   data: {}                                          (cap vaults)
 | hello, ledger | `account_cursors` | pull only if `ledger_seq` differs from the local verified head seq (or either is unknown); without the cap, every hello pulls |
 | hello, discovery | `account_cursors` | run only if `vaults_unlisted` is true (or absent); without the cap, every hello runs it |
 | Sse-shape safety reconcile | `cursors` | 1800s counted from the later of the last reconcile and the last hello, so it fires only when no hello has come for 1800s (else 300s from the last reconcile) |
-| Sse-shape safety reconcile | connect work pending (an OAuth code exchange that failed transiently, or a rotated refresh token not stored yet) | 300s from the last reconcile, hellos or not: only a reconcile's pull block retries those; back to the row above once both drain |
 | shared vault blob probe | Sse shape | only when hellos do not carry its verified contact token: 600s; with the token, only if the contact clock passes 1200s (hellos late) |
 | principal ledger | healthy stream + `agent_hashes` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last pull and the last `account_cursors` hello, but a verified pull at least every 6h (the lease runs on pulls); events spaced ≥2s |
 | vault discovery | healthy stream + `vaults` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last run and the last `account_cursors` hello; events spaced ≥5s |
@@ -364,6 +363,13 @@ event: vaults   data: {}                                          (cap vaults)
   keeps serving. With no vault the dispatcher waits for the first one.
 - Health flips re-size the ledger and discovery timers instead of riding a
   1800s sleep into a Down stream.
+- Connect work a run leaves behind is not sync's job and never stretches a
+  sync cadence: a code exchange that failed transiently and a rotated refresh
+  token the store could not take each own a per-vault retry timer (5s, 15s,
+  45s, 2 min, then every 5 min; `src/auth/retry.rs`) that does not pull. A
+  code still failing after 10 min (RFC 6749 §4.1.2) marks the connection
+  failed. A rotated refresh token is written on receipt as one fsynced row of
+  the vault's store, so the timer only covers environmental failures.
 
 **Idle cost per hour, healthy stream, Railway rotation every ~15 min:**
 - before (v1.1): per vault, hello pull round 4 × 3 (`/keys` 409, `/membership`,

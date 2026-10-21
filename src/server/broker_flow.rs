@@ -301,10 +301,16 @@ pub async fn resolve_auth_value(
             )
             .await
             {
-                // Landed: sent to the cloud once this lock drops.
-                Ok(()) => crate::auth::connect::spawn_push(state, vault_id),
+                // Landed (durably, in the store): the session uses the new
+                // token from now on, and it goes to the cloud once this lock
+                // drops.
+                Ok(()) => {
+                    state.cache_replace_value(vault_id, conn_id, raw, new_rt.as_bytes());
+                    crate::auth::connect::spawn_push(state, vault_id)
+                }
                 // Not stored: the session still uses the new token, which is
-                // stored again on the next sync; the user is told.
+                // stored again on its own retry timer and at unlock; the user
+                // is told.
                 Err(why) => crate::auth::connect::rotation_not_stored(
                     state,
                     vault_id,
