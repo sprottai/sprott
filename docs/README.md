@@ -31,7 +31,7 @@ agent on your team, with control over every permission.
 | [Quickstart](quickstart.md) | Install, pair, add a key and make the first call. |
 | [Set up with your agent](for-your-agent.md) | One prompt, and your agent runs the setup. |
 | [Work as a team](team.md) | One shared vault for the whole team's agents. |
-| [Ask someone for a secret](drop.md) | A one-time link. They need no account, and only you can open what they send. |
+| [Secrets by link](drop.md) | Ask someone for a secret, or share one, with a one-time link. They need no account. |
 | [FAQ](faq.md) | Short answers. |
 
 Are you an AI agent? Run `curl -fsSL https://sprott.ai/install.sh | sh` and
