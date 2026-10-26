@@ -2108,6 +2108,7 @@ pub async fn approve_op(
                         existing_vault.as_ref(),
                     )?;
                 let base = crate::storage::sealed_vault::ViewBase::of(&view)?;
+                let existed = view.native_secrets.contains_key(&key);
                 let removed_prior_anchor = apply_secret_set_to_view(
                     &mut view,
                     &key,
@@ -2127,6 +2128,11 @@ pub async fn approve_op(
                 } else {
                     hosts.clone()
                 };
+                let used_by = view
+                    .aux
+                    .connection_claims(&state.services, "")
+                    .remove(&key)
+                    .unwrap_or_default();
                 crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
                 {
                     let state = state.clone();
@@ -2142,6 +2148,7 @@ pub async fn approve_op(
                     "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
                     "hosts": echo_hosts,
                     "removed_prior_anchor": removed_prior_anchor,
+                    "existed": existed, "used_by": used_by,
                 });
                 let cached = Some(resp.to_string());
                 (resp, cached)

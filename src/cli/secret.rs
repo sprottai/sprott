@@ -51,7 +51,17 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
     };
 
     // Broker intent: --no-broker | --host <h..> | (TTY) prompt | (non-TTY) error.
-    let intent = resolve_broker_intent(&key, &args.host, args.no_broker)?;
+    // Rewriting a key that already exists is a value change: its bindings stay
+    // as they are, so the host question is skipped. Unknown (locked vault, old
+    // daemon) still asks.
+    let exists = args.host.is_empty()
+        && !args.no_broker
+        && key_exists(&custodian, &vault, &key).await == Some(true);
+    let intent = if exists {
+        BrokerIntent::Unspecified
+    } else {
+        resolve_broker_intent(&key, &args.host, args.no_broker)?
+    };
 
     // The single-secret sugar: the connection id is the lowercased key — a plain
     // handle (safe now that `secrets` is stored explicitly, no reverse-index
@@ -134,52 +144,76 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Print the `sc set` outcome. `result` carries `removed_prior_anchor` — the
-/// unlocked fast-path response verbatim, or the ceremony's `act_result(body)`;
-/// both shapes expose that flag, so one printer serves both write paths.
+/// Print the `sc set` outcome as one line. `result` is the unlocked fast-path
+/// response or the ceremony's `act_result(body)`; both carry `existed`,
+/// `used_by`, `hosts` and `removed_prior_anchor` (an older daemon omits the
+/// first two, so the line then says only what is known).
 fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde_json::Value) {
-    match intent {
+    let strs = |field: &str| -> Vec<String> {
+        result
+            .get(field)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let existed = result.get("existed").and_then(|v| v.as_bool());
+    let verb = if existed == Some(true) { "updated" } else { "saved" };
+    let detail = match intent {
         BrokerIntent::Unspecified => {
-            // Value-only write. The fast-path response echoes the connection's
-            // CURRENT anchors (untouched); the ceremony response has none.
-            let hosts: Vec<&str> = result
-                .get("hosts")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
-                .unwrap_or_default();
-            if hosts.is_empty() {
-                eprintln!("  stored · host binding unchanged (none anchored; the agent can't use it until you set a host)");
+            let used_by = strs("used_by");
+            let hosts = strs("hosts");
+            if !used_by.is_empty() {
+                Some(format!("used by {}", used_by.join(", ")))
+            } else if !hosts.is_empty() {
+                Some(format!("for {}", hosts.join(", ")))
+            } else if result.get("used_by").is_some() {
+                Some("no host, the agent can't use it yet".to_string())
             } else {
-                eprintln!(
-                    "  connection '{}' → {} (unchanged) · phantom {}",
-                    conn,
-                    hosts.join(", "),
-                    crate::core::host::short_phantom(conn)
-                );
+                None
             }
         }
         BrokerIntent::NoBroker => {
-            // The daemon dropped any raw connection a prior `sc set <key>
-            // --host …` created (opting out must actually un-broker).
-            if result
+            let removed = result
                 .get("removed_prior_anchor")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                eprintln!("  removed the prior host anchor for '{}'", conn);
-            }
-            eprintln!("  stored · no host anchored. Agent cannot use this item (`sprott secret get` reveals it for a human)");
+                .unwrap_or(false);
+            Some(if removed {
+                "host removed, humans only".to_string()
+            } else {
+                "humans only, the agent can't use it".to_string()
+            })
         }
-        BrokerIntent::Host(hosts) => {
-            eprintln!(
-                "  connection '{}' → {} · phantom {}",
-                conn,
-                hosts.join(", "),
-                crate::core::host::short_phantom(conn)
-            );
-        }
+        BrokerIntent::Host(hosts) => Some(format!(
+            "for {} · phantom {}",
+            hosts.join(", "),
+            crate::core::host::short_phantom(conn)
+        )),
+    };
+    match detail {
+        Some(d) => eprintln!("{} {} · {}", key, verb, d),
+        None => eprintln!("{} {}", key, verb),
     }
-    eprintln!("sprott set: {} written", key);
+}
+
+/// Whether `key` is already a native secret in `vault`. `None` when the daemon
+/// can't say (locked vault, unreachable, older daemon): the caller then asks.
+async fn key_exists(custodian: &str, vault: &str, key: &str) -> Option<bool> {
+    let url = format!(
+        "{}/v/{}/secret-keys",
+        custodian.trim_end_matches('/'),
+        urlencoding::encode(vault)
+    );
+    let client = crate::util::http_builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let names = body.get("native_keys")?.as_array()?;
+    Some(names.iter().any(|n| n.as_str() == Some(key)))
 }
 
 /// Decide the broker binding for `sc set`. Host is a REQUIRED answer (spec §11):
@@ -196,7 +230,6 @@ fn resolve_broker_intent(
     }
     // `--host none` is the explicit opt-out sentinel.
     if host.len() == 1 && host[0].eq_ignore_ascii_case("none") {
-        eprintln!("  --host none → stored without a host · agent cannot use this item");
         return Ok(BrokerIntent::NoBroker);
     }
     if !host.is_empty() {
@@ -211,7 +244,6 @@ fn resolve_broker_intent(
             return Ok(BrokerIntent::Unspecified);
         }
         if entered.eq_ignore_ascii_case("none") {
-            eprintln!("  removing the host binding · agent won't be able to use this item");
             return Ok(BrokerIntent::NoBroker);
         }
         Ok(BrokerIntent::Host(vec![entered]))
@@ -239,13 +271,12 @@ fn prompt_secret_value(key: &str) -> Result<String, String> {
     Ok(v)
 }
 
-/// Host prompt. Blank is a first-class answer (value only, existing binding
-/// untouched), so pressing Enter never errors. Echoes the intent so an
-/// arg-order slip is visible.
+/// Host prompt (new keys only). Blank is a first-class answer (value only,
+/// existing binding untouched), so pressing Enter never errors. `none` still
+/// opts out explicitly; `--help` documents it, the prompt stays one line.
 fn prompt_host(key: &str) -> Result<String, String> {
     use std::io::Write as _;
-    eprintln!("Anchor a host for '{}' so the agent can use it.", key);
-    eprint!("Host (the API's exact domain, e.g. api.stripe.com; Enter = value only, keep binding as is; 'none' = remove binding): ");
+    eprint!("API host for {} (e.g. api.stripe.com; Enter to skip): ", key);
     std::io::stderr().flush().ok();
     let mut line = String::new();
     std::io::stdin()
