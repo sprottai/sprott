@@ -261,7 +261,8 @@ pub struct ConnectArgs {
     /// Fill a slot with a NEW secret value, written to the vault when the
     /// connection is approved: `SLOT=VALUE`. With `--service`, SLOT is one of
     /// the service's declared secret roles (case-insensitive); for a raw
-    /// connection SLOT is the vault KEY itself (stored UPPERCASE). A bare `SLOT`
+    /// connection SLOT is the vault KEY itself (stored UPPERCASE). `SLOT=-`
+    /// reads the value from stdin (one slot per command). A bare `SLOT`
     /// prompts for the value with hidden input on a terminal. Repeatable.
     #[arg(long = "from-literal", value_name = "SLOT=VALUE")]
     pub from_literal: Vec<String>,
@@ -1023,9 +1024,9 @@ pub struct GetArgs {
 pub struct SetArgs {
     /// Native-secrets key name to write (`sprott set OPENAI_API_KEY sk-...`).
     pub key: String,
-    /// The secret value. When omitted on a TTY, `sprott set` prompts for it hidden
-    /// (keeps it out of shell history / `ps`). Required as an argument when
-    /// stdin isn't a terminal.
+    /// The secret value. `-` reads it from stdin. When omitted on a TTY,
+    /// `sprott set` prompts for it hidden. Stdin and the prompt keep it out of
+    /// shell history and `ps`.
     pub value: Option<String>,
     /// Anchor the secret to an egress host so the agent can broker it: creates a
     /// raw connection `__sprott__<key>__` → this exact domain (repeatable). Pass

@@ -44,9 +44,11 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
         ));
     }
 
-    // Value: explicit arg, else hidden TTY prompt, else (non-TTY) an error.
-    let value = match args.value.clone() {
-        Some(v) => v,
+    // Value: explicit arg, `-` = stdin, else hidden TTY prompt, else (non-TTY)
+    // an error.
+    let value = match args.value.as_deref() {
+        Some("-") => read_value_arg(&key)?,
+        Some(v) => v.to_string(),
         None => prompt_secret_value(&key)?,
     };
 
@@ -255,11 +257,54 @@ fn resolve_broker_intent(
     }
 }
 
+/// Largest secret value read from stdin (matches the daemon's write cap).
+const MAX_STDIN_VALUE_BYTES: u64 = 64 * 1024;
+
+/// The value `-` (`sprott set KEY -`, `--from-literal SLOT=-`): read it from
+/// stdin, the way that keeps it out of `ps` and shell history off a terminal.
+/// On a terminal there is nothing piped, so it is the hidden prompt instead.
+/// Drops one trailing newline (`echo` adds it). One stdin per command, so a
+/// caller with several values allows `-` once.
+pub(crate) fn read_value_arg(label: &str) -> Result<String, String> {
+    use std::io::Read as _;
+    if std::io::stdin().is_terminal() {
+        return prompt_secret_value(label);
+    }
+    let mut buf = Vec::new();
+    std::io::stdin()
+        .take(MAX_STDIN_VALUE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read {} from stdin: {}", label, e))?;
+    stdin_value(buf, label)
+}
+
+/// The bytes read from stdin as the value: at most the cap, UTF-8, one
+/// trailing newline (`\n` or `\r\n`) dropped, not empty.
+fn stdin_value(buf: Vec<u8>, label: &str) -> Result<String, String> {
+    if buf.len() as u64 > MAX_STDIN_VALUE_BYTES {
+        return Err(format!(
+            "{} on stdin is over {} bytes",
+            label, MAX_STDIN_VALUE_BYTES
+        ));
+    }
+    let mut v = String::from_utf8(buf).map_err(|_| format!("{} on stdin is not UTF-8", label))?;
+    if v.ends_with('\n') {
+        v.pop();
+        if v.ends_with('\r') {
+            v.pop();
+        }
+    }
+    if v.is_empty() {
+        return Err(format!("no value for {} on stdin", label));
+    }
+    Ok(v)
+}
+
 /// Hidden value prompt (TTY only — keeps the secret out of shell history / `ps`).
 fn prompt_secret_value(key: &str) -> Result<String, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
-            "no value given for '{}'. Pass it as an argument (non-interactive input isn't a terminal)",
+            "no value given for '{}'. Pass it as an argument, or `-` to read it from stdin",
             key
         ));
     }
@@ -380,4 +425,27 @@ pub async fn run_get(args: GetArgs) -> Result<(), String> {
         .map_err(|e| format!("stdout: {}", e))?;
     out.write_all(b"\n").ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdin_value_drops_one_trailing_newline() {
+        assert_eq!(stdin_value(b"sk-1\n".to_vec(), "K").unwrap(), "sk-1");
+        assert_eq!(stdin_value(b"sk-1\r\n".to_vec(), "K").unwrap(), "sk-1");
+        assert_eq!(stdin_value(b"sk-1".to_vec(), "K").unwrap(), "sk-1");
+        // Only one: a value that really ends in a newline keeps the rest.
+        assert_eq!(stdin_value(b"a\n\n".to_vec(), "K").unwrap(), "a\n");
+    }
+
+    #[test]
+    fn stdin_value_rejects_empty_oversize_and_non_utf8() {
+        assert!(stdin_value(Vec::new(), "K").is_err());
+        assert!(stdin_value(b"\n".to_vec(), "K").is_err());
+        assert!(stdin_value(vec![b'x'; 64 * 1024 + 1], "K").is_err());
+        assert!(stdin_value(vec![0xff, 0xfe], "K").is_err());
+        assert!(stdin_value(vec![b'x'; 64 * 1024], "K").is_ok());
+    }
 }

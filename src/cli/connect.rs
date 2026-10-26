@@ -645,12 +645,14 @@ enum SlotArg {
     SecretShort { key: String },
 }
 
-/// Split the two flags into slot arguments, checking only their shape.
+/// Split the two flags into slot arguments, checking their shape. A literal
+/// `SLOT=-` reads its value from stdin here (at most one slot can).
 fn parse_slot_args(
     from_literal: &[String],
     from_secret: &[String],
 ) -> Result<Vec<SlotArg>, String> {
     let mut out = Vec::new();
+    let mut stdin_slot: Option<String> = None;
     for a in from_literal {
         match a.split_once('=') {
             Some((slot, value)) => {
@@ -663,13 +665,25 @@ fn parse_slot_args(
                 }
                 if value.is_empty() {
                     return Err(format!(
-                        "--from-literal {}: the value is empty; pass `--from-literal {}=<value>`, or `--from-literal {}` on a terminal to type it hidden",
-                        slot, slot, slot
+                        "--from-literal {}: the value is empty; pass `--from-literal {}=<value>`, `{}=-` to read it from stdin, or `--from-literal {}` on a terminal to type it hidden",
+                        slot, slot, slot, slot
                     ));
                 }
+                let value = if value == "-" {
+                    if let Some(first) = &stdin_slot {
+                        return Err(format!(
+                            "--from-literal {}=- and {}=-: stdin holds one value; give the other one as SLOT=VALUE",
+                            first, slot
+                        ));
+                    }
+                    stdin_slot = Some(slot.to_string());
+                    crate::cli::secret::read_value_arg(slot)?
+                } else {
+                    value.to_string()
+                };
                 out.push(SlotArg::Literal {
                     slot: slot.to_string(),
-                    value: value.to_string(),
+                    value,
                 });
             }
             None => {
@@ -960,8 +974,8 @@ fn fill_service_slots(
 fn prompt_or_fail(role: &str, tty: bool) -> Result<String, String> {
     if !tty {
         return Err(format!(
-            "--from-literal {}: provide the value as `--from-literal {}=<value>` (no terminal to prompt on)",
-            role, role
+            "--from-literal {}: provide the value as `--from-literal {}=<value>`, or `{}=-` to read it from stdin (no terminal to prompt on)",
+            role, role, role
         ));
     }
     prompt_value(role)
