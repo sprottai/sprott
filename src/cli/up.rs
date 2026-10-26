@@ -13,13 +13,13 @@ use std::time::Duration;
 use crate::cli::active::{resolve_active, settings_cb_port};
 use crate::cli::status::{fetch_status, VaultState};
 use crate::cli::{service, unlock};
-use crate::config::UnlockArgs;
+use crate::config::ApprovalArgs;
 
 /// `sc up`: get Sprott ready — install the daemon service on first run (so
 /// there's no separate setup step), make sure it's running, then unlock.
-pub async fn run() -> Result<(), String> {
+pub async fn run(approval: &ApprovalArgs) -> Result<(), String> {
     service::ensure_running_with_fallback().await?;
-    ensure_unlocked().await
+    ensure_unlocked(approval).await
 }
 
 /// `sc restart`: force a fresh daemon process, then converge back to ready.
@@ -31,9 +31,9 @@ pub async fn run() -> Result<(), String> {
 /// through the same `ensure_unlocked` chokepoint. `sc upgrade` (and, going
 /// forward, `sc login`) reuse this so they can't silently leave you locked
 /// onto a freshly-started daemon either.
-pub async fn restart() -> Result<(), String> {
+pub async fn restart(approval: &ApprovalArgs) -> Result<(), String> {
     service::restart_with_fallback().await?;
-    ensure_unlocked().await?;
+    ensure_unlocked(approval).await?;
     warn_if_stale_after_restart().await;
     Ok(())
 }
@@ -79,7 +79,7 @@ async fn warn_if_stale_after_restart() {
 /// unlock; otherwise no-op (already unlocked, or no vault selected). Waits
 /// briefly for the daemon to finish pulling the vault on a fresh start.
 /// Best-effort: an unreachable daemon just isn't unlocked here.
-pub async fn ensure_unlocked() -> Result<(), String> {
+pub async fn ensure_unlocked(approval: &ApprovalArgs) -> Result<(), String> {
     // Pairing is DEVICE state — an env pin alone (a stale agent .env after
     // `sc logout`) must not send us into the reachability wait below. Before
     // the default-daemon change, cfg.daemon=None made resolve_active err here;
@@ -107,12 +107,11 @@ pub async fn ensure_unlocked() -> Result<(), String> {
     }
 
     if should_attempt_unlock(&status.state) {
-        let args = UnlockArgs {
-            no_browser: false,
-            cb_port: settings_cb_port(),
-            timeout: 120,
+        let flags = ApprovalArgs {
+            cb_port: approval.cb_port.or_else(settings_cb_port),
+            ..approval.clone()
         };
-        unlock::run_unlock(args).await?;
+        unlock::run_unlock(&flags).await?;
     }
     Ok(())
 }

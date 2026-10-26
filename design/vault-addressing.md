@@ -40,6 +40,8 @@ Unchanged in shape; what changes is the *sources* of each level:
 2. **`sc env` emits only `SPROTT_BROKER_URL`.** It was the last path
    that pinned a *human* shell durably. With both minters gone, a set
    `$SPROTT_VAULT_ID` always means "inside a launched session".
+   (Historical: `sc env` was later removed outright;
+   `eval "$(sprott run --export-env)"` covers a whole shell.)
 3. **`--vault` is global** (`#[arg(global = true)]` on the top-level CLI);
    the per-subcommand fields are deleted. Existing invocations like
    `sc get KEY --vault X` keep parsing (global args are accepted in

@@ -16,7 +16,7 @@ use crate::cli::active::resolve_active;
 use crate::cli::approve::{act_result, approve_op, deposit_values, ApproveOpts};
 use crate::cli::conn::{valid_conn_id, valid_role, validate_raw_host};
 use crate::cli::webauthn::*;
-use crate::config::{GetArgs, RmArgs, SetArgs};
+use crate::config::{ApprovalArgs, GetArgs, RmArgs, SetArgs};
 
 /// What `sc set` does with the item's broker binding.
 enum BrokerIntent {
@@ -24,14 +24,14 @@ enum BrokerIntent {
     /// host binding exactly as it is (a new key simply has none yet). This is
     /// the rotation fast-path — never touches the trust surface.
     Unspecified,
-    /// Explicit `none` / `--no-broker`: store with NO host, REMOVING any prior
-    /// anchor — human-only, invisible to the agent.
-    NoBroker,
+    /// `--no-host`: store with NO host, REMOVING any prior anchor (human-only,
+    /// invisible to the agent).
+    NoHost,
     /// Create a raw connection anchored to these exact FQDNs.
     Host(Vec<String>),
 }
 
-pub async fn run_set(args: SetArgs) -> Result<(), String> {
+pub async fn run_set(args: SetArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     // §1: secret KEYs are ALWAYS uppercase. Force-uppercase on input (a lowercase
     // key is auto-converted, never stored lowercase) so there is one canonical
@@ -52,17 +52,17 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
         None => prompt_secret_value(&key)?,
     };
 
-    // Broker intent: --no-broker | --host <h..> | (TTY) prompt | (non-TTY) error.
+    // Broker intent: --no-host | --host <h..> | (TTY) prompt | (non-TTY) error.
     // Rewriting a key that already exists is a value change: its bindings stay
     // as they are, so the host question is skipped. Unknown (locked vault, old
     // daemon) still asks.
     let exists = args.host.is_empty()
-        && !args.no_broker
+        && !args.no_host
         && key_exists(&custodian, &vault, &key).await == Some(true);
     let intent = if exists {
         BrokerIntent::Unspecified
     } else {
-        resolve_broker_intent(&key, &args.host, args.no_broker)?
+        resolve_broker_intent(&key, &args.host, args.no_host)?
     };
 
     // The single-secret sugar: the connection id is the lowercased key — a plain
@@ -90,7 +90,7 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
     // the local control plane only, never the cloud.
     let (hosts_arg, no_broker_arg) = match &intent {
         BrokerIntent::Unspecified => (Vec::new(), false), // value only, binding untouched
-        BrokerIntent::NoBroker => (Vec::new(), true),
+        BrokerIntent::NoHost => (Vec::new(), true),
         BrokerIntent::Host(h) => (h.clone(), false),
     };
     if let Some(body) = crate::cli::approve::set_secret_unlocked(
@@ -118,7 +118,7 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
         // Unspecified: neither flag — the daemon writes the value and leaves
         // any existing binding exactly as it is.
         BrokerIntent::Unspecified => {}
-        BrokerIntent::NoBroker => scope["no_broker"] = json!(true),
+        BrokerIntent::NoHost => scope["no_broker"] = json!(true),
         BrokerIntent::Host(hosts) => scope["hosts"] = json!(hosts),
     }
     let op = json!({
@@ -126,12 +126,7 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -174,7 +169,7 @@ fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde
                 None
             }
         }
-        BrokerIntent::NoBroker => {
+        BrokerIntent::NoHost => {
             let removed = result
                 .get("removed_prior_anchor")
                 .and_then(|v| v.as_bool())
@@ -219,20 +214,16 @@ async fn key_exists(custodian: &str, vault: &str, key: &str) -> Option<bool> {
 }
 
 /// Decide the broker binding for `sc set`. Host is a REQUIRED answer (spec §11):
-/// `--no-broker` / `--host none` opt out explicitly; otherwise `--host` anchors;
-/// missing on a TTY → prompt; missing off a TTY → a clear error naming both
-/// fixes (never hang, never silently store an unusable item).
+/// `--no-host` opts out explicitly; otherwise `--host` anchors; missing on a
+/// TTY → prompt; missing off a TTY → a clear error naming both fixes (never
+/// hang, never silently store an unusable item).
 fn resolve_broker_intent(
     key: &str,
     host: &[String],
-    no_broker: bool,
+    no_host: bool,
 ) -> Result<BrokerIntent, String> {
-    if no_broker {
-        return Ok(BrokerIntent::NoBroker);
-    }
-    // `--host none` is the explicit opt-out sentinel.
-    if host.len() == 1 && host[0].eq_ignore_ascii_case("none") {
-        return Ok(BrokerIntent::NoBroker);
+    if no_host {
+        return Ok(BrokerIntent::NoHost);
     }
     if !host.is_empty() {
         return Ok(BrokerIntent::Host(host.to_vec()));
@@ -241,17 +232,14 @@ fn resolve_broker_intent(
         let entered = prompt_host(key)?;
         // Blank Enter = "skip this question": write the value, leave any
         // existing binding untouched (a rotation must never silently drop the
-        // anchor). Removing a binding stays EXPLICIT: `none` / `--no-broker`.
+        // anchor). Removing a binding stays EXPLICIT: `--no-host`.
         if entered.is_empty() {
             return Ok(BrokerIntent::Unspecified);
-        }
-        if entered.eq_ignore_ascii_case("none") {
-            return Ok(BrokerIntent::NoBroker);
         }
         Ok(BrokerIntent::Host(vec![entered]))
     } else {
         Err(format!(
-            "'{}' needs a host so the agent can use it. Pass `--host <domain>` (the API's domain, e.g. api.stripe.com), or `--no-broker` to store it for humans only",
+            "'{}' needs a host so the agent can use it. Pass `--host <domain>` (the API's domain, e.g. api.stripe.com), or `--no-host` to store it for humans only",
             key
         ))
     }
@@ -317,8 +305,7 @@ fn prompt_secret_value(key: &str) -> Result<String, String> {
 }
 
 /// Host prompt (new keys only). Blank is a first-class answer (value only,
-/// existing binding untouched), so pressing Enter never errors. `none` still
-/// opts out explicitly; `--help` documents it, the prompt stays one line.
+/// existing binding untouched), so pressing Enter never errors.
 fn prompt_host(key: &str) -> Result<String, String> {
     use std::io::Write as _;
     eprint!("API host for {} (e.g. api.stripe.com; Enter to skip): ", key);
@@ -330,7 +317,7 @@ fn prompt_host(key: &str) -> Result<String, String> {
     Ok(line.trim().to_string())
 }
 
-pub async fn run_rm(args: RmArgs) -> Result<(), String> {
+pub async fn run_rm(args: RmArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     // §1: secret KEYs are canonical uppercase — normalize on input so `sc rm
     // github_token` finds the stored `GITHUB_TOKEN`.
@@ -354,12 +341,7 @@ pub async fn run_rm(args: RmArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -389,7 +371,7 @@ pub async fn run_rm(args: RmArgs) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_get(args: GetArgs) -> Result<(), String> {
+pub async fn run_get(args: GetArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     // Case-SENSITIVE exact match — the mainstream convention for env vars and
     // secret managers (GCP/AWS/Vault). `get` reads across ALL stores: native
@@ -408,12 +390,7 @@ pub async fn run_get(args: GetArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(&custodian, &vault, &op, &format!("Reveal {}", key), &opts).await?;
     let value = body
         .get("value")
@@ -447,5 +424,39 @@ mod tests {
         assert!(stdin_value(vec![b'x'; 64 * 1024 + 1], "K").is_err());
         assert!(stdin_value(vec![0xff, 0xfe], "K").is_err());
         assert!(stdin_value(vec![b'x'; 64 * 1024], "K").is_ok());
+    }
+
+    fn parse(args: &[&str]) -> Result<crate::config::Cli, clap::Error> {
+        use clap::Parser as _;
+        crate::config::Cli::try_parse_from(std::iter::once("sprott").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn no_host_is_the_one_opt_out_spelling() {
+        use crate::config::{Command, SecretSubcommand};
+        let Command::Set(a) = parse(&["set", "K", "v", "--no-host"]).unwrap().command else {
+            panic!("not set");
+        };
+        assert!(a.no_host && a.host.is_empty());
+        let Command::Secret(s) = parse(&["secret", "set", "K", "--no-host"]).unwrap().command
+        else {
+            panic!("not secret");
+        };
+        let SecretSubcommand::Set(a) = s.sub else {
+            panic!("not secret set");
+        };
+        assert!(a.no_host);
+        assert!(parse(&["set", "K", "v", "--no-host", "--host", "api.x.com"]).is_err());
+        let err = parse(&["set", "K", "v", "--no-broker"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        // A host typed as `none` is a host like any other, not an opt-out.
+        assert!(matches!(
+            resolve_broker_intent("K", &["none".to_string()], false),
+            Ok(BrokerIntent::Host(h)) if h == ["none"]
+        ));
+        assert!(matches!(
+            resolve_broker_intent("K", &[], true),
+            Ok(BrokerIntent::NoHost)
+        ));
     }
 }

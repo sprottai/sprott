@@ -20,7 +20,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::cli::active::put_cloud_coords;
-use crate::config::LoginArgs;
+use crate::config::{ApprovalArgs, LoginArgs};
 
 /// Default daemon control-plane port (matches `ServeArgs` `SPROTT_PORT`).
 const DEFAULT_DAEMON_PORT: u16 = crate::config::CONTROL_PORT;
@@ -156,10 +156,10 @@ pub(crate) fn prepare_device() -> Result<PreparedDevice, String> {
     })
 }
 
-pub async fn run(args: LoginArgs) -> Result<(), String> {
+pub async fn run(args: LoginArgs, approval: &ApprovalArgs) -> Result<(), String> {
     pair_and_persist(args, true).await?;
     eprintln!("Starting Sprott…");
-    if let Err(e) = bring_up(true).await {
+    if let Err(e) = bring_up(Some(approval)).await {
         if let Some(e) = e.strip_prefix("auto-start: ") {
             eprintln!("  couldn't auto-start the daemon ({e}); run sprott up to finish.");
         } else if let Some(e) = e.strip_prefix("auto-unlock: ") {
@@ -365,12 +365,13 @@ pub(crate) fn persist_device_approval(
     Ok(())
 }
 
-/// Bring up the daemon after pairing. With `unlock=false`, used only by the
-/// setup device background process, no approval operation is created.
-pub async fn bring_up(unlock: bool) -> Result<(), String> {
+/// Bring up the daemon after pairing, then unlock with the given approval
+/// flags. With `None`, used only by the setup device background process, no
+/// approval operation is created.
+pub async fn bring_up(unlock: Option<&ApprovalArgs>) -> Result<(), String> {
     if crate::cli::service::unit_installed() {
-        if unlock {
-            return crate::cli::up::restart().await;
+        if let Some(approval) = unlock {
+            return crate::cli::up::restart(approval).await;
         }
         crate::cli::service::restart_with_fallback().await?;
     } else {
@@ -385,8 +386,8 @@ pub async fn bring_up(unlock: bool) -> Result<(), String> {
                 })?;
         }
     }
-    if unlock {
-        crate::cli::up::ensure_unlocked()
+    if let Some(approval) = unlock {
+        crate::cli::up::ensure_unlocked(approval)
             .await
             .map_err(|e| format!("auto-unlock: {}", e))?;
     }

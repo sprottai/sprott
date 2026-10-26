@@ -18,7 +18,8 @@ use crate::cli::active::resolve_active;
 use crate::cli::approve::{act_result, approve_op, ApproveOpts};
 use crate::cli::webauthn::now_unix;
 use crate::config::{
-    ServiceAddArgs, ServiceLsArgs, ServiceRmArgs, ServiceUpdateArgs, ServiceValidateArgs,
+    ApprovalArgs, ServiceAddArgs, ServiceLsArgs, ServiceRmArgs, ServiceUpdateArgs,
+    ServiceValidateArgs,
 };
 use crate::service::source::card::{diff, summarize, DefSummary};
 use crate::service::source::{
@@ -220,15 +221,6 @@ fn group_of(l: &Listed) -> (String, String) {
 
 // ── add ──────────────────────────────────────────────────────────────────────
 
-fn opts(no_browser: bool, cb_port: Option<u16>, timeout: u64) -> ApproveOpts {
-    ApproveOpts {
-        no_browser,
-        cb_port,
-        timeout,
-        return_after_remote_link: false,
-    }
-}
-
 /// Create the `service-add` op for `loaded` and wait for its approval.
 async fn submit(
     custodian: &str,
@@ -259,7 +251,7 @@ fn ids_of(v: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub async fn run_add(args: ServiceAddArgs) -> Result<(), String> {
+pub async fn run_add(args: ServiceAddArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let spec = parse_source(&args.source)?;
     let reg = ServiceRegistry::load();
     let loaded = load(&spec, args.git_ref.as_deref(), args.id.as_deref(), &reg)
@@ -290,7 +282,7 @@ pub async fn run_add(args: ServiceAddArgs) -> Result<(), String> {
         &vault,
         &loaded,
         false,
-        &opts(args.no_browser, args.cb_port, args.timeout),
+        &ApproveOpts::from_flags(approval),
     )
     .await?;
     println!("stored: {}", safe(&ids_of(&result, "ids").join(", ")));
@@ -410,12 +402,12 @@ fn update_targets(
     }
 }
 
-pub async fn run_update(args: ServiceUpdateArgs) -> Result<(), String> {
+pub async fn run_update(args: ServiceUpdateArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let stored = listing(&custodian, &vault).await?;
     let targets = update_targets(&args, &stored)?;
     let reg = ServiceRegistry::load();
-    let approve = opts(args.no_browser, args.cb_port, args.timeout);
+    let approve = ApproveOpts::from_flags(approval);
     for (identity, target) in targets {
         let mine: Vec<&Listed> = stored
             .iter()
@@ -647,7 +639,7 @@ fn rm_target(arg: &str) -> Result<String, String> {
     }
 }
 
-pub async fn run_rm(args: ServiceRmArgs) -> Result<(), String> {
+pub async fn run_rm(args: ServiceRmArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let target = rm_target(&args.target)?;
     let (custodian, vault) = resolve_active(None)?;
     let stored = listing(&custodian, &vault).await?;
@@ -689,7 +681,7 @@ pub async fn run_rm(args: ServiceRmArgs) -> Result<(), String> {
         &vault,
         &op,
         &format!("Remove {}", target),
-        &opts(args.no_browser, args.cb_port, args.timeout),
+        &ApproveOpts::from_flags(approval),
     )
     .await?;
     println!(
@@ -793,9 +785,6 @@ mod tests {
             check: true,
             yes: false,
             git_ref: None,
-            no_browser: true,
-            cb_port: None,
-            timeout: 1,
         }
     }
 

@@ -48,11 +48,11 @@ pub const DEFAULT_BODY_CAP: u64 = 32 * 1024 * 1024;
     about = "Sprott: passkey-gated credential broker"
 )]
 pub struct Cli {
-    /// Target vault for this invocation (any subcommand, any position): an id, a
-    /// unique id prefix, or the exact name (`sprott vault ls`; quote a name with
-    /// spaces). An ambiguous name or prefix errors with the candidates. Overrides
-    /// the shell's `$SPROTT_VAULT_ID` pin and the device default (top of the
-    /// resolution chain, design/vault-addressing.md).
+    /// Target vault for this invocation (any subcommand, any position): its
+    /// exact name (quote a name with spaces), its number in `sprott vault ls`,
+    /// an id, or a unique id prefix. An ambiguous name or prefix errors with the
+    /// candidates. Overrides the shell's `$SPROTT_VAULT_ID` pin and the device
+    /// default (top of the resolution chain, design/vault-addressing.md).
     #[arg(long, global = true, value_name = "VAULT")]
     pub vault: Option<String>,
     /// Emit machine-readable JSON instead of the human-readable output, on any
@@ -60,16 +60,39 @@ pub struct Cli {
     /// listings). Commands with no JSON form ignore it.
     #[arg(long, global = true)]
     pub json: bool,
+    #[command(flatten)]
+    pub approval: ApprovalArgs,
     #[command(subcommand)]
     pub command: Command,
 }
+
+/// The browser-approval flags, global like `--vault` (any subcommand, any
+/// position). Commands that open a passkey approval read them; the rest
+/// ignore them.
+#[derive(Debug, Clone, Default, Args)]
+pub struct ApprovalArgs {
+    /// Print the approval link instead of opening a browser.
+    #[arg(long, global = true)]
+    pub no_browser: bool,
+    /// Fixed port for the local approval callback, for SSH port forwarding.
+    /// Default: the `cb-port` setting (`sprott config`), else a random free port.
+    #[arg(long, global = true, env = "SPROTT_CB_PORT", value_name = "PORT")]
+    pub cb_port: Option<u16>,
+    /// How long to wait, in seconds: for a local browser approval (default
+    /// 120), or in `sprott op wait` (default 1900).
+    #[arg(long, global = true, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+}
+
+/// `--timeout` default for a local browser approval.
+pub const APPROVAL_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Set up this machine and one agent without prompting. Re-run the command
     /// after completing each browser approval until it reports done.
     Setup(SetupArgs),
-    /// Install or remove the Sprott agent skill.
+    /// Install or uninstall the Sprott agent skill.
     Skill(SkillArgs),
     /// Print Sprott's status: the daemon (running? version) and the active
     /// vault (which one, locked/unlocked, key count).
@@ -93,11 +116,11 @@ pub enum Command {
     /// `sprott up` does this for you; use this to unlock explicitly. A vault-level
     /// lifecycle op — sits next to `sprott up`, not under `sprott vault` (which manages
     /// the *set* of vaults). Pass `--vault` to target a non-active vault.
-    Unlock(UnlockArgs),
+    Unlock,
     /// Drop the active vault's in-memory secrets cache and flip it back to
     /// Locked (passkey-gated per PROTOCOL.md §6.3 so a stolen session can't
     /// DOS-lock the vault). Pass `--vault` to target a non-active vault.
-    Lock(UnlockArgs),
+    Lock,
     /// Tail the local daemon's logs (journalctl).
     Log(LogArgs),
     /// ADVANCED / self-host: run the daemon in the FOREGROUND (this process),
@@ -120,36 +143,19 @@ pub enum Command {
     /// daemon-side state (irreversible, passkey-gated). Short: `sprott v`.
     #[command(alias = "v")]
     Vault(VaultArgs),
-    /// Read/write persistent CLI preferences in `~/.sprott/config.toml`.
-    /// Settings here are the lowest-priority fallback in the resolution
-    /// chain (flag > env > config > default). Subs: set / get / unset /
-    /// ls.
+    /// Read/write persistent preferences: `cb-port` (the fallback for
+    /// `--cb-port`) and `proxy` (the HTTP proxy the daemon uses to reach the
+    /// internet). Subs: set / get / unset / ls.
     Config(ConfigArgs),
-    /// Manage this device's upstream egress proxy (the HTTP proxy the daemon uses
-    /// to reach the internet). Subs: set / get / unset. Behind a corporate or
-    /// on-demand proxy this is how the daemon completes OAuth connects and routes
-    /// its forward hop, since the background daemon doesn't inherit your shell's
-    /// `HTTPS_PROXY`.
-    Proxy(ProxyArgs),
-    /// Manage the active vault's enrolled passkeys. `ls` is read-only;
-    /// `add` / `rm` / `rename` need crypto ceremonies and are deferred
-    /// to a later session. Short: `sprott p`.
+    /// Manage the active vault's enrolled passkeys: `ls` lists them; `add` /
+    /// `rm` / `rename` print the console page where that is done. Short:
+    /// `sprott p`.
     #[command(alias = "p")]
     Passkey(PasskeyArgs),
     /// Manage this account's agents (agent ≡ api-key). `add` mints a key
     /// (works on any paired device), `ls` lists them, `rm` revokes. Short: `sprott a`.
     #[command(alias = "a")]
     Agent(AgentArgs),
-    /// The DEVICE axis of the account plane: `sprott device login/logout` are the
-    /// canonical spellings of top-level `sprott login`/`sprott logout` (kept as
-    /// shortcuts). Symmetric with `sprott agent *` — both are account-level,
-    /// device-key authed, cloud-backed.
-    Device(DeviceArgs),
-    /// Print `export` lines for the HUMAN's shell (`eval "$(sprott env)"`):
-    /// SPROTT_BROKER_URL projected from this device's config — never a key,
-    /// never a vault pin (vault follows `sprott vault use`; per-call override is
-    /// `--vault`). An AGENT's env (incl. its key) is minted by `sprott agent add`.
-    Env,
     /// Self-update: download the latest release binary for this platform,
     /// verify its sha256, and replace the running binary in place. No-op when
     /// already current. This is also how the baked cloud domain changes ship.
@@ -192,11 +198,6 @@ pub enum Command {
     /// "Connections". Short: `sprott conn`.
     #[command(alias = "conn")]
     Connection(ConnectionArgs),
-    /// Back-compat alias for `sprott connection add`. The canonical spelling is
-    /// `sprott connection add <id>` (a noun-namespace, matching `sprott secret`/`vault`/
-    /// `agent`); kept hidden so existing `sprott connect …` calls keep working.
-    #[command(hide = true)]
-    Connect(ConnectArgs),
     /// Print the Sprott binary version.
     Version,
     /// Health + reachability checks: daemon connectivity, active
@@ -279,13 +280,6 @@ pub struct ConnectArgs {
     /// skips), left unfilled otherwise.
     #[arg(long = "use", value_name = "SLOT=KEY")]
     pub use_slots: Vec<String>,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -341,13 +335,6 @@ pub struct ConnectionHostArgs {
     /// wildcard (`*.example.com`) covering every subdomain.
     #[arg(value_name = "HOST")]
     pub host: String,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -367,13 +354,6 @@ pub struct ConnectionRmArgs {
     /// of a connection added before write tracking are always kept.
     #[arg(long)]
     pub keep_secrets: bool,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -401,10 +381,6 @@ pub struct OpWaitArgs {
     /// Op id from a pending-approval response (its `op_id` JSON field /
     /// `x-sprott-op-id` header).
     pub op_id: String,
-    /// Max seconds to wait before giving up (the op's own expiry usually
-    /// ends the wait first).
-    #[arg(long, default_value = "1900")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -488,13 +464,6 @@ pub struct ServiceAddArgs {
     /// branch). Resolved to a full commit and pinned.
     #[arg(long = "ref", value_name = "REF")]
     pub git_ref: Option<String>,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -515,13 +484,6 @@ pub struct ServiceUpdateArgs {
     /// default branch head.
     #[arg(long = "ref", value_name = "REF")]
     pub git_ref: Option<String>,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -535,13 +497,6 @@ pub struct ServiceRmArgs {
     /// A service id, or a source (`github:owner/repo[:path]`, `./path`) to
     /// remove all of its services.
     pub target: String,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -595,14 +550,14 @@ pub struct AgentRmArgs {
     pub name: String,
 }
 
-/// `sprott setup` is an agent-driven, re-runnable state machine. `name` stays
-/// optional at clap's boundary so the command can return its structured usage
-/// error instead of clap writing a different shape to stderr.
+/// `sprott setup` is an agent-driven, re-runnable state machine. `agent_name`
+/// stays optional at clap's boundary so the command can return its structured
+/// usage error instead of clap writing a different shape to stderr.
 #[derive(Debug, Args)]
 pub struct SetupArgs {
     /// A short name identifying the agent being set up, such as claude-code.
     #[arg(long)]
-    pub name: Option<String>,
+    pub agent_name: Option<String>,
     /// First-party environment selector: prod (default) or dev.
     #[arg(long)]
     pub profile: Option<String>,
@@ -636,7 +591,7 @@ pub enum SkillSubcommand {
     /// Install or update the Sprott skill for agents on this machine.
     Install(SkillInstallArgs),
     /// Remove the skill files previously written by Sprott.
-    Remove(SkillRemoveArgs),
+    Uninstall(SkillUninstallArgs),
 }
 
 #[derive(Debug, Args)]
@@ -647,25 +602,10 @@ pub struct SkillInstallArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct SkillRemoveArgs {
+pub struct SkillUninstallArgs {
     /// Remove a copy that was modified after Sprott installed it.
     #[arg(long)]
     pub force: bool,
-}
-
-/// `sprott device` — the device axis of the account plane.
-#[derive(Debug, Args)]
-pub struct DeviceArgs {
-    #[command(subcommand)]
-    pub sub: DeviceSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum DeviceSubcommand {
-    /// Pair this host to your vault (same as top-level `sprott login`).
-    Login(LoginArgs),
-    /// Unpair this host (same as top-level `sprott logout`).
-    Logout(LogoutArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -677,22 +617,29 @@ pub enum PasskeySubcommand {
     /// Add a passkey: prints the Sprott console page where passkeys are
     /// enrolled (in the browser, where the identity key lives).
     Add(CommonArgs),
-    /// Remove an enrolled passkey by credential id. NOT YET IMPLEMENTED.
+    /// Remove an enrolled passkey: prints the Sprott console page where it
+    /// is removed.
     Rm(PasskeyRemoveArgs),
-    /// Rename an enrolled passkey's `device_name`. NOT YET IMPLEMENTED —
-    /// daemon currently has no metadata-update endpoint.
+    /// Rename an enrolled passkey: prints the Sprott console page where it
+    /// is renamed.
     Rename(PasskeyRenameArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct PasskeyRemoveArgs {
-    /// base64url credential id (as shown in `passkeys ls`).
-    pub credential_id: String,
+    /// The passkey, as in `sprott passkey ls`: its exact name, its credential
+    /// id, or a unique credential id prefix (4+ characters).
+    #[arg(value_name = "PASSKEY")]
+    pub passkey: String,
 }
 
 #[derive(Debug, Args)]
 pub struct PasskeyRenameArgs {
-    pub credential_id: String,
+    /// The passkey, as in `sprott passkey ls`: its exact name, its credential
+    /// id, or a unique credential id prefix (4+ characters).
+    #[arg(value_name = "PASSKEY")]
+    pub passkey: String,
+    /// The new name.
     pub new_name: String,
 }
 
@@ -707,12 +654,11 @@ pub enum VaultSubcommand {
     /// List vaults this CLI has used (from local config) + mark the
     /// device default with `*`. `--json` for scripts/agents.
     Ls(VaultLsArgs),
-    /// Switch the active vault. Pass an id, a unique id prefix, or the exact name
-    /// (quote if it has spaces); also a `sprott vault ls` index, a vault URL, --local
-    /// for the localhost default, or nothing for an interactive prompt.
+    /// Set the default vault for your commands. Omit VAULT to pick from a
+    /// list.
     Use(VaultUseArgs),
-    /// Remove a vault from the local known list (does NOT touch the
-    /// daemon, for that use `sprott vault rm`). Pass URL or index.
+    /// Remove a vault from this machine's list (does NOT touch the daemon;
+    /// for that use `sprott vault rm`). Omit VAULT to pick from a list.
     Forget(VaultForgetArgs),
     /// Create a new vault: prints the Sprott console page where vaults are
     /// created. The new vault syncs to this machine on its own.
@@ -720,32 +666,22 @@ pub enum VaultSubcommand {
     /// Irreversibly delete a vault's daemon-side state. Passkey-gated
     /// via the standard `/op/{op_id}` browser-callback ceremony.
     Rm(VaultDeleteArgs),
-    /// Back-compat alias for top-level `sprott unlock`. Lock/unlock are vault-level
-    /// lifecycle ops (they sit next to `sprott up`), so the canonical spelling is
-    /// top-level; this is kept hidden so existing `sprott vault unlock` calls work.
-    #[command(hide = true)]
-    Unlock(UnlockArgs),
-    /// Back-compat alias for top-level `sprott lock`. See `Unlock` above.
-    #[command(hide = true)]
-    Lock(UnlockArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct VaultUseArgs {
-    /// Either a vault URL (`<daemon>/v/<vault_id>`) or a numeric index
-    /// from `sprott vault ls`. If omitted and `--local` is also omitted, an
-    /// interactive prompt lists known vaults.
-    pub url_or_idx: Option<String>,
-    /// Shortcut for the localhost control-plane vault (`/v/default`).
-    #[arg(long, conflicts_with = "url_or_idx")]
-    pub local: bool,
+    /// The vault: its exact name, its number in `sprott vault ls`, an id, or a
+    /// unique id prefix.
+    #[arg(value_name = "VAULT")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct VaultForgetArgs {
-    /// A vault URL (`<daemon>/v/<vault_id>`) or numeric index from
-    /// `sprott vault ls`. If omitted, an interactive prompt lists known vaults.
-    pub url_or_idx: Option<String>,
+    /// The vault: its exact name, its number in `sprott vault ls`, an id, or a
+    /// unique id prefix.
+    #[arg(value_name = "VAULT")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -753,24 +689,16 @@ pub struct VaultCreateArgs {}
 
 #[derive(Debug, Args)]
 pub struct VaultDeleteArgs {
-    /// Vault id to delete. Required even when only one config exists —
-    /// no implicit "current vault" for destructive ops.
-    pub vault: String,
+    /// The vault to delete: its exact name, its number in `sprott vault ls`,
+    /// an id, or a unique id prefix. Required even when only one exists: no
+    /// implicit "current vault" for destructive ops.
+    #[arg(value_name = "VAULT")]
+    pub target: String,
 
     /// Bypass the interactive confirmation. Without this flag the command
     /// refuses to proceed (since deletion is irreversible).
     #[arg(long, short = 'y')]
     pub yes: bool,
-
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server. When set, the CLI
-    /// always binds to this port (useful for SSH port-forwarding).
-    /// Default: random OS-assigned port.
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -787,26 +715,6 @@ pub enum StoreSubcommand {
 }
 
 #[derive(Debug, Args)]
-pub struct ProxyArgs {
-    #[command(subcommand)]
-    pub sub: ProxySubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ProxySubcommand {
-    /// Set the device's upstream EGRESS proxy — the HTTP proxy the daemon uses to
-    /// reach the internet (OAuth exchanges, the resident proxy's forward hop,
-    /// `sprott upgrade`). Persists it and bounces the daemon so it takes effect (one
-    /// passkey tap to re-unlock). e.g. `sprott proxy set http://127.0.0.1:7778`.
-    Set { url: String },
-    /// Print the configured egress proxy (and any shell `HTTPS_PROXY` that would
-    /// override it). Exit nonzero when nothing is configured.
-    Get,
-    /// Remove the configured egress proxy and bounce the daemon back to direct.
-    Unset,
-}
-
-#[derive(Debug, Args)]
 pub struct ConfigArgs {
     #[command(subcommand)]
     pub sub: ConfigSubcommand,
@@ -814,8 +722,10 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigSubcommand {
-    /// Set a persistent CLI preference, e.g. `sprott config set cb-port 23394`.
-    /// Known keys: cb-port.
+    /// Set a persistent preference. Keys: `cb-port` (e.g. `sprott config set
+    /// cb-port 23394`) and `proxy`, the HTTP proxy the daemon uses to reach the
+    /// internet (e.g. `sprott config set proxy http://127.0.0.1:7778`; applies
+    /// to the running daemon at once).
     Set { key: String, value: String },
     /// Print the value of one preference. Exit code is nonzero when unset.
     Get { key: String },
@@ -886,25 +796,6 @@ pub struct ServeArgs {
     #[arg(long, env = "SPROTT_RP_ID")]
     pub rp_id: Option<String>,
 
-    /// Shared secret that authenticates this daemon to the cloud op-relay
-    /// (see `--relay-url`): the daemon presents it as the bearer token when it
-    /// registers a pending op and polls for the browser-deposited grant. When
-    /// unset, the daemon can't reach the relay, so web approval is off (it
-    /// falls back to local-only). Set on the daemon AND matched on the relay.
-    /// Rotate by changing the env var and redeploying. (Named `admin_key` for
-    /// historical reasons — the old `/admin/*` HTTP surface it also gated is
-    /// gone; today it is purely the relay credential.)
-    #[arg(long, env = "SPROTT_ADMIN_KEY")]
-    pub admin_key: Option<String>,
-
-    /// Cloud op-relay base URL (e.g. `https://api.dev.sprott.ai`). When set,
-    /// the daemon registers each pending op with the relay and polls for the
-    /// browser-deposited (HPKE-sealed) grant — this is what enables web
-    /// approval for a zero-inbound localhost daemon. When unset, the daemon is
-    /// local-only (legacy embedded op-page). Auth uses `--admin-key`.
-    #[arg(long, env = "SPROTT_RELAY_URL")]
-    pub relay_url: Option<String>,
-
     /// Max body size (bytes) the broker will buffer for a phantom-bearing
     /// request. Over the cap the request is refused with a clear 413 — the
     /// proxy never forwards a credential alongside a body policy couldn't
@@ -921,21 +812,6 @@ pub struct StatusArgs {}
 
 #[derive(Debug, Args)]
 pub struct SyncArgs {}
-
-#[derive(Debug, Args)]
-pub struct UnlockArgs {
-    /// Don't try to auto-launch a browser; just print the URL.
-    #[arg(long)]
-    pub no_browser: bool,
-
-    /// Fixed port for the localhost callback server (for SSH port-forwarding).
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-
-    /// How long (seconds) to wait for the browser-callback before giving up.
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
-}
 
 /// Args for `sprott upgrade`.
 #[derive(Debug, Args)]
@@ -1008,16 +884,6 @@ pub struct GetArgs {
     /// Secret key to reveal, from any store (native or external), matched
     /// case-SENSITIVELY (`sprott get OPENAI_API_KEY`; external keys verbatim).
     pub key: String,
-
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server. When set, the CLI
-    /// always binds to this port (useful for SSH port-forwarding).
-    /// Default: random OS-assigned port.
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1029,25 +895,15 @@ pub struct SetArgs {
     /// shell history and `ps`.
     pub value: Option<String>,
     /// Anchor the secret to an egress host so the agent can broker it: creates a
-    /// raw connection `__sprott__<key>__` → this exact domain (repeatable). Pass
-    /// `--host none` (or `--no-broker`) to store it for humans only. On a TTY a
-    /// host is prompted when neither is given; off a TTY the command errors
-    /// (naming both fixes) rather than storing an unusable item.
+    /// raw connection `__sprott__<key>__` → this exact domain (repeatable). On a
+    /// TTY a host is prompted when neither this nor `--no-host` is given; off a
+    /// TTY the command errors (naming both) rather than storing an unusable item.
     #[arg(long)]
     pub host: Vec<String>,
-    /// Store the secret WITHOUT a host anchor — human-only, invisible to the
-    /// agent surface (`sprott secret get` reveals it via the passkey ceremony).
+    /// Store the secret with no host, removing any it had: for humans only,
+    /// the agent can't use it (`sprott get` reveals it with a passkey approval).
     #[arg(long, conflicts_with = "host")]
-    pub no_broker: bool,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server. When set, the CLI
-    /// always binds to this port (useful for SSH port-forwarding).
-    /// Default: random OS-assigned port.
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
+    pub no_host: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1059,15 +915,6 @@ pub struct RmArgs {
     /// re-added. Required off a terminal; interactive runs prompt instead.
     #[arg(long, short = 'y')]
     pub yes: bool,
-    #[arg(long)]
-    pub no_browser: bool,
-    /// Fixed port for the localhost callback server. When set, the CLI
-    /// always binds to this port (useful for SSH port-forwarding).
-    /// Default: random OS-assigned port.
-    #[arg(long, env = "SPROTT_CB_PORT")]
-    pub cb_port: Option<u16>,
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1081,8 +928,6 @@ pub struct Config {
     pub origin: String,
     /// Whose WebAuthn assertions verify: the RP ID and the accepted origins.
     pub relying_party: crate::passkey::webauthn::RelyingParty,
-    pub admin_key: Option<String>,
-    pub relay_url: Option<String>,
     /// See `ServeArgs::body_cap` / [`DEFAULT_BODY_CAP`].
     pub body_cap: u64,
 }
@@ -1120,8 +965,6 @@ impl Config {
             listen: args.listen,
             origin,
             relying_party,
-            admin_key: args.admin_key,
-            relay_url: args.relay_url,
             body_cap: args.body_cap,
         }
     }
@@ -1233,6 +1076,72 @@ mod relying_party_tests {
             assert_eq!(rp.origins, vec![stored.to_string()], "{stored}");
             assert!(!rp.allows(&format!("https://app.{host}")));
             assert!(!rp.allows(&format!("https://www.{host}")));
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_surface_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("sprott").chain(args.iter().copied()))
+    }
+
+    /// One spelling per concept: the new spellings parse, the removed ones
+    /// are clap usage errors.
+    #[test]
+    fn one_spelling_per_concept() {
+        // The approval flags are global, in any position.
+        let cli = parse(&["get", "K", "--no-browser", "--timeout", "5"]).unwrap();
+        assert!(cli.approval.no_browser);
+        assert_eq!(cli.approval.timeout, Some(5));
+        let cli = parse(&["--cb-port", "9000", "set", "K", "v"]).unwrap();
+        assert_eq!(cli.approval.cb_port, Some(9000));
+        let cli = parse(&["--timeout", "60", "op", "wait", "op-1"]).unwrap();
+        assert_eq!(cli.approval.timeout, Some(60));
+        assert_eq!(parse(&["unlock"]).unwrap().approval.timeout, None);
+
+        let Command::Vault(v) = parse(&["vault", "use", "2"]).unwrap().command else {
+            panic!("vault");
+        };
+        let VaultSubcommand::Use(u) = v.sub else {
+            panic!("vault use");
+        };
+        assert_eq!(u.target.as_deref(), Some("2"));
+        let Command::Vault(v) = parse(&["vault", "rm", "2", "-y"]).unwrap().command else {
+            panic!("vault");
+        };
+        let VaultSubcommand::Rm(r) = v.sub else {
+            panic!("vault rm");
+        };
+        assert_eq!(r.target, "2");
+
+        let Command::Setup(s) = parse(&["setup", "--agent-name", "codex"]).unwrap().command else {
+            panic!("setup");
+        };
+        assert_eq!(s.agent_name.as_deref(), Some("codex"));
+        assert!(matches!(
+            parse(&["skill", "uninstall"]).unwrap().command,
+            Command::Skill(_)
+        ));
+        let cli = parse(&["config", "set", "proxy", "http://p:1"]).unwrap();
+        let Command::Config(c) = cli.command else {
+            panic!("config");
+        };
+        assert!(matches!(c.sub, ConfigSubcommand::Set { ref key, .. } if key == "proxy"));
+
+        for removed in [
+            &["vault", "use", "--local"][..],
+            &["device", "login"],
+            &["env"],
+            &["proxy", "set", "http://p:1"],
+            &["skill", "remove"],
+            &["setup", "--name", "x"],
+            &["serve", "--admin-key", "k"],
+            &["serve", "--relay-url", "https://r.example"],
+        ] {
+            assert!(parse(removed).is_err(), "{removed:?} still parses");
         }
     }
 }

@@ -1130,7 +1130,7 @@ async fn run_stream(
 ) -> StreamEnd {
     use futures_util::StreamExt;
     // ★ Fresh client on EVERY (re)connect — proxy config applied at build
-    // time, so a runtime `sc proxy set` reaches the stream at its next dial
+    // time, so a runtime `sprott config set proxy` reaches the stream at its next dial
     // (the hot-reload contract). Connect budget only: a total `.timeout()`
     // would fire mid-body and kill a healthy held-open stream.
     let client = match crate::cli::egress_proxy::client_streaming(CONNECT_HEADERS_BUDGET) {

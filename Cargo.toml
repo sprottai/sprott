@@ -71,7 +71,7 @@ hudsucker = "0.24"
 http-body-util = "0.1"
 # The resident proxy's UPSTREAM (forward-hop) connector. hudsucker's built-in
 # `with_rustls_connector` dials every intercepted host DIRECTLY; to route the
-# forward hop through the device egress proxy (`sc proxy set`) we build our own
+# forward hop through the device egress proxy (`sprott config set proxy`) we build our own
 # HttpsConnector (same rustls 0.23 / aws-lc-rs / webpki roots hudsucker uses)
 # wrapping a CONNECT-tunnel base connector. `tower-service` is the `Service<Uri>`
 # trait that base connector implements. Both are already in the tree (via

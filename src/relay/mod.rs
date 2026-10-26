@@ -10,10 +10,11 @@
 //!
 //! The relay is **blind to W_c**: the grant the browser deposits carries W_c
 //! HPKE-sealed to this daemon's `sc_pk` (see `crypto::envelope`), opened only
-//! here. Auth to the relay is the shared `SPROTT_ADMIN_KEY` for v1
-//! (daemon-pubkey-pinned auth is a later tier).
+//! here. The daemon authenticates to the relay with its device-key, so only a
+//! daemon paired with `sprott login` uses it (daemon-pubkey-pinned auth is a
+//! later tier).
 //!
-//! All of this is **opt-in**: when `config.relay_url` is `None` the daemon is
-//! purely local (the legacy op-page path) and none of this runs.
+//! An unpaired daemon is purely local (the legacy op-page path) and none of
+//! this runs.
 
 pub mod client;

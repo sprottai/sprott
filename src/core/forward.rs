@@ -5,10 +5,10 @@
 //! `none` (the broker forwards a single hop; a 30x is returned to the caller,
 //! never chased into a different host).
 //!
-//! Held behind a `RwLock` so the device egress proxy (`sc proxy set`) can be
+//! Held behind a `RwLock` so the device egress proxy (`sprott config set proxy`) can be
 //! HOT-SWAPPED at runtime, WITHOUT a daemon restart. A restart would drop the
 //! in-memory vault key and force the operator to re-unlock; instead
-//! `sc proxy set/clear` writes the stored value and pokes `/proxy/reload`, which
+//! `sprott config set/unset proxy` writes the stored value and pokes `/proxy/reload`, which
 //! calls [`reload_egress_proxy`]. The client is built with an EXPLICIT proxy
 //! resolved from `egress_proxy::effective()` (the live ambient proxy an `sc run`
 //! last reported, else the stored file — not the raw process env), so a reload
@@ -42,7 +42,7 @@ pub fn http_client() -> reqwest::Client {
 }
 
 /// Rebuild the shared client from the currently-effective egress proxy and swap
-/// it in. Called by the `/proxy/reload` control route after `sc proxy set/clear`
+/// it in. Called by the `/proxy/reload` control route after `sprott config set/unset proxy`
 /// rewrites the stored value — the daemon re-points its egress with no restart
 /// (and so no vault re-unlock).
 pub fn reload_egress_proxy() {

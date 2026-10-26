@@ -299,7 +299,7 @@ pub async fn resolve_auth_value(
             AppError::Internal(format!(
                 "couldn't reach {}'s token endpoint to refresh the access token ({}). \
                  If this machine needs a proxy for outbound HTTPS, set one with \
-                 `sprott proxy set <url>`.",
+                 `sprott config set proxy <url>`.",
                 service_id, transport
             ))
         } else {

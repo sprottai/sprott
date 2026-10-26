@@ -6,7 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::config::{SkillInstallArgs, SkillRemoveArgs, SkillSubcommand};
+use crate::config::{SkillInstallArgs, SkillSubcommand, SkillUninstallArgs};
 
 const SKILL: &str = include_str!("../../skills/sprott/SKILL.md");
 
@@ -51,7 +51,7 @@ pub fn run(sub: SkillSubcommand) -> Result<(), String> {
             }
             Ok(())
         }
-        SkillSubcommand::Remove(SkillRemoveArgs { force }) => {
+        SkillSubcommand::Uninstall(SkillUninstallArgs { force }) => {
             let removed = remove(force)?;
             if removed.is_empty() {
                 println!("Sprott skill is not installed.");
@@ -283,7 +283,7 @@ fn remove_at(home: &Path, force: bool) -> Result<Vec<PathBuf>, String> {
         );
         if hash != manifest.sha256 && !force {
             return Err(format!(
-                "{} was modified after Sprott installed it; re-run `sprott skill remove --force` to remove it",
+                "{} was modified after Sprott installed it; re-run `sprott skill uninstall --force` to remove it",
                 skill_path.display()
             ));
         }

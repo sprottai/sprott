@@ -499,7 +499,7 @@ pub fn print_status(s: &VaultStatus) {
             }
         }
         VaultState::NotFound => {
-            println!("  state:    not found (run `sprott vault create`, or pick a different URL with `sprott vault use`)");
+            println!("  state:    not found (run `sprott vault create`, or pick a different vault with `sprott vault use`)");
         }
         VaultState::Locked { passkeys } => {
             println!("  state:    locked (run `sprott unlock`)");

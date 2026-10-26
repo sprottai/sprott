@@ -2017,8 +2017,6 @@ refresh_token = "REFRESH_TOKEN"
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let state = Arc::new(AppState::new(cfg));
@@ -2152,8 +2150,6 @@ refresh_token = "REFRESH_TOKEN"
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let mut state = AppState::new(cfg);

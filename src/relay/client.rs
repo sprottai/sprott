@@ -84,7 +84,7 @@ pub fn spawn_register_and_poll(
     // it never supersedes by key match. Empty for everything but `use`.
     supersedes: Vec<String>,
 ) {
-    let (relay_url, auth_token) = match resolve_relay(&state) {
+    let (relay_url, auth_token) = match resolve_relay() {
         Some(v) => v,
         None => return, // local-only daemon (no cloud pairing); nothing to do
     };
@@ -159,7 +159,7 @@ pub fn spawn_cancel(
     op_id: String,
     reason: Option<CancelReason>,
 ) {
-    let (base, auth_token) = match resolve_relay(&state) {
+    let (base, auth_token) = match resolve_relay() {
         Some(v) => v,
         None => return,
     };
@@ -192,28 +192,18 @@ pub fn spawn_cancel(
     });
 }
 
-/// Resolve `(relay_base, auth_token)` for op-relay registration.
+/// Resolve `(relay_base, auth_token)` for op-relay registration: a paired
+/// daemon dials its cloud backend (`cloud_backend`, persisted at `sc login`)
+/// and authenticates as itself with the `sc_device_` device-key — exactly the
+/// channel the Slice-3 blob sync already uses. Backend gate: `resolveAuth` +
+/// `isOwnedVaultId`.
 ///
-/// Primary (the local-daemon pivot): a paired daemon dials its cloud backend
-/// (`cloud_backend`, persisted at `sc login`) and authenticates as itself with
-/// the `sc_device_` device-key — exactly the channel the Slice-3 blob sync
-/// already uses. Backend gate: `resolveAuth` + `isOwnedVaultId`.
-///
-/// Fallback: an operator-supplied `SPROTT_RELAY_URL` + `SPROTT_ADMIN_KEY`
-/// (self-host / SaaS-custodian deployments that pre-date pairing).
-///
-/// `None` ⇒ no relay ⇒ purely local daemon; the local op-page ceremony stands.
-fn resolve_relay(state: &AppState) -> Option<(String, String)> {
-    if let Ok(cfg) = crate::cli::active::load() {
-        if let Some(base) = cfg.cloud_backend.as_deref().filter(|s| !s.is_empty()) {
-            if let Some(dk) = crate::sync::device_key() {
-                return Some((base.trim_end_matches('/').to_string(), dk));
-            }
-        }
-    }
-    let base = state.config.relay_url.clone().filter(|s| !s.is_empty())?;
-    let key = state.config.admin_key.clone().filter(|s| !s.is_empty())?;
-    Some((base.trim_end_matches('/').to_string(), key))
+/// `None` ⇒ unpaired ⇒ purely local daemon; the local op-page ceremony stands.
+fn resolve_relay() -> Option<(String, String)> {
+    let cfg = crate::cli::active::load().ok()?;
+    let base = cfg.cloud_backend.filter(|s| !s.is_empty())?;
+    let dk = crate::sync::device_key()?;
+    Some((base.trim_end_matches('/').to_string(), dk))
 }
 
 async fn run(
@@ -703,8 +693,6 @@ mod tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         })
     }

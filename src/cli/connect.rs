@@ -42,11 +42,11 @@ use crate::cli::active::resolve_active;
 use crate::cli::approve::{act_result, approve_op, deposit_values, ApproveOpts};
 use crate::cli::conn::{slugify_conn_id, valid_role, validate_raw_host};
 use crate::cli::webauthn::now_unix;
-use crate::config::{ConnectArgs, ConnectionHostArgs, ConnectionRmArgs};
+use crate::config::{ApprovalArgs, ConnectArgs, ConnectionHostArgs, ConnectionRmArgs};
 use crate::service::ServiceRegistry;
 use crate::storage::plaintext::suggested_secret_key;
 
-pub async fn run(mut args: ConnectArgs) -> Result<(), String> {
+pub async fn run(mut args: ConnectArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
 
     // Resolve the connection id: slugify a provided handle, or (no id given) run
@@ -54,8 +54,10 @@ pub async fn run(mut args: ConnectArgs) -> Result<(), String> {
     let name = resolve_conn_id(&mut args)?;
 
     match args.service.clone() {
-        Some(service) => run_service_backed(&custodian, &vault, &name, &service, &args).await,
-        None => run_raw(&custodian, &vault, &name, &args).await,
+        Some(service) => {
+            run_service_backed(&custodian, &vault, &name, &service, &args, approval).await
+        }
+        None => run_raw(&custodian, &vault, &name, &args, approval).await,
     }
 }
 
@@ -174,7 +176,7 @@ pub async fn run_ls(json: bool) -> Result<(), String> {
 /// SAME `widen-host` op the proxy's one-tap widen uses (approve.rs dispatch), so
 /// reactive and proactive widening share one code path + one consent card. The
 /// host may be an exact FQDN or a leftmost `*.domain` wildcard.
-pub async fn run_add_host(args: ConnectionHostArgs) -> Result<(), String> {
+pub async fn run_add_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let id = slugify_conn_id(&args.id);
     if id.is_empty() {
@@ -192,12 +194,7 @@ pub async fn run_add_host(args: ConnectionHostArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -215,7 +212,7 @@ pub async fn run_add_host(args: ConnectionHostArgs) -> Result<(), String> {
 /// REMOVING a host from a connection's anchor (tighten access). Same passkey
 /// approval; mints the `narrow-host` op the dispatch removes durably. Idempotent
 /// — a host not on the anchor reports nothing removed (no error).
-pub async fn run_rm_host(args: ConnectionHostArgs) -> Result<(), String> {
+pub async fn run_rm_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let id = slugify_conn_id(&args.id);
     if id.is_empty() {
@@ -235,12 +232,7 @@ pub async fn run_rm_host(args: ConnectionHostArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -264,7 +256,7 @@ pub async fn run_rm_host(args: ConnectionHostArgs) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_rm(args: ConnectionRmArgs) -> Result<(), String> {
+pub async fn run_rm(args: ConnectionRmArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let id = slugify_conn_id(&args.id);
     if id.is_empty() {
@@ -302,12 +294,7 @@ pub async fn run_rm(args: ConnectionRmArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -385,6 +372,7 @@ async fn run_raw(
     vault: &str,
     name: &str,
     args: &ConnectArgs,
+    approval: &ApprovalArgs,
 ) -> Result<(), String> {
     // Hosts: anchor our own exact FQDNs.
     let hosts = if !args.host.is_empty() {
@@ -453,12 +441,7 @@ async fn run_raw(
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     approve_op(
         custodian,
         vault,
@@ -480,6 +463,7 @@ async fn run_service_backed(
     name: &str,
     service: &str,
     args: &ConnectArgs,
+    approval: &ApprovalArgs,
 ) -> Result<(), String> {
     // Resolve the service from the compiled catalog (built-ins). A per-vault
     // custom service (aux.services) is connected via the console, not here.
@@ -594,12 +578,7 @@ async fn run_service_backed(
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     approve_op(
         custodian,
         vault,

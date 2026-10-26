@@ -6684,8 +6684,6 @@ mod peritem_tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         }
     }
@@ -8521,8 +8519,6 @@ mod peritem_tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let mut st = AppState::new(cfg);

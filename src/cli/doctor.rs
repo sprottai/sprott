@@ -275,9 +275,9 @@ pub async fn run(json: bool) -> Result<(), String> {
             ),
             Some(url) => {
                 let source = if file.as_deref() == Some(url.as_str()) {
-                    "from `sprott proxy set`"
+                    "from `sprott config set proxy`"
                 } else {
-                    "from shell HTTPS_PROXY (overrides `sprott proxy set`)"
+                    "from shell HTTPS_PROXY (overrides `sprott config set proxy`)"
                 };
                 report.push(
                     Mark::Ok,

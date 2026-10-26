@@ -215,9 +215,9 @@ pub(crate) async fn create_op<A: crate::service::source::github::GitHubApi>(
         }
     }
 
-    // Slice-2 web approval: if a cloud op-relay is configured, register this
-    // pending op and poll for the browser-deposited grant in the background.
-    // No-op when relay_url is unset (purely local daemon).
+    // Slice-2 web approval: on a paired daemon, register this pending op with
+    // the cloud op-relay and poll for the browser-deposited grant in the
+    // background. No-op on an unpaired (purely local) daemon.
     crate::relay::client::spawn_register_and_poll(
         state.clone(),
         vault_id.clone(),
@@ -742,8 +742,6 @@ mod tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         {

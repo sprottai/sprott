@@ -10,16 +10,16 @@ use crate::cli::active::resolve_active;
 use crate::cli::approve::{approve_op, ApproveOpts};
 use crate::cli::status::VaultState;
 use crate::cli::webauthn::now_unix;
-use crate::config::UnlockArgs;
+use crate::config::ApprovalArgs;
 
-pub async fn run_unlock(args: UnlockArgs) -> Result<(), String> {
-    drive("vault-unlock", "Unlock", args).await
+pub async fn run_unlock(approval: &ApprovalArgs) -> Result<(), String> {
+    drive("vault-unlock", "Unlock", approval).await
 }
-pub async fn run_lock(args: UnlockArgs) -> Result<(), String> {
-    drive("vault-lock", "Lock", args).await
+pub async fn run_lock(approval: &ApprovalArgs) -> Result<(), String> {
+    drive("vault-lock", "Lock", approval).await
 }
 
-async fn drive(custom_op: &str, verb: &str, args: UnlockArgs) -> Result<(), String> {
+async fn drive(custom_op: &str, verb: &str, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let name = crate::cli::active::known_vaults()
         .into_iter()
@@ -62,10 +62,8 @@ async fn drive(custom_op: &str, verb: &str, args: UnlockArgs) -> Result<(), Stri
     });
 
     let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
         return_after_remote_link: true,
+        ..ApproveOpts::from_flags(approval)
     };
     approve_op(&custodian, &vault, &op, label, &opts).await?;
 

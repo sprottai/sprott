@@ -470,7 +470,7 @@ pub struct AppState {
     /// never apply (design/approvals-inbox.md D1, restart zombies).
     pub boot_id: String,
     /// The device egress proxy the resident proxy's forward hop tunnels through,
-    /// in a swappable cell so `sc proxy set/clear` HOT-reloads it via
+    /// in a swappable cell so `sprott config set/unset proxy` HOT-reloads it via
     /// `/proxy/reload` — no daemon restart, no vault re-unlock. Shared with the
     /// hudsucker forward connector (see `proxy::upstream`); the reqwest side
     /// swaps via `core::forward::reload_egress_proxy`.
@@ -2508,8 +2508,6 @@ mod tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         {

@@ -21,7 +21,7 @@ use reqwest::header::RETRY_AFTER;
 use serde_json::Value;
 
 use crate::cli::active::{control_root, load};
-use crate::config::OpWaitArgs;
+use crate::config::{ApprovalArgs, OpWaitArgs};
 
 /// Give up after this many CONSECUTIVE transport failures (~30s dark with the
 /// 2s cadence + 15s client timeout) — a dead daemon must not strand a
@@ -29,6 +29,10 @@ use crate::config::OpWaitArgs;
 const ERROR_STREAK_LIMIT: u32 = 10;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Default `--timeout` for `op wait`: past the 30-minute approval window, so
+/// the op's own expiry normally ends the wait first.
+const WAIT_TIMEOUT_SECS: u64 = 1900;
 
 enum Verdict {
     Approved,
@@ -86,7 +90,8 @@ fn next_delay(retry_after: Option<&str>) -> Duration {
         .unwrap_or(DEFAULT_POLL_INTERVAL)
 }
 
-pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
+pub async fn run_wait(args: OpWaitArgs, approval: &ApprovalArgs, json: bool) -> Result<(), String> {
+    let timeout = approval.timeout.unwrap_or(WAIT_TIMEOUT_SECS);
     // Corrupt config degrades to defaults, NOT a hardcoded localhost that
     // would ignore an agent's $SPROTT_BROKER_URL (same rule as custodian.rs).
     let root = control_root(&load().unwrap_or_default());
@@ -105,7 +110,7 @@ pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
         .map_err(|e| format!("http client: {}", e))?;
 
     // Clamp to a year — a u64::MAX timeout would overflow Instant + Duration.
-    let deadline = Instant::now() + Duration::from_secs(args.timeout.min(31_536_000));
+    let deadline = Instant::now() + Duration::from_secs(timeout.min(31_536_000));
     let mut error_streak: u32 = 0;
     let mut delay = DEFAULT_POLL_INTERVAL;
 
@@ -197,7 +202,7 @@ pub async fn run_wait(args: OpWaitArgs, json: bool) -> Result<(), String> {
         if Instant::now() >= deadline {
             eprintln!(
                 "Timed out after {}s. If it is still pending, re-attach with: sprott op wait {}",
-                args.timeout, args.op_id
+                timeout, args.op_id
             );
             std::process::exit(4);
         }

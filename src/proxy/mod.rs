@@ -42,7 +42,7 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
         // The proxy's OWN upstream TLS client (webpki roots). Unlike hudsucker's
         // built-in `with_rustls_connector` (which dials every host directly),
         // this connector routes the forward hop through the device egress proxy
-        // (`sc proxy set`) when one is configured — so a host reachable only via
+        // (`sprott config set proxy`) when one is configured — so a host reachable only via
         // a corporate/on-demand proxy (e.g. Google APIs on a firewalled network)
         // forwards through it instead of timing out on a direct dial. See
         // proxy/upstream.rs.

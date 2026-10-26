@@ -127,7 +127,7 @@ fn report_connects(connects: Option<&serde_json::Value>) {
             .unwrap_or("the provider");
         eprintln!(
             "  {}: couldn't reach {host} (network/proxy?); will retry. \
-             Behind a proxy? `sprott proxy set <url>`.",
+             Behind a proxy? `sprott config set proxy <url>`.",
             unreached.join(", ")
         );
     }
