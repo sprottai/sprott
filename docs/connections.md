@@ -53,8 +53,8 @@ definition of your own: [Add a service](add-a-service.md).
 
   ```bash
   sprott connection add codex_work --service openai_codex \
-      --from-secret OPENAI_CODEX_REFRESH_TOKEN=WORK_REFRESH_TOKEN
-  sprott connection add myapi --host api.example.com --from-literal API_TOKEN=…
+      --use OPENAI_CODEX_REFRESH_TOKEN=WORK_REFRESH_TOKEN
+  sprott connection add myapi --host api.example.com --set API_TOKEN=…
   ```
 
   With `--service`, a slot is one of the service's secret roles. For a custom
@@ -66,7 +66,7 @@ definition of your own: [Add a service](add-a-service.md).
   it sends them to, and any other connection already using the same key.
 
 `sprott connection rm <id>` deletes the secrets that connection wrote, unless
-another connection uses them. A secret bound with `--from-secret` stays in
+another connection uses them. A secret bound with `--use` stays in
 the vault. The command lists each kept key and why.
 
 `sprott connection add-host <id> <host>` proposes a new host for a

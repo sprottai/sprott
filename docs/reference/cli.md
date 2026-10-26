@@ -50,7 +50,7 @@ These are short forms of `sprott secret set|get|ls|rm`.
 |---|---|
 | `sprott run [--vault <vault>] -- <cmd>` | Run a command through the proxy. `--export-env` prints the proxy environment as `export` lines instead. |
 | `sprott connection ls` | List the connections the agent can use, with hosts and phantoms. |
-| `sprott connection add [<id>]` | Create a connection in one approval. Flags: `--service <id>`, `--host <host>`, `--from-literal SLOT=VALUE` (`SLOT=-` reads stdin), `--from-secret SLOT=KEY`. |
+| `sprott connection add [<id>]` | Create a connection in one approval. Flags: `--service <id>`, `--host <host>`, `--set SLOT=VALUE` (`SLOT=-` reads stdin), `--use SLOT=KEY`. |
 | `sprott connection rm <id> [-y] [--keep-secrets]` | Remove a connection and the secrets it wrote. |
 | `sprott connection add-host <id> <host>` | Propose a new host for a connection: an exact domain or a leftmost `*.domain`. |
 | `sprott connection rm-host <id> <host>` | Propose removing a host from a connection. |

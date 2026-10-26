@@ -250,7 +250,7 @@ pub struct ConnectArgs {
     /// (e.g. `github`), which supplies the hosts + declared secret slots. `--host`
     /// then only PINS an exact FQDN inside one of the service's `*.suffix`
     /// wildcards. Omit for a raw connection (you anchor your own `--host` and
-    /// fill its keys with `--from-literal` / `--from-secret`).
+    /// fill its keys with `--set` / `--use`).
     #[arg(long)]
     pub service: Option<String>,
     /// Anchored egress host (exact domain, repeatable). Required for a raw
@@ -264,12 +264,12 @@ pub struct ConnectArgs {
     /// connection SLOT is the vault KEY itself (stored UPPERCASE). `SLOT=-`
     /// reads the value from stdin (one slot per command). A bare `SLOT`
     /// prompts for the value with hidden input on a terminal. Repeatable.
-    #[arg(long = "from-literal", value_name = "SLOT=VALUE")]
-    pub from_literal: Vec<String>,
+    #[arg(long = "set", value_name = "SLOT=VALUE")]
+    pub set_slots: Vec<String>,
     /// Fill a slot with a secret ALREADY in the vault, by its KEY; no value is
     /// written or shown: `SLOT=KEY`. With `--service`, SLOT is one of the
     /// service's declared secret roles and the `SLOT=KEY` form is required; for
-    /// a raw connection SLOT is the KEY itself, so `--from-secret KEY` is the
+    /// a raw connection SLOT is the KEY itself, so `--use KEY` is the
     /// short form. KEY is matched as typed: native keys fold to their stored
     /// UPPERCASE form; an external store's key (e.g. a lowercase GCP secret id)
     /// is matched exactly. Repeatable. The service's primary credential slot
@@ -277,8 +277,8 @@ pub struct ConnectArgs {
     /// neither flag, it is prompted for (hidden) on a terminal and is an error
     /// off one. Its other slots are optional: offered on a terminal (blank
     /// skips), left unfilled otherwise.
-    #[arg(long = "from-secret", value_name = "SLOT=KEY")]
-    pub from_secret: Vec<String>,
+    #[arg(long = "use", value_name = "SLOT=KEY")]
+    pub use_slots: Vec<String>,
     #[arg(long)]
     pub no_browser: bool,
     /// Fixed port for the localhost callback server (for SSH port-forwarding).
@@ -297,8 +297,8 @@ pub struct ConnectionArgs {
 #[derive(Debug, Subcommand)]
 pub enum ConnectionSubcommand {
     /// Create a connection (secret(s) + host anchor) in one approval. Each secret
-    /// slot is filled from a new value (`--from-literal SLOT=VALUE`) or from a
-    /// secret already in the vault (`--from-secret SLOT=KEY`). An agent may run
+    /// slot is filled from a new value (`--set SLOT=VALUE`) or from a
+    /// secret already in the vault (`--use SLOT=KEY`). An agent may run
     /// this to propose a connection; it takes effect only after the vault
     /// owner approves it with a passkey, on a card that lists every bound key
     /// and every destination host. On a terminal, `sprott connection add` with no
@@ -363,7 +363,7 @@ pub struct ConnectionRmArgs {
     /// Remove only the connection record and keep every secret value in the
     /// vault (unreference). Default deletes the keys this connection WROTE
     /// that no other connection references; a key it only bound
-    /// (`--from-secret`), a key another connection references, and every key
+    /// (`--use`), a key another connection references, and every key
     /// of a connection added before write tracking are always kept.
     #[arg(long)]
     pub keep_secrets: bool,

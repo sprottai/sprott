@@ -57,7 +57,7 @@ involved.
 
 - A new host on a connection: `sprott connection add-host`.
 - A new connection that uses a secret already in the vault:
-  `sprott connection add <id> --service <svc> --from-secret ROLE=KEY`.
+  `sprott connection add <id> --service <svc> --use ROLE=KEY`.
 
 When a task needs a service with no connection, you add it on the vault's
 Connections page in the console. `sprott status` prints the vault's console

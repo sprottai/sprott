@@ -1754,7 +1754,7 @@ pub async fn approve_op(
             // Delete a connection record. Unless `scope.keep_secrets`, also
             // deletes the secret(s) this connection WROTE that no other
             // connection binds (`connection_removal`): a key it only bound
-            // (`--from-secret`), a key another connection still claims, and
+            // (`--use`), a key another connection still claims, and
             // every key of a record that predates write tracking are kept.
             // Returns the removed list and each kept key with its reason so
             // the CLI can report them.
@@ -1880,7 +1880,7 @@ pub async fn approve_op(
                     }
                 }
                 // The committed value deposit (absent = no new values, e.g. a
-                // pure `--from-secret` connection). Single-use; expiry or a
+                // pure `--use` connection). Single-use; expiry or a
                 // daemon restart between create and approve fails closed.
                 let values = match scope.get("values_digest").and_then(|v| v.as_str()) {
                     Some(d) => Some(state.op_payload_take(d).ok_or_else(|| {

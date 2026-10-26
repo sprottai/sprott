@@ -477,12 +477,12 @@ and drops any raw connection a prior `sc set … --host` created for the key.
 
 `sc set --host` is the single-secret **shorthand of `sc connection add`** (`add ⊃
 set`; `sc connect` is the hidden back-compat alias): `sc connection add <id> --host
-H… --from-literal KEY=VALUE…` builds a multi-secret raw connection, and `--service SVC`
+H… --set KEY=VALUE…` builds a multi-secret raw connection, and `--service SVC`
 a service-backed one, where `--host` then only PINS an exact FQDN ⊆ the service's
 `*.suffix` hosts, and each slot is one of the service's declared secret roles. A slot
-is filled from a new value (`--from-literal SLOT=VALUE`) or from a secret already in
-the vault (`--from-secret SLOT=KEY`; a raw connection's slot is its KEY, so
-`--from-secret KEY`). See [connect-bind-existing-secret.md](connect-bind-existing-secret.md).
+is filled from a new value (`--set SLOT=VALUE`) or from a secret already in
+the vault (`--use SLOT=KEY`; a raw connection's slot is its KEY, so
+`--use KEY`). See [connect-bind-existing-secret.md](connect-bind-existing-secret.md).
 `<id>` is a handle you choose (free text is slugified). Siblings:
 `sc connection ls` / `sc connection rm <id>`.
 

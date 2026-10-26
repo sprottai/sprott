@@ -5,7 +5,8 @@
 > [connection-schema.md](connection-schema.md) §3/§4.
 >
 > Decisions after the request (supersede the text below where they differ):
-> the flags are `--from-literal` / `--from-secret` (§1, breaking, no
+> the flags are `--set` / `--use` (renamed 2026-10-26 from kubectl's
+> `--from-literal` / `--from-secret`: one verb per value source; §1, breaking, no
 > aliases); an agent MAY propose a binding, which takes effect only on the
 > owner's passkey approval of a card listing every bound key and host
 > (§4, Non-goals); only a service's primary credential role is required
@@ -62,10 +63,10 @@ One concept, one word, kubectl-aligned: the flag names the SOURCE of a slot.
 Two parallel flags of identical shape replace `--secret` and
 `--use-existing` (breaking, no aliases):
 
-- `--from-literal SLOT=VALUE` writes a new secret value (the value rides the
+- `--set SLOT=VALUE` writes a new secret value (the value rides the
   local deposit; the op carries only its salted digest). A bare
-  `--from-literal SLOT` prompts for the value with hidden input on a TTY.
-- `--from-secret SLOT=KEY` uses a secret already in the vault; no plaintext
+  `--set SLOT` prompts for the value with hidden input on a TTY.
+- `--use SLOT=KEY` uses a secret already in the vault; no plaintext
   anywhere. Emits `scope.secrets += KEY` and, on a service, `scope.keys[ROLE]
   = KEY`.
 
@@ -74,11 +75,11 @@ SLOT semantics:
 - With `--service`, SLOT is one of the service's declared `secrets` roles,
   matched case-insensitively, with the same error text shape as before
   (`secret 'X' is not declared by service 'S' (its secrets: …)`). The
-  `SLOT=KEY` form is required for `--from-secret`; a bare `--from-secret KEY`
+  `SLOT=KEY` form is required for `--use`; a bare `--use KEY`
   errors and says why (a key name does not say which slot it fills). No
   special case for single-secret services: the shape of a command does not
   change with the service's arity.
-- For a raw connection SLOT is the vault KEY itself, so `--from-secret KEY`
+- For a raw connection SLOT is the vault KEY itself, so `--use KEY`
   is the short form (`SLOT=KEY` is accepted only when SLOT equals KEY).
 - KEY passes through as typed. Native keys fold to their stored uppercase
   form at approve, external-store keys are matched exactly.
@@ -184,7 +185,7 @@ write lock.
 
 ## Acceptance
 
-1. `sc connection add codex_x --service openai_codex --from-secret
+1. `sc connection add codex_x --service openai_codex --use
    OPENAI_CODEX_REFRESH_TOKEN=HEJIA_OAI_REFRESH_TOKEN_X` takes one approval and
    writes `aux.connections.codex_x = {service: "openai_codex", keys: {...}}`
    with no new secret in the vault. The card shows the key as referenced,

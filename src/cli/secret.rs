@@ -73,7 +73,7 @@ pub async fn run_set(args: SetArgs) -> Result<(), String> {
     if let BrokerIntent::Host(hosts) = &intent {
         if !valid_conn_id(&conn) {
             return Err(format!(
-                "can't derive a connection id from '{}'; use `sprott connection add <name> --host {} --from-literal {}=<value>` instead",
+                "can't derive a connection id from '{}'; use `sprott connection add <name> --host {} --set {}=<value>` instead",
                 key,
                 hosts.first().map(String::as_str).unwrap_or("<domain>"),
                 key
@@ -260,7 +260,7 @@ fn resolve_broker_intent(
 /// Largest secret value read from stdin (matches the daemon's write cap).
 const MAX_STDIN_VALUE_BYTES: u64 = 64 * 1024;
 
-/// The value `-` (`sprott set KEY -`, `--from-literal SLOT=-`): read it from
+/// The value `-` (`sprott set KEY -`, `--set SLOT=-`): read it from
 /// stdin, the way that keeps it out of `ps` and shell history off a terminal.
 /// On a terminal there is nothing piped, so it is the hidden prompt instead.
 /// Drops one trailing newline (`echo` adds it). One stdin per command, so a
