@@ -1,6 +1,6 @@
 //! Top-level application state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,57 +40,23 @@ pub struct ApprovalEvent {
 /// fresh and lose history, which is acceptable for a watcher UI.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
-// ── Vault state (H3 / PROTOCOL.md §6.3) ──────────────────────────────────────
+// ── Vault state (PROTOCOL.md §6.3) ───────────────────────────────────────────
 //
-// Per-vault runtime state. Daemon boots Locked; user runs the SUDP
-// `Custom("vault-unlock")` op to transition Unlocked (and side-effect a
-// per-service secrets_cache bootstrap for `allow`-policy services). No auto-
-// lock timer — that would break the `allow` invariant ("once unlocked, no
-// further friction during the session"). Lock is always user-initiated via
-// `Custom("vault-lock")` op.
+// Per-vault runtime state. The daemon boots Locked; only the SUDP
+// `Custom("vault-unlock")` op takes a vault to Unlocked, where it serves from
+// one immutable snapshot ([`crate::snapshot::Snapshot`]) per install. No
+// auto-lock timer; a lock is user-initiated (`Custom("vault-lock")`) or a
+// device park.
 
-/// A cached secret value with optional expiry. Per PROTOCOL.md §6.2,
-/// memory residence is policy-driven:
-///   - `allow` services → `expires_at = None` (lives the whole unlocked
-///     session, populated at unlock bootstrap)
-///   - `ask` services → `expires_at = Some(unix_secs)`, filled after
-///     `approval-confirm` with the matched rule's `ttl`
-///   - `ask-always` services → never in `entries`; their one-shot grants
-///     live in `op_grants`, keyed by the approved request tuple
-///
-/// `cache_lookup` does lazy eviction: an entry past its `expires_at`
-/// is removed and treated as a miss. No active sweeper today —
-/// expired bytes linger in memory until the next lookup, which is
-/// acceptable since the daemon already holds plaintexts for all
-/// allow-level services anyway.
-#[derive(Debug, Clone)]
-pub struct CacheEntry {
-    pub value: Vec<u8>,
-    /// `None` = never expires within the unlocked session (allow-level).
-    /// `Some(t)` = expires at unix-second `t` (ask-level TTL).
-    pub expires_at: Option<u64>,
-    /// `true` = this value was pre-loaded at unlock by `bootstrap_cache_from_view`
-    /// (the connection's read floor is `allow`), NOT produced by a passkey grant.
-    /// Residency only: a value in `entries` (bootstrapped or held after an
-    /// approval) serves requests the policy allows, and an ask-level request
-    /// only once the ask-grant ledger (`ask_grants`) authorized it. The
-    /// ask-always path never reads `entries` at all (see `op_grants`).
-    pub from_bootstrap: bool,
-    /// The agent whose approval put this value here (`None` for bootstrap /
-    /// residency entries). Informational: residency never authorizes an ask.
-    pub agent_prefix: Option<String>,
-}
-
-/// How long an approved `ask-always` one-shot grant stays redeemable
-/// (`op_grants` expiry = approve-time + this). Generous on purpose: the
-/// replay is agent-driven, and an agent that only acts when its user next
-/// prompts it can take many minutes. Safety comes from single-use + exact
-/// request binding, not from this window.
+/// How long an approved single-use permit stays redeemable (approve time +
+/// this). Generous on purpose: the replay is agent-driven, and an agent that
+/// only acts when its user next prompts it can take many minutes. Safety
+/// comes from single use and exact request binding, not from this window.
 pub const ASK_ALWAYS_REPLAY_WINDOW_SECS: u64 = 1800;
 
-/// The identity of a request-bound grant (`SecretsCache::op_grants`): the
-/// approving agent, the request line, the bound-values digest, and the tier
-/// that minted it. Host is lowercased.
+/// The request line a request-bound permit was approved for: the approving
+/// agent, the request line, the bound-values digest, and the tier that
+/// minted it. Host is lowercased.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpGrantKey {
     pub agent: String,
@@ -125,22 +91,218 @@ impl OpGrantKey {
     }
 }
 
-impl SecretsCache {
-    /// Replace connection `conn_id`'s credential value `old` with `new`
-    /// wherever this cache holds it (its entry, its named secrets).
-    pub fn replace_value(&mut self, conn_id: &str, old: &[u8], new: &[u8]) {
-        if let Some(e) = self.entries.get_mut(conn_id) {
-            if e.value.as_slice() == old {
-                e.value = new.to_vec();
-            }
+/// The credentials a request used: its connection's service id and the
+/// KEYs its phantoms resolved (sorted, in the binding's spelling): a role
+/// phantom's KEY, a minted connection's mint-input KEY for its access
+/// phantom, an `exposes` role's own KEY. Part of every permit's key, so a
+/// replay with another or an extra role, or after the connection was rebound
+/// to other KEYs, does not redeem. Plain data, no values: a value change
+/// keeps an approval (whoever writes a value already knows it).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CredentialSet {
+    pub service: String,
+    pub keys: Vec<String>,
+}
+
+impl CredentialSet {
+    pub fn new(service: &str, keys: impl IntoIterator<Item = String>) -> CredentialSet {
+        let keys: BTreeSet<String> = keys.into_iter().collect();
+        CredentialSet {
+            service: service.to_string(),
+            keys: keys.into_iter().collect(),
         }
-        if let Some(secrets) = self.allow_secrets.get_mut(conn_id) {
-            for v in secrets.values_mut() {
-                if v.as_slice() == old {
-                    *v = new.to_vec();
-                }
+    }
+
+    /// The op's `act.target`: the KEYs joined with ", ".
+    pub fn target(&self) -> String {
+        self.keys.join(", ")
+    }
+}
+
+/// What a permit was approved for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PermitFor {
+    /// An ask-always approval, an ask a rule with no id decided, or a scoped
+    /// ask: exactly the approved request line, under its tier.
+    Request(OpGrantKey),
+    /// An unscoped ask a rule or a floor decided: that unit, for the
+    /// approving agent, the connection and the destination host.
+    Unit {
+        agent: String,
+        conn: String,
+        host: String,
+        unit: crate::approval::reuse::GrantUnit,
+    },
+}
+
+/// The key a permit is stored and looked up under: what it was approved for,
+/// and with which credentials. No value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermitKey {
+    pub of: PermitFor,
+    pub credentials: CredentialSet,
+}
+
+impl PermitKey {
+    /// The key an approval of a request decided `(level, decided_by)` is
+    /// stored under, and the one its replay is looked up under: by what
+    /// [`crate::approval::Reuse`] it permits, the request line and its tier
+    /// ([`crate::approval::reuse::BoundTier`]) for `none` and `exact`, the
+    /// unit for `rule` and `floor`; with the credentials the request
+    /// resolved. The proxy and approve both call this, so they cannot
+    /// disagree. `None` for a decision that mints no op (allow, deny).
+    #[allow(clippy::too_many_arguments)]
+    pub fn of(
+        level: crate::core::policy::AccessLevel,
+        decided_by: &crate::core::policy::DecidedBy,
+        scoped: bool,
+        agent: &str,
+        conn: &str,
+        method: &str,
+        host: &str,
+        path: &str,
+        scope_digest: &str,
+        credentials: CredentialSet,
+    ) -> Option<PermitKey> {
+        let reuse = crate::approval::Reuse::of(level, decided_by, scoped, method)?;
+        let of = match reuse.unit() {
+            Some(unit) => PermitFor::Unit {
+                agent: agent.to_string(),
+                conn: conn.to_string(),
+                host: host.to_ascii_lowercase(),
+                unit,
+            },
+            None => {
+                let tier =
+                    crate::approval::reuse::BoundTier::of(level, decided_by, scoped, method)?;
+                PermitFor::Request(OpGrantKey::new(
+                    agent,
+                    conn,
+                    method,
+                    host,
+                    path,
+                    scope_digest,
+                    &tier,
+                ))
             }
+        };
+        Some(PermitKey { of, credentials })
+    }
+
+    /// Spent by the request that redeems it (ask-always, an id-less rule's
+    /// ask), or a window reused until it expires (`exact`, a unit).
+    pub fn single_use(&self) -> bool {
+        match &self.of {
+            PermitFor::Request(k) => k.tier.single_use(),
+            PermitFor::Unit { .. } => false,
         }
+    }
+}
+
+/// The permits of an Unlocked vault (key → Unix expiry). They live only in
+/// Unlocked, so a lock, park or close drops them all.
+#[derive(Debug, Default)]
+pub struct Permits(HashMap<PermitKey, u64>);
+
+impl Permits {
+    /// Store a permit; expired ones are swept.
+    fn insert(&mut self, key: PermitKey, expires_at: u64, now: u64) {
+        self.0.retain(|_, exp| *exp > now);
+        self.0.insert(key, expires_at);
+    }
+
+    /// Is `key` live? An expired one is dropped.
+    fn live(&mut self, key: &PermitKey, now: u64) -> bool {
+        match self.0.get(key) {
+            Some(exp) if *exp > now => true,
+            Some(_) => {
+                self.0.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Spend `key`: removed if present; `false` when it was not (or had
+    /// expired).
+    fn take(&mut self, key: &PermitKey, now: u64) -> bool {
+        matches!(self.0.remove(key), Some(exp) if exp > now)
+    }
+
+    /// Drop every window (decision D: a policy change ends them).
+    fn end_windows(&mut self) {
+        self.0.retain(|k, _| k.single_use());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all(&self) -> Vec<(PermitKey, u64)> {
+        self.0.iter().map(|(k, e)| (k.clone(), *e)).collect()
+    }
+}
+
+/// Minted OAuth access tokens, keyed by `sha256(refresh token)` hex (§5: a
+/// rotated or reconnected refresh token is a natural miss), each with its
+/// Unix expiry. Outside the snapshot, so an install keeps them; dropped at
+/// lock. Expired ones are swept on insert.
+#[derive(Default)]
+pub struct OauthAccess(HashMap<String, (zeroize::Zeroizing<Vec<u8>>, u64)>);
+
+impl std::fmt::Debug for OauthAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OauthAccess({} tokens)", self.0.len())
+    }
+}
+
+/// Key NAMES the external stores expose, per store (never values): what the
+/// console's registry and entries listings add to the native names. Each
+/// install starts from the previous set, keeping the names of the stores it
+/// still has; a background listing after the install replaces each store's
+/// names when its listing succeeds (an empty result included), and every
+/// walk that finds a KEY in an external store adds it. Advisory: resolution
+/// authority stays with the adapters.
+#[derive(Clone, Default)]
+pub struct ExternalKeys(Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>);
+
+impl ExternalKeys {
+    /// A new set for an install with these external stores: each keeps the
+    /// names it had, a store no longer configured has none.
+    fn carried(&self, stores: &crate::snapshot::Stores) -> ExternalKeys {
+        let old = self.0.lock().unwrap();
+        let kept = old
+            .iter()
+            .filter(|(id, _)| stores.adapters.contains_key(*id))
+            .map(|(id, names)| (id.clone(), names.clone()))
+            .collect();
+        ExternalKeys(Arc::new(Mutex::new(kept)))
+    }
+
+    /// Every name, across stores.
+    pub fn names(&self) -> HashSet<String> {
+        self.0.lock().unwrap().values().flatten().cloned().collect()
+    }
+
+    /// A walk found `key` in `store`.
+    pub(crate) fn note(&self, store: &str, key: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .entry(store.to_string())
+            .or_default()
+            .insert(key.to_string());
+    }
+
+    /// `store` listed `names`.
+    fn listed(&self, store: &str, names: Vec<String>) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(store.to_string(), names.into_iter().collect());
+    }
+}
+
+impl std::fmt::Debug for ExternalKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExternalKeys({} names)", self.names().len())
     }
 }
 
@@ -155,200 +317,67 @@ fn refresh_token_hash(token: &[u8]) -> String {
 
 /// A provider-rotated refresh token not stored in the vault yet: `new` is the
 /// only valid copy (the provider refuses `old` now), `old` is the value the
-/// store still holds at its slot.
-#[derive(Debug, Clone)]
+/// store still holds at its slot. Every mint input is followed through these
+/// ([`AppState::current_refresh_token`]); an entry means "not stored".
+#[derive(Clone)]
 pub struct PendingRotation {
     pub old: zeroize::Zeroizing<Vec<u8>>,
     pub new: zeroize::Zeroizing<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SecretsCache {
-    /// service_id → cached auth value with per-entry expiry. Filled by:
-    ///   - unlock bootstrap (only services whose default read level is
-    ///     `allow` — see `bootstrap_cache_from_view`)
-    ///   - post-approval insert from `approve_op` for `ask` and `allow`-
-    ///     cache-miss paths (the secret was fresh-decrypted under the
-    ///     grant's W_c during forward; we re-use it for subsequent
-    ///     requests up to the policy TTL).
-    /// `ask-always` services are deliberately absent (PROTOCOL.md §6.2
-    /// "ask-always 服务: 永不进 cache").
-    pub entries: HashMap<String, CacheEntry>,
-    /// service_id → { secret_name → bytes } for every direct secret an
-    /// `allow`-level service references. Populated at unlock bootstrap so the
-    /// allow fast-path can resolve *multi-secret* services (e.g. a Twilio-style
-    /// `account_sid` + `auth_token` pair) without a vault view — which only
-    /// exists behind a fresh grant. Single-secret services get a one-entry
-    /// map; oauth services get no entry (their token comes from `oauth_access`).
-    /// Lives the whole unlocked session (allow semantics); wiped on lock.
-    pub allow_secrets: HashMap<String, HashMap<String, Vec<u8>>>,
-    /// The effective policy tree — the vault's `aux.policy` overlaid on the
-    /// compiled-in `Policy::default()` at unlock/refresh (so unset parts use
-    /// safe defaults). Holds default floors, per-tag, and per-connection
-    /// user policy. Built-in per-service rules are NOT cached here — they're
-    /// read live from the service registry at eval and merged with this tree's
-    /// `connections.<id>.rules`. Rebuilt on every vault write → a policy edit is
-    /// realtime on the next request.
-    pub policy: crate::core::policy::Policy,
-    /// Audit log retention in days. Snapshot of `aux.audit_retention_days`
-    /// at unlock. `None` = keep forever. Used by `GET /v/{vid}/approvals` to
-    /// opportunistically prune old rows before listing.
-    pub audit_retention_days: Option<u32>,
-    /// The ask-grant ledger: what an approved, unscoped `ask` authorizes,
-    /// decoupled from whether the credential value is resident. Key:
-    /// `(agent_prefix, connection_id, host, unit)` where `unit` is the policy
-    /// unit that produced the ask (`crate::approval::reuse::GrantUnit`): the
-    /// matched rule's id and the request's class, or the default floor's class
-    /// (read / write). Value: Unix-epoch-second expiry.
-    ///
-    /// `evaluate_request_decision` downgrades a later `Ask` to `Allow` only
-    /// when the policy, re-run on that request, lands on the same unit for the
-    /// same agent, connection, and host. So approving rule A never serves rule
-    /// B, a read approval (rule or floor) never serves a write, and an allow-level miss
-    /// (which writes no entry) never serves an ask. Scoped paths and
-    /// `ask-always` never consult it (they are request-bound, `op_grants`).
-    ///
-    /// Same memory window as the rest of the cache: dropped on lock and on
-    /// every vault change (the cache is rebuilt), and a daemon restart starts
-    /// empty (vaults boot Locked).
-    pub ask_grants: HashMap<(String, String, String, crate::approval::reuse::GrantUnit), u64>,
-    /// Request-bound grants, keyed by the REQUEST the user approved and the
-    /// tier that minted it ([`OpGrantKey`]): agent-bound like `ask_grants` (a
-    /// grant minted for agent A's request cannot be spent by agent B), and
-    /// tier-bound (`crate::approval::reuse::BoundTier`): an ask-always grant is
-    /// redeemed only by an ask-always request, a scoped ask's `exact` grant
-    /// only by a scoped ask of the same unit, a single-use ask grant only by an
-    /// ask a rule with no id decided. Written by `approve_op`; a single-use
-    /// tier is consumed (removed) by the proxy's replay exactly once, `exact`
-    /// is read within its window. This is what makes an `ask-always`
-    /// approval mean "this action, once": a grant minted for `POST /v2/purchase`
-    /// can never be spent by a different method/host/path on the same
-    /// connection, and the ask-always path never falls back to the conn-keyed
-    /// `entries` (so it can't ride a plain-ask leftover or the allow residency).
-    ///
-    /// `scope_digest` (Phase 2) folds the values of the service's declared
-    /// `[requests]` scope fields into the identity (`""` when a service declares
-    /// none — the Phase-1 path-only key). So approving `amount=80` cannot be
-    /// replayed as `amount=180`: the redeem re-extracts the fields, the digest
-    /// differs, the grant misses (without being consumed) and re-prompts. See
-    /// `crate::service::scope_digest` and design/request-scope.md.
-    ///
-    /// Expiry is deliberately GENEROUS (`ASK_ALWAYS_REPLAY_WINDOW_SECS`, not a
-    /// short grace): an agent that only replays when its user next prompts it
-    /// (e.g. a chat agent) may take minutes to re-run. Single-use + exact
-    /// binding is what makes the long window safe — time is not the guard.
-    /// Same memory window as the rest of the cache: dropped on lock/refresh.
-    pub op_grants: HashMap<OpGrantKey, CacheEntry>,
-    /// Item names present in the decrypted `native-secrets` kv (names only,
-    /// never values). Surface for `GET /v/{vid}/secret-keys` so the frontend
-    /// can decide which services are "reachable" without paying for an
-    /// external-store roundtrip. Populated at unlock; cleared on lock.
-    pub native_keys: HashSet<String>,
-    /// External stores' LIVE adapters, built once at unlock so `list()`
-    /// (`GET /v/{vid}/secret-keys`) and the allow-path lazy fill
-    /// (`lazy_fill_external`) can call out without re-decrypting the vault.
-    /// Sharing one instance per store for the whole unlocked session is
-    /// what makes the adapter's internal OAuth-token cache real (a fresh
-    /// instance per call re-mints every time). Sparse — only kinds with an
-    /// adapter (today: gcp-secret-manager) populate.
-    ///
-    /// F-19: the adapter owns the SA private key and zeroizes it on drop,
-    /// so lock still scrubs the credential with the rest of the cache.
-    pub external_stores:
-        HashMap<String, (crate::storage::plaintext::Store, Arc<crate::store::Adapter>)>,
-    /// `aux.store_order` filtered to the stores present in
-    /// `external_stores`, preserving the vault's resolution order. The lazy
-    /// fill walks THIS (first match wins) so external residency can never
-    /// disagree with `resolve_value_async`'s store_order semantics.
-    pub external_store_order: Vec<String>,
-    /// External stores that FAILED to materialise at unlock (bad SA JSON,
-    /// missing credentials_item, …): `store_id → sanitised reason`. Fail
-    /// loudly: `secret-keys` surfaces these as `store_errors` so a
-    /// misconfigured store shows up broken in the console instead of
-    /// silently vanishing. Full error goes to the daemon log only (F-20).
-    pub external_store_errors: Vec<(String, String)>,
-    /// Key NAMES the external stores expose, enumerated in the background
-    /// right after each install (`AppState::install` spawns one `list()` sweep) and
-    /// amended by every successful lazy fill. Registry `connected` and the
-    /// `entries` listing read native ∪ THIS, so an external-backed
-    /// connection looks connected to agents. Shared slot (`Arc<Mutex<…>>`)
-    /// so the background sweep can write back without re-entering the
-    /// vault-states lock; names only, never values. Advisory — resolution
-    /// authority stays with the adapters (a name missing here still
-    /// lazy-fills; a stale name here just shows optimistic status).
-    pub external_keys: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    /// Derived OAuth access_tokens, keyed by service_id. These are the
-    /// short-lived bearer values minted by exchanging the long-lived
-    /// `refresh_token` (which lives in `entries`) at the provider's
-    /// /token endpoint. **Never persisted to vault** — the design says
-    /// only the immutable refresh_token enters the vault; the
-    /// access_token is derived state that's allowed to evaporate on
-    /// lock / daemon restart (next /use just re-mints it).
-    ///
-    /// `expires_at` tracks the provider-reported expiry (with a 60s
-    /// safety margin baked in at insert time). `cache_lookup`'s
-    /// generic eviction doesn't apply here — `oauth_access_lookup`
-    /// has its own lazy eviction below.
-    ///
-    /// Keyed by **`sha256(refresh_token)`** hex (§5): the access token is a pure
-    /// function of the refresh token, so keying on the INPUT auto-invalidates on
-    /// reconnect / refresh rotation (new refresh → natural miss → fresh mint) and
-    /// two accounts never collide for free (different refresh → different key).
-    pub oauth_access: HashMap<String, CacheEntry>,
-    /// Routing snapshot: `connection_id → { service, hosts }`, taken from
-    /// `aux.connections` at unlock (CONNECTION_SCHEMA.md §6). A brokered request
-    /// resolves its connection's service through this map (falling back to
-    /// `conn` itself when absent — an unconnected service IS its own default
-    /// connection). Wiped on lock.
-    ///
-    /// NOTE on the maps above (`entries`, `allow_secrets`, `oauth_access`,
-    /// `ask_grants`): the daemon keys them by **connection_id**, so two
-    /// connections of one service never share a cache slot. Policy is likewise
-    /// per-connection (`policy.connections.<id>`), while the built-in rules it
-    /// merges come from the shared service definition.
-    pub connections: HashMap<String, crate::storage::plaintext::Connection>,
-    /// The vault's **authorized-agents table** (design §11.1), keyed by `ag_id`
-    /// (`derive_id(Agent, pubkey)`). Snapshot of `view.aux.agents` at
-    /// unlock/refresh. **Presence = authorized**; an `ag_id` with no entry is not
-    /// in the table. Consulted ONLY on the AIK (PoP) path where the daemon knows
-    /// the presented `ag_id`; the legacy Basic api-key path (dual-auth window)
-    /// carries an api-key prefix, which is never in this `ag_`-keyed table → the
-    /// mask lookup misses → the caller falls to the legacy allow (nothing bricks
-    /// until bearers retire).
-    pub agents: std::collections::BTreeMap<String, crate::storage::plaintext::AgentEntry>,
-    /// Custom (per-vault `aux.services`) service definitions, validated at
-    /// unlock. Wiped on lock (Default drop). A custom service folds into
-    /// discovery like a compiled one and never shadows a built-in id.
-    pub custom_services: HashMap<String, crate::service::ServiceDef>,
-    /// The vault's `aux.services` entries as stored (valid or not, with their
-    /// sources): what `sc service ls` lists and what a `service-add` /
-    /// `service-rm` card is computed against at op creation. Wiped on lock.
-    pub service_entries: std::collections::BTreeMap<String, crate::service::source::StoredService>,
-    /// The names of the vault's console install requests
-    /// (`service_request:<id>`), handled on each sync. Wiped on lock.
-    pub service_requests: Vec<String>,
+impl std::fmt::Debug for PendingRotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingRotation(<redacted>)")
+    }
 }
 
-#[derive(Debug)]
 pub enum VaultState {
     Locked,
     Unlocked {
-        cache: SecretsCache,
-        /// Retained state key `K` (zeroized on drop). Held for the unlocked
-        /// session so a sealed blob pulled from cloud sync can be re-decrypted
-        /// and the cache refreshed WITHOUT another passkey (Slice 3 realtime
-        /// sync — matches 1Password's "vault key resident while unlocked").
-        /// Dropped (wiped) on lock/delete along with the rest of this variant.
+        /// What requests are served from, replaced whole by every served
+        /// install and by a stored rotation's patch.
+        snapshot: Arc<crate::snapshot::Snapshot>,
+        /// What approvals authorize; no values ([`PermitKey`]).
+        permits: Permits,
+        /// Minted OAuth access tokens, kept across installs.
+        oauth_access: OauthAccess,
+        /// The console's external key names ([`ExternalKeys`]).
+        external_keys: ExternalKeys,
+        /// The retained state key `K` (zeroized on drop): a pull or a write
+        /// is folded under it without another passkey ("vault key resident
+        /// while unlocked", as 1Password). Dropped with the rest of this
+        /// variant at lock, park and close.
         state_key: zeroize::Zeroizing<Vec<u8>>,
-        /// Unix epoch seconds when this Unlocked state began. Informational
-        /// only today (no auto-lock); kept for future audit / debug.
-        #[allow(dead_code)]
-        unlocked_at: u64,
-        /// The store rows the served cache was folded from (wire ids). An
-        /// install whose fold cannot read one of them is not served
-        /// ([`AppState::install`]).
-        readable: std::collections::BTreeSet<String>,
+        /// The seal key S the snapshot's non-resident values are sealed
+        /// under, with this variant's lifetime.
+        seal_key: crate::snapshot::SealKey,
     },
+}
+
+/// Never prints K, S, a value or a token: a `{:?}` in a log line must not
+/// expose what the snapshot keeps sealed.
+impl std::fmt::Debug for VaultState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VaultState::Locked => f.write_str("Locked"),
+            VaultState::Unlocked {
+                snapshot,
+                permits,
+                oauth_access,
+                external_keys,
+                seal_key,
+                ..
+            } => f
+                .debug_struct("Unlocked")
+                .field("snapshot", snapshot)
+                .field("permits", &permits.0.len())
+                .field("oauth_access", oauth_access)
+                .field("external_keys", external_keys)
+                .field("state_key", &"<redacted>")
+                .field("seal_key", seal_key)
+                .finish(),
+        }
+    }
 }
 
 /// The key an install folds the store under ([`AppState::install`]).
@@ -367,11 +396,12 @@ pub enum InstallKey {
 /// What an install did ([`AppState::install`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Installed {
-    /// The new cache is served.
+    /// The new snapshot is served.
     Served,
-    /// The current cache is kept (the vault-unlock op unlocks nothing): the
-    /// new fold cannot read a row the served cache read, or the store could
-    /// not be folded at all. Noted as key-changed when the key is why.
+    /// The current snapshot is kept (the vault-unlock op unlocks nothing):
+    /// the new fold cannot read a row the served snapshot read, or the store
+    /// could not be folded at all. Noted as key-changed when the key is why,
+    /// and as behind while Unlocked.
     Refused,
     /// The vault is not Unlocked at the swap (locked, parked or gone), and
     /// only the vault-unlock op unlocks it: nothing is served.
@@ -382,6 +412,64 @@ impl Installed {
     pub fn served(self) -> bool {
         self == Installed::Served
     }
+}
+
+/// A request step 6 let through ([`AppState::authorize`]): the snapshot it
+/// was decided on, where its KEYs are, and the single-use permit step 8
+/// spends. Only `authorize` builds one, and step 7
+/// ([`AppState::materialize`]) takes nothing else.
+pub struct Authorized {
+    snapshot: Arc<crate::snapshot::Snapshot>,
+    keys: BTreeMap<String, crate::snapshot::Location>,
+    consume: Option<PermitKey>,
+}
+
+/// A location may carry a value the walk fetched: never printed.
+impl std::fmt::Debug for Authorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Authorized")
+            .field("keys", &self.keys.keys().collect::<Vec<_>>())
+            .field("consume", &self.consume)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why step 6 did not let a request through.
+#[derive(Debug)]
+pub enum Unauthorized {
+    /// No live permit: the caller mints an op and opens the portal.
+    NoPermit,
+    /// The vault is gone or not Unlocked.
+    Refused(crate::error::AppError),
+}
+
+/// The values of an authorized request's KEYs (step 7), by KEY: plaintext
+/// that lives only for this request and is zeroized when it is dropped.
+#[derive(Default)]
+pub struct Values(BTreeMap<String, zeroize::Zeroizing<Vec<u8>>>);
+
+impl Values {
+    pub fn get(&self, key: &str) -> Option<&[u8]> {
+        self.0.get(key).map(|v| v.as_slice())
+    }
+}
+
+impl std::fmt::Debug for Values {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.keys().map(|k| format!("{}: <redacted>", k)))
+            .finish()
+    }
+}
+
+/// Why step 7 could not read a value.
+#[derive(Debug)]
+pub enum Unreadable {
+    /// A native KEY step 4 found holds no value (a build inconsistency):
+    /// fail closed.
+    NotHeld(String),
+    /// The vault is gone or not Unlocked (or S changed since the snapshot).
+    Refused(crate::error::AppError),
 }
 
 /// A loopback OAuth connect awaiting its `?code&state` redirect. Points a
@@ -475,12 +563,6 @@ pub struct AppState {
     /// last one, so an agent miss re-pulls at most once per 2 s. tokio Mutex:
     /// held across the fetch.
     pub ledger_sync: tokio::sync::Mutex<Option<std::time::Instant>>,
-    /// Single-flight for the allow-path external-store lazy fill
-    /// (`lazy_fill_external`): a burst of first requests on a GCP-backed
-    /// connection must resolve ONCE, not once per request. tokio Mutex —
-    /// held across the store round-trip so concurrent misses wait for the
-    /// in-flight fill and then hit the cache on their re-check.
-    pub external_fill_lock: tokio::sync::Mutex<()>,
     /// Authorization codes this daemon has already REDEEMED (sha256-hex → when).
     /// An OAuth code is single-use: a stale write (a buggy web Save, a
     /// cross-device echo, or a pull that re-introduces the `connecting` entry
@@ -650,7 +732,6 @@ impl AppState {
             sc,
             ledger: Mutex::new(crate::principal_ledger::LedgerGate::default()),
             ledger_sync: tokio::sync::Mutex::new(None),
-            external_fill_lock: tokio::sync::Mutex::new(()),
             oauth_redeemed_codes: Mutex::new(HashMap::new()),
             oauth_code_first_tried: Mutex::new(HashMap::new()),
             oauth_rotated_to: Mutex::new(HashMap::new()),
@@ -970,10 +1051,7 @@ impl AppState {
         if !open {
             let runtimes: Vec<_> = self.vault_runtimes.lock().unwrap().values().cloned().collect();
             for runtime in runtimes {
-                *runtime.state.lock().unwrap() = VaultState::Locked;
-                runtime
-                    .key_changed
-                    .store(false, std::sync::atomic::Ordering::Release);
+                runtime.set_locked();
             }
         }
     }
@@ -1171,21 +1249,28 @@ impl AppState {
             .any(|runtime| matches!(*runtime.state.lock().unwrap(), VaultState::Unlocked { .. }))
     }
 
-    /// Install the vault's cache from its store: the one way a cache is built
-    /// (the vault-unlock op, sync pulls, every write the daemon serves). Under
-    /// the vault's build mutex: read the key and the store, fold, build the
-    /// cache, swap. The caller may hold the vault write lock (lock order:
-    /// write lock → build mutex → state lock); the install never takes it.
+    /// Install the vault's snapshot from its store: the one way a snapshot is
+    /// built (the vault-unlock op, sync pulls, every write the daemon serves).
+    /// Under the vault's build mutex: read the key and the store, fold, build
+    /// the snapshot, swap. The caller may hold the vault write lock (lock
+    /// order: write lock → build mutex → state lock); the install never
+    /// takes it.
     ///
-    /// Only [`InstallKey::Unlock`] takes a Locked vault to Unlocked; every
-    /// other install replaces the cache only while the vault is Unlocked at
-    /// the swap. Every fold is tolerant (a row the key cannot read is
-    /// skipped), and every install but the vault-unlock op's is refused when
-    /// its fold cannot read a row the served cache read: the served cache
-    /// stays. A served install sets or clears key-changed from the rows it
-    /// could not read; a refused one sets it. The ledger gate and the
-    /// runtime's close are checked under the state lock, so no install undoes
-    /// a lock, park or close.
+    /// Only [`InstallKey::Unlock`] takes a Locked vault to Unlocked; on an
+    /// Unlocked vault it keeps the permits and the minted access tokens like
+    /// every other install. Every other install replaces the snapshot only
+    /// while the vault is Unlocked at the swap. No install touches the
+    /// permits, except that a snapshot whose policy fingerprint differs from
+    /// the served one's ends every window permit in the same swap (decision
+    /// D). Every fold is tolerant (a row the key cannot read is skipped), and
+    /// every install but the vault-unlock op's is refused when its fold
+    /// cannot read a row the served snapshot read: the served snapshot stays.
+    /// A served install sets or clears key-changed from the rows it could not
+    /// read, and clears behind; a refused one sets behind while Unlocked, and
+    /// key-changed when the key is why. The snapshot is sealed under the held
+    /// S when the build starts Unlocked, else under a fresh one, and the swap
+    /// installs that S. The ledger gate and the runtime's close are checked
+    /// under the state lock, so no install undoes a lock, park or close.
     pub fn install(&self, vault_id: &str, key: InstallKey) -> Installed {
         let runtime = match key {
             InstallKey::Unlock(_) => self.runtime(vault_id).ok(),
@@ -1205,43 +1290,41 @@ impl AppState {
     ) -> Installed {
         use std::sync::atomic::Ordering;
         let unlock = matches!(key, InstallKey::Unlock(_));
-        let k = match key {
-            InstallKey::Unlock(k) | InstallKey::Grant(k) => k,
-            InstallKey::Held => match &*runtime.state.lock().unwrap() {
-                VaultState::Unlocked { state_key, .. } => state_key.clone(),
-                VaultState::Locked => return Installed::NotUnlocked,
-            },
+        let (k, held_seal) = {
+            let state = runtime.state.lock().unwrap();
+            let held_seal = match &*state {
+                VaultState::Unlocked { seal_key, .. } => Some(seal_key.clone()),
+                VaultState::Locked => None,
+            };
+            let k = match key {
+                InstallKey::Unlock(k) | InstallKey::Grant(k) => k,
+                InstallKey::Held => match &*state {
+                    VaultState::Unlocked { state_key, .. } => state_key.clone(),
+                    VaultState::Locked => return Installed::NotUnlocked,
+                },
+            };
+            (k, held_seal)
         };
+        let seal = held_seal.unwrap_or_else(crate::snapshot::SealKey::fresh);
         let folded = crate::server::handlers::metadata::fold_store_with_key(self, vault_id, &k);
         let (view, rows) = match folded {
             Ok(folded) => folded,
             Err(e) => {
-                tracing::warn!(vault = %vault_id, "install: the store could not be folded, the served cache stays: {}", e);
-                // A key that opens nothing reads no row the served cache
-                // read.
-                if !unlock && matches!(e, crate::error::AppError::Unauthorized(_)) {
-                    let state = runtime.state.lock().unwrap();
-                    if matches!(*state, VaultState::Unlocked { .. }) {
+                tracing::warn!(vault = %vault_id, "install: the store could not be folded, the served snapshot stays: {}", e);
+                let state = runtime.state.lock().unwrap();
+                if matches!(*state, VaultState::Unlocked { .. }) {
+                    runtime.behind.store(true, Ordering::Release);
+                    // A key that opens nothing reads no row the served
+                    // snapshot read.
+                    if !unlock && matches!(e, crate::error::AppError::Unauthorized(_)) {
                         runtime.key_changed.store(true, Ordering::Release);
                     }
                 }
                 return Installed::Refused;
             }
         };
-        let mut cache = crate::server::handlers::approve::bootstrap_cache_from_view(&view, self);
-        drop(view);
-        // Every cache is built from the store, which still holds the value a
-        // pending rotation replaced: the session keeps using the rotated one
-        // (the provider refuses the old one).
-        for ((conn_id, _), p) in runtime.pending_rotations.lock().unwrap().iter() {
-            cache.replace_value(conn_id, &p.old, p.new.as_bytes());
-        }
-        let adapters: Vec<(String, Arc<crate::store::Adapter>)> = cache
-            .external_stores
-            .iter()
-            .map(|(id, (_, a))| (id.clone(), a.clone()))
-            .collect();
-        let external_keys = cache.external_keys.clone();
+        let snapshot =
+            crate::snapshot::Snapshot::build(view, rows.readable, &self.services, vault_id, &seal);
         #[cfg(test)]
         {
             let hook = runtime.before_swap.lock().unwrap().take();
@@ -1249,11 +1332,26 @@ impl AppState {
                 hook();
             }
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        {
+        self.swap(runtime, vault_id, snapshot, &rows.unreadable, k, seal, unlock)
+    }
+
+    /// The swap of [`Self::install`], under the build mutex: `snapshot`
+    /// (sealed under `seal`) becomes the one served, unless the rules there
+    /// say otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn swap(
+        &self,
+        runtime: &crate::vault_runtime::VaultRuntime,
+        vault_id: &str,
+        snapshot: crate::snapshot::Snapshot,
+        unreadable: &BTreeSet<String>,
+        k: zeroize::Zeroizing<Vec<u8>>,
+        seal: crate::snapshot::SealKey,
+        unlock: bool,
+    ) -> Installed {
+        use std::sync::atomic::Ordering;
+        let snapshot = Arc::new(snapshot);
+        let external_keys = {
             // Checked under the state lock: close() marks the runtime closed,
             // and a park publishes the ledger gate, before either stores
             // Locked under this lock, so their Locked is always the last.
@@ -1266,52 +1364,81 @@ impl AppState {
                 tracing::warn!(vault = %vault_id, "install refused: this device is not admitted to serve");
                 return Installed::NotUnlocked;
             }
-            let unlocked_at = match &*state {
+            match &*state {
                 VaultState::Locked if !unlock => return Installed::NotUnlocked,
-                VaultState::Unlocked { readable, .. }
-                    if !unlock && !readable.is_disjoint(&rows.unreadable) =>
+                VaultState::Unlocked { snapshot: served, .. }
+                    if !unlock && !served.readable.is_disjoint(unreadable) =>
                 {
                     runtime.key_changed.store(true, Ordering::Release);
-                    tracing::warn!(vault = %vault_id, "install refused: the key cannot read rows the served cache reads (rotated K?); the served cache stays until `sprott unlock`");
+                    runtime.behind.store(true, Ordering::Release);
+                    tracing::warn!(vault = %vault_id, "install refused: the key cannot read rows the served snapshot reads (rotated K?); the served snapshot stays until `sprott unlock`");
                     return Installed::Refused;
                 }
-                VaultState::Unlocked { unlocked_at, .. } if !unlock => *unlocked_at,
-                _ => now,
-            };
-            *state = VaultState::Unlocked {
-                cache,
-                state_key: k,
-                unlocked_at,
-                readable: rows.readable,
+                _ => {}
+            }
+            let external_keys = if let VaultState::Unlocked {
+                snapshot: served,
+                permits,
+                external_keys,
+                state_key,
+                seal_key,
+                ..
+            } = &mut *state
+            {
+                if served.fingerprint != snapshot.fingerprint {
+                    permits.end_windows();
+                }
+                *external_keys = external_keys.carried(&snapshot.stores);
+                *served = snapshot.clone();
+                *state_key = k;
+                *seal_key = seal;
+                external_keys.clone()
+            } else {
+                let external_keys = ExternalKeys::default();
+                *state = VaultState::Unlocked {
+                    snapshot: snapshot.clone(),
+                    permits: Permits::default(),
+                    oauth_access: OauthAccess::default(),
+                    external_keys: external_keys.clone(),
+                    state_key: k,
+                    seal_key: seal,
+                };
+                external_keys
             };
             runtime
                 .key_changed
-                .store(!rows.unreadable.is_empty(), Ordering::Release);
-        }
+                .store(!unreadable.is_empty(), Ordering::Release);
+            runtime.behind.store(false, Ordering::Release);
+            external_keys
+        };
         // Team lease clock: a served install read the vault as it is now.
         self.record_cloud_contact(vault_id);
-        // Background external-key enumeration: one list() per store so the
-        // registry/entries surfaces see the flat namespace without a network
-        // call on their read path. The task holds only the shared adapters
-        // and the cache's keys slot — never AppState — so a later install
-        // that replaces the cache simply orphans this task's slot harmlessly.
-        // Handle::try_current keeps plain #[test] callers (no runtime) safe.
+        // Background external-key listing: one list() per store, so the
+        // console's registry and entries see the flat namespace without a
+        // network call on their read path. The task holds only the shared
+        // adapters and this install's names slot, never AppState, so a later
+        // install simply orphans it. Handle::try_current keeps plain #[test]
+        // callers (no runtime) safe.
+        let adapters: Vec<(String, Arc<crate::store::Adapter>)> = snapshot
+            .stores
+            .adapters
+            .iter()
+            .map(|(id, (_, a))| (id.clone(), a.clone()))
+            .collect();
         if !adapters.is_empty() {
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
                 let vid = vault_id.to_string();
                 rt.spawn(async move {
-                    let mut all = std::collections::HashSet::new();
                     for (store_id, adapter) in adapters {
                         match adapter.list().await {
-                            Ok(names) => all.extend(names),
-                            // Accessor-only SAs can't list — resolution still
-                            // works (lazy fill amends the slot on first use).
-                            Err(e) => tracing::warn!(vault = %vid, store = %store_id, "external key enumeration failed: {}", e),
+                            Ok(names) => {
+                                tracing::info!(vault = %vid, store = %store_id, keys = names.len(), "external store keys listed");
+                                external_keys.listed(&store_id, names);
+                            }
+                            // Accessor-only SAs can't list; the walk still
+                            // finds their keys (and adds them here).
+                            Err(e) => tracing::warn!(vault = %vid, store = %store_id, "external key listing failed: {}", e),
                         }
-                    }
-                    if !all.is_empty() {
-                        tracing::info!(vault = %vid, keys = all.len(), "external store keys enumerated");
-                        *external_keys.lock().unwrap() = all;
                     }
                 });
             }
@@ -1319,35 +1446,122 @@ impl AppState {
         Installed::Served
     }
 
-    /// Tests: put a vault Unlocked with this cache and key, as an install
-    /// would (pending rotations applied; nothing while parked or closed).
-    /// Production builds every cache through [`Self::install`].
+    /// Tests: serve the snapshot of `view` (sealed under the held S, or a
+    /// fresh one) through the install's swap, as the vault-unlock op
+    /// (`unlock`) or another install would.
+    #[cfg(test)]
+    pub fn install_view(
+        &self,
+        vault_id: &str,
+        view: crate::storage::plaintext::VaultPlaintextView,
+        state_key: zeroize::Zeroizing<Vec<u8>>,
+        unlock: bool,
+    ) -> Installed {
+        let runtime = if unlock {
+            self.runtime(vault_id).ok()
+        } else {
+            self.runtime_if_present(vault_id)
+        };
+        let Some(runtime) = runtime else {
+            return Installed::NotUnlocked;
+        };
+        runtime.with_build_lock(|| {
+            let held = match &*runtime.state.lock().unwrap() {
+                VaultState::Unlocked { seal_key, .. } => Some(seal_key.clone()),
+                VaultState::Locked => None,
+            };
+            let seal = held.unwrap_or_else(crate::snapshot::SealKey::fresh);
+            let snapshot = crate::snapshot::Snapshot::build(
+                view,
+                BTreeSet::new(),
+                &self.services,
+                vault_id,
+                &seal,
+            );
+            self.swap(&runtime, vault_id, snapshot, &BTreeSet::new(), state_key, seal, unlock)
+        })
+    }
+
+    /// Tests: put a vault Unlocked serving `snapshot` (its fingerprint
+    /// recomputed from its inputs) under this key, as the vault-unlock op
+    /// would (nothing while parked or closed). Production builds every
+    /// snapshot through [`Self::install`].
     #[cfg(test)]
     pub fn unlock_vault(
         &self,
         vault_id: String,
-        mut cache: SecretsCache,
+        mut snapshot: crate::snapshot::Snapshot,
         state_key: zeroize::Zeroizing<Vec<u8>>,
     ) {
         let Ok(runtime) = self.runtime(&vault_id) else {
             return;
         };
-        for ((conn_id, _), p) in runtime.pending_rotations.lock().unwrap().iter() {
-            cache.replace_value(conn_id, &p.old, p.new.as_bytes());
-        }
-        self.record_cloud_contact(&vault_id);
+        snapshot.fingerprint = snapshot.inputs.fingerprint();
+        runtime.with_build_lock(|| {
+            let held = match &*runtime.state.lock().unwrap() {
+                VaultState::Unlocked { seal_key, .. } => Some(seal_key.clone()),
+                VaultState::Locked => None,
+            };
+            let seal = held.unwrap_or_else(crate::snapshot::SealKey::fresh);
+            self.swap(&runtime, &vault_id, snapshot, &BTreeSet::new(), state_key, seal, true)
+        });
+    }
+
+    /// Tests: change the served snapshot in place (a definition's token
+    /// endpoint pointed at a local server, which the gate would refuse).
+    #[cfg(test)]
+    pub fn edit_snapshot(&self, vault_id: &str, f: impl FnOnce(&mut crate::snapshot::Snapshot)) {
+        let runtime = self.runtime_if_present(vault_id).expect("a runtime");
         let mut state = runtime.state.lock().unwrap();
-        if runtime.is_closed()
-            || self.ledger.lock().unwrap().device != crate::principal_ledger::DeviceGate::Open
-        {
-            return;
+        if let VaultState::Unlocked { snapshot, .. } = &mut *state {
+            f(Arc::make_mut(snapshot));
         }
-        *state = VaultState::Unlocked {
-            cache,
-            state_key,
-            unlocked_at: 0,
-            readable: Default::default(),
+    }
+
+    /// Tests: every permit an Unlocked vault holds, with its expiry.
+    #[cfg(test)]
+    pub fn permits(&self, vault_id: &str) -> Vec<(PermitKey, u64)> {
+        let Some(runtime) = self.runtime_if_present(vault_id) else {
+            return Vec::new();
         };
+        let state = runtime.state.lock().unwrap();
+        match &*state {
+            VaultState::Unlocked { permits, .. } => permits.all(),
+            VaultState::Locked => Vec::new(),
+        }
+    }
+
+    /// Tests: how many values were opened under the vault's S so far.
+    #[cfg(test)]
+    pub fn seal_opens(&self, vault_id: &str) -> usize {
+        let runtime = self.runtime_if_present(vault_id).expect("a runtime");
+        let state = runtime.state.lock().unwrap();
+        match &*state {
+            VaultState::Unlocked { seal_key, .. } => {
+                seal_key.opens.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            VaultState::Locked => 0,
+        }
+    }
+
+    /// Tests: the value native item `name` serves (read as held, or opened
+    /// under S), `None` while Locked or when it holds none.
+    #[cfg(test)]
+    pub fn served_native(&self, vault_id: &str, name: &str) -> Option<Vec<u8>> {
+        let runtime = self.runtime_if_present(vault_id)?;
+        let state = runtime.state.lock().unwrap();
+        let VaultState::Unlocked {
+            snapshot, seal_key, ..
+        } = &*state
+        else {
+            return None;
+        };
+        match snapshot.held_native(name)? {
+            crate::snapshot::Held::Plain(v) => Some(v.to_vec()),
+            crate::snapshot::Held::Sealed(ct) => {
+                seal_key.open(vault_id, name, ct).map(|v| v.to_vec())
+            }
+        }
     }
 
     /// Clone the retained state key `K` for an Unlocked vault, or `None` when
@@ -1362,13 +1576,280 @@ impl AppState {
         }
     }
 
-    /// Transition a vault to Locked, zeroing any cached secrets.
+    /// Lock a vault: K, S, the snapshot, the permits and the minted access
+    /// tokens are dropped ([`crate::vault_runtime::VaultRuntime::set_locked`]).
     pub fn lock_vault(&self, vault_id: &str) {
         if let Some(runtime) = self.runtime_if_present(vault_id) {
-            *runtime.state.lock().unwrap() = VaultState::Locked;
+            runtime.set_locked();
+        }
+    }
+
+    /// The snapshot an Unlocked vault serves, `None` while it is Locked.
+    /// Every reader of vault content outside the request path reads it.
+    pub fn snapshot(&self, vault_id: &str) -> Option<Arc<crate::snapshot::Snapshot>> {
+        let runtime = self.runtime_if_present(vault_id)?;
+        let state = runtime.state.lock().unwrap();
+        match &*state {
+            VaultState::Unlocked { snapshot, .. } => Some(snapshot.clone()),
+            VaultState::Locked => None,
+        }
+    }
+
+    /// The key names an Unlocked vault's external stores expose (empty while
+    /// Locked).
+    pub fn external_key_names(&self, vault_id: &str) -> HashSet<String> {
+        let Some(runtime) = self.runtime_if_present(vault_id) else {
+            return HashSet::new();
+        };
+        let state = runtime.state.lock().unwrap();
+        match &*state {
+            VaultState::Unlocked { external_keys, .. } => external_keys.names(),
+            VaultState::Locked => HashSet::new(),
+        }
+    }
+
+    /// Whether the served snapshot is behind the store: the last install
+    /// was refused while Unlocked
+    /// ([`crate::vault_runtime::VaultRuntime::behind`]).
+    pub fn is_vault_behind(&self, vault_id: &str) -> bool {
+        self.runtime_if_present(vault_id).is_some_and(|runtime| {
             runtime
-                .key_changed
-                .store(false, std::sync::atomic::Ordering::Release);
+                .behind
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    /// Why a request cannot go on with this vault: the vault-gone error once
+    /// its runtime is closed, else `VaultLocked`.
+    fn not_serving(&self, vault_id: &str) -> crate::error::AppError {
+        self.vault_gone_error(vault_id)
+            .unwrap_or(crate::error::AppError::VaultLocked)
+    }
+
+    /// What a walk that found a KEY in an external store needs (step 4),
+    /// read under the state lock: S, and the console's external key names.
+    pub(crate) fn fill_context(
+        &self,
+        vault_id: &str,
+    ) -> Result<(crate::snapshot::SealKey, ExternalKeys), crate::error::AppError> {
+        let read = self.runtime_if_present(vault_id).and_then(|runtime| {
+            let state = runtime.state.lock().unwrap();
+            if runtime.is_closed() {
+                return None;
+            }
+            Some(match &*state {
+                VaultState::Unlocked {
+                    seal_key,
+                    external_keys,
+                    ..
+                } => Ok((seal_key.clone(), external_keys.clone())),
+                VaultState::Locked => Err(crate::error::AppError::VaultLocked),
+            })
+        });
+        read.unwrap_or_else(|| Err(self.not_serving(vault_id)))
+    }
+
+    /// Step 6: may this request go on? `permit` is the key an approval of it
+    /// would be stored under (`None` for a request policy allows: there is
+    /// nothing to look up, and nothing to spend). Under the state lock: the
+    /// vault-gone error when its runtime is closed, `VaultLocked` when it is
+    /// not Unlocked; else the permit must be live, and a window only when the
+    /// request was decided on a snapshot with the current policy
+    /// fingerprint. A single-use permit is carried to step 8
+    /// ([`Self::consume`]), which spends it: two replays may both pass here,
+    /// and the one that loses there goes to the portal.
+    pub fn authorize(
+        &self,
+        vault_id: &str,
+        snapshot: Arc<crate::snapshot::Snapshot>,
+        keys: BTreeMap<String, crate::snapshot::Location>,
+        permit: Option<PermitKey>,
+    ) -> Result<Authorized, Unauthorized> {
+        let Some(key) = permit else {
+            return Ok(Authorized {
+                snapshot,
+                keys,
+                consume: None,
+            });
+        };
+        let now = now_secs();
+        let found = self.runtime_if_present(vault_id).and_then(|runtime| {
+            let mut state = runtime.state.lock().unwrap();
+            if runtime.is_closed() {
+                return None;
+            }
+            Some(match &mut *state {
+                VaultState::Unlocked {
+                    snapshot: current,
+                    permits,
+                    ..
+                } => {
+                    let current_policy = current.fingerprint == snapshot.fingerprint;
+                    Ok((key.single_use() || current_policy) && permits.live(&key, now))
+                }
+                VaultState::Locked => Err(crate::error::AppError::VaultLocked),
+            })
+        });
+        match found {
+            None => Err(Unauthorized::Refused(self.not_serving(vault_id))),
+            Some(Err(e)) => Err(Unauthorized::Refused(e)),
+            Some(Ok(false)) => Err(Unauthorized::NoPermit),
+            Some(Ok(true)) => Ok(Authorized {
+                snapshot,
+                keys,
+                consume: key.single_use().then_some(key),
+            }),
+        }
+    }
+
+    /// Step 7: the values of an authorized request's KEYs. A resident value
+    /// is read as held; a sealed one is opened under S while holding the
+    /// state lock (the vault-gone error when its runtime is closed,
+    /// `VaultLocked` when it is not Unlocked, or when S changed since the
+    /// snapshot was built); a value the step-4 walk fetched is used as it
+    /// carried it, never fetched again. A native KEY step 4 found that holds
+    /// no value fails closed.
+    pub fn materialize(&self, vault_id: &str, auth: &Authorized) -> Result<Values, Unreadable> {
+        use crate::snapshot::{Held, Location};
+        let mut out = BTreeMap::new();
+        // (KEY, the name it was sealed for, the sealed value)
+        let mut sealed: Vec<(&String, &str, &Vec<u8>)> = Vec::new();
+        for (key, at) in &auth.keys {
+            let (name, held) = match at {
+                Location::Native(name) => match auth.snapshot.held_native(name) {
+                    Some(held) => (name.as_str(), held),
+                    None => return Err(Unreadable::NotHeld(key.clone())),
+                },
+                Location::External { value, .. } => (key.as_str(), value),
+            };
+            match held {
+                Held::Plain(v) => {
+                    out.insert(key.clone(), v.clone());
+                }
+                Held::Sealed(ct) => sealed.push((key, name, ct)),
+            }
+        }
+        if !sealed.is_empty() {
+            let opened = self.runtime_if_present(vault_id).and_then(|runtime| {
+                let state = runtime.state.lock().unwrap();
+                if runtime.is_closed() {
+                    return None;
+                }
+                Some(match &*state {
+                    VaultState::Unlocked { seal_key, .. } => sealed
+                        .iter()
+                        .map(|(key, name, ct)| {
+                            seal_key
+                                .open(vault_id, name, ct)
+                                .map(|v| ((*key).clone(), v))
+                                .ok_or(crate::error::AppError::VaultLocked)
+                        })
+                        .collect::<Result<Vec<_>, _>>(),
+                    VaultState::Locked => Err(crate::error::AppError::VaultLocked),
+                })
+            });
+            match opened {
+                None => return Err(Unreadable::Refused(self.not_serving(vault_id))),
+                Some(Err(e)) => return Err(Unreadable::Refused(e)),
+                Some(Ok(values)) => out.extend(values),
+            }
+        }
+        Ok(Values(out))
+    }
+
+    /// Step 8, for every request, allow included: under the state lock, the
+    /// vault-gone error when its runtime is closed, `VaultLocked` when it is
+    /// not Unlocked; a single-use permit is spent here (removed if present;
+    /// an expired one counts as absent). `Ok(false)`: another request spent
+    /// it first.
+    pub fn consume(
+        &self,
+        vault_id: &str,
+        auth: Authorized,
+    ) -> Result<bool, crate::error::AppError> {
+        let now = now_secs();
+        let done = self.runtime_if_present(vault_id).and_then(|runtime| {
+            let mut state = runtime.state.lock().unwrap();
+            if runtime.is_closed() {
+                return None;
+            }
+            Some(match &mut *state {
+                VaultState::Unlocked { permits, .. } => Ok(match &auth.consume {
+                    Some(key) => permits.take(key, now),
+                    None => true,
+                }),
+                VaultState::Locked => Err(crate::error::AppError::VaultLocked),
+            })
+        });
+        done.unwrap_or_else(|| Err(self.not_serving(vault_id)))
+    }
+
+    /// Store an approval's permit (approve, once its op is marked approved).
+    /// Only while Unlocked: permits live there, so approving on a Locked
+    /// vault leaves nothing to redeem. A window is stored only when the op
+    /// was minted under the served snapshot's policy (`window_fp`: the
+    /// mint-time fingerprint its approval record carries), checked here
+    /// under the state lock; otherwise the op stays approved and its replay
+    /// asks again. Expired permits are swept. `false` when nothing was stored.
+    pub fn permit_insert(
+        &self,
+        vault_id: &str,
+        key: PermitKey,
+        expires_at: u64,
+        window_fp: Option<[u8; 32]>,
+    ) -> bool {
+        let now = now_secs();
+        let Some(runtime) = self.runtime_if_present(vault_id) else {
+            return false;
+        };
+        let mut state = runtime.state.lock().unwrap();
+        let VaultState::Unlocked {
+            snapshot, permits, ..
+        } = &mut *state
+        else {
+            return false;
+        };
+        if !key.single_use() && window_fp != Some(snapshot.fingerprint) {
+            return false;
+        }
+        permits.insert(key, expires_at, now);
+        true
+    }
+
+    /// Serve a rotated refresh token the store took, without an install. The
+    /// caller holds the build mutex and wrote the store under it. Only while
+    /// Unlocked, the served snapshot is replaced by a copy with native item
+    /// `key` holding `value` (plaintext for a resident KEY, sealed under S
+    /// otherwise) and `key`'s walk memo entry dropped. The permits, the
+    /// minted access tokens, the external key names and the behind note stay
+    /// as they are (the copy is as far behind the store as the original).
+    pub(crate) fn patch_rotated_locked(
+        &self,
+        runtime: &crate::vault_runtime::VaultRuntime,
+        vault_id: &str,
+        key: &str,
+        value: &[u8],
+    ) {
+        let (served, seal) = {
+            let state = runtime.state.lock().unwrap();
+            match &*state {
+                VaultState::Unlocked {
+                    snapshot, seal_key, ..
+                } => (snapshot.clone(), seal_key.clone()),
+                VaultState::Locked => return,
+            }
+        };
+        let patched = Arc::new(served.with_value(vault_id, key, value, &seal));
+        let mut state = runtime.state.lock().unwrap();
+        if runtime.is_closed() {
+            return;
+        }
+        // No install swaps while the build mutex is held; a lock may have
+        // landed meanwhile, and then there is nothing to patch.
+        if let VaultState::Unlocked { snapshot, .. } = &mut *state {
+            if Arc::ptr_eq(snapshot, &served) {
+                *snapshot = patched;
+            }
         }
     }
 
@@ -1377,12 +1858,7 @@ impl AppState {
     /// hasn't configured a retention (keep-forever default). The audit
     /// list handler treats both cases the same: skip prune.
     pub fn audit_retention_days(&self, vault_id: &str) -> Option<u32> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.audit_retention_days,
-            _ => None,
-        }
+        self.snapshot(vault_id)?.audit_retention_days
     }
 
     /// Resolve a `connection_id` to its service for an Unlocked vault
@@ -1392,18 +1868,9 @@ impl AppState {
     /// connection resolvable. Locked vault → falls back to `conn`
     /// (the caller's locked-gate rejects before any real use).
     pub fn resolve_connection_service(&self, vault_id: &str, conn: &str) -> String {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return conn.to_string();
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache
-                .connections
-                .get(conn)
-                .and_then(|c| c.service.clone())
-                .unwrap_or_else(|| conn.to_string()),
-            _ => conn.to_string(),
-        }
+        self.snapshot(vault_id)
+            .and_then(|s| s.connections.get(conn).and_then(|c| c.service.clone()))
+            .unwrap_or_else(|| conn.to_string())
     }
 
     /// A custom (per-vault `aux.services`) service definition, cloned out so no
@@ -1414,240 +1881,27 @@ impl AppState {
         vault_id: &str,
         service_id: &str,
     ) -> Option<crate::service::ServiceDef> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => {
-                cache.custom_services.get(service_id).cloned()
-            }
-            _ => None,
-        }
+        self.snapshot(vault_id)?
+            .inputs
+            .custom
+            .get(service_id)
+            .cloned()
     }
 
     /// True when `service_id` is an installed service of the unlocked vault
     /// that is not loaded because its owner has installed services off.
     pub fn installed_service_off(&self, vault_id: &str, service_id: &str) -> bool {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return false;
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => {
-                !cache.policy.allow_installed_services
-                    && cache
-                        .service_entries
-                        .get(service_id)
-                        .is_some_and(|e| e.is_installed())
-            }
-            _ => false,
-        }
+        self.snapshot(vault_id)
+            .is_some_and(|s| s.installed_service_off(service_id))
     }
 
     /// The names of an unlocked vault's console install requests.
     pub fn service_request_names(&self, vault_id: &str) -> Vec<String> {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return Vec::new();
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.service_requests.clone(),
-            _ => Vec::new(),
-        }
+        self.snapshot(vault_id)
+            .map(|s| s.service_requests.clone())
+            .unwrap_or_default()
     }
 
-    /// Look up a cached auth value for `(vault, connection)`. Returns None if
-    /// the vault is Locked, the connection isn't bootstrapped/cached, the
-    /// vault has never been unlocked, OR the entry's `expires_at` is in
-    /// the past (lazy eviction).
-    pub fn cache_lookup(&self, vault_id: &str, conn_id: &str) -> Option<Vec<u8>> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let runtime = self.runtime_if_present(vault_id)?;
-        let mut state = runtime.state.lock().unwrap();
-        let cache = match &mut *state {
-            VaultState::Unlocked { cache, .. } => cache,
-            _ => return None,
-        };
-        let entry = cache.entries.get(conn_id)?;
-        if let Some(exp) = entry.expires_at {
-            if now >= exp {
-                // Lazy eviction: TTL-expired entries are dropped here so
-                // ask connections correctly fall back to the pending-op flow
-                // once their cache window closes.
-                cache.entries.remove(conn_id);
-                return None;
-            }
-        }
-        Some(entry.value.clone())
-    }
-
-    /// Look up the full `{ secret_name → bytes }` map an allow-level service
-    /// needs to resolve its phantoms. Returns `None` if the vault is locked
-    /// or the service wasn't bootstrapped with a named-secret set (e.g. an
-    /// oauth service, or one resolved post-approval). The allow fast-path
-    /// falls back to a single-secret map keyed by the primary in that case.
-    pub fn cache_lookup_secrets(
-        &self,
-        vault_id: &str,
-        conn_id: &str,
-    ) -> Option<HashMap<String, Vec<u8>>> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.allow_secrets.get(conn_id).cloned(),
-            _ => None,
-        }
-    }
-
-    /// Hold a connection's credential value (residency, not authorization).
-    /// `expires_at = None` means "live until lock" (allow-level
-    /// semantics). `Some(t)` is unix-second expiry. An existing entry's
-    /// window is never shortened: the value is the same credential, and
-    /// another approval's ledger entry may still need it (`None` wins, else
-    /// the later expiry). No-op when the vault is locked at the time of the
-    /// call (shouldn't happen on the approve-time write path, but defensive:
-    /// `approve_op` runs concurrently with locks).
-    pub fn cache_insert(
-        &self,
-        vault_id: &str,
-        conn_id: &str,
-        value: Vec<u8>,
-        expires_at: Option<u64>,
-        agent_prefix: Option<String>,
-    ) {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return;
-        };
-        let mut state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *state {
-            let expires_at = match (cache.entries.get(conn_id), expires_at) {
-                (Some(prev), Some(t)) => prev.expires_at.map(|p| p.max(t)),
-                (_, e) => e,
-            };
-            cache.entries.insert(
-                conn_id.to_string(),
-                CacheEntry {
-                    value,
-                    expires_at,
-                    from_bootstrap: false,
-                    agent_prefix,
-                },
-            );
-        }
-    }
-
-    /// Store a request-bound grant for the request tuple the user's passkey
-    /// approved, under the tier that minted it. Overwrites a prior grant for
-    /// the same tuple and tier (a fresh tap supersedes). No-op when the vault
-    /// is locked.
-    ///
-    /// See [`ASK_ALWAYS_REPLAY_WINDOW_SECS`] for the single-use expiry.
-    #[allow(clippy::too_many_arguments)]
-    pub fn op_grant_insert(
-        &self,
-        vault_id: &str,
-        agent_prefix: &str,
-        conn_id: &str,
-        method: &str,
-        host: &str,
-        path: &str,
-        scope_digest: &str,
-        tier: &crate::approval::reuse::BoundTier,
-        value: Vec<u8>,
-        expires_at: u64,
-    ) {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return;
-        };
-        let mut state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *state {
-            cache.op_grants.insert(
-                OpGrantKey::new(
-                    agent_prefix,
-                    conn_id,
-                    method,
-                    host,
-                    path,
-                    scope_digest,
-                    tier,
-                ),
-                CacheEntry {
-                    value,
-                    expires_at: Some(expires_at),
-                    from_bootstrap: false,
-                    agent_prefix: Some(agent_prefix.to_string()),
-                },
-            );
-        }
-    }
-
-    /// Redeem the request-bound grant for exactly this request tuple, minted
-    /// under `tier` (the tier this request's own decision yields,
-    /// [`crate::approval::reuse::BoundTier::of`]). A request whose (method,
-    /// host, path, scope_digest) or tier differs from what the user approved
-    /// is a miss and re-prompts, without spending the stored grant; there is
-    /// NO fallback to the conn-keyed `entries` (allow residency / plain-ask
-    /// leftovers are not grants for a bound action). `None` when locked /
-    /// absent / expired.
-    ///
-    /// The tier decides whether the redeem spends the grant:
-    ///   - `ask-always` and a single-use ask: removed on redeem (each request
-    ///     re-prompts).
-    ///   - `exact` (a scoped `ask`): PEEK. The grant is reused for the SAME
-    ///     bound action within its window, but a DIFFERENT action (different
-    ///     digest) still misses and re-prompts. (An irreversible/spending action
-    ///     should be `ask-always`: a peeked window still lets the identical
-    ///     spend repeat, which for money is drainage.)
-    #[allow(clippy::too_many_arguments)]
-    pub fn op_grant_take(
-        &self,
-        vault_id: &str,
-        agent_prefix: &str,
-        conn_id: &str,
-        method: &str,
-        host: &str,
-        path: &str,
-        scope_digest: &str,
-        tier: &crate::approval::reuse::BoundTier,
-    ) -> Option<Vec<u8>> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let runtime = self.runtime_if_present(vault_id)?;
-        let mut state = runtime.state.lock().unwrap();
-        let cache = match &mut *state {
-            VaultState::Unlocked { cache, .. } => cache,
-            _ => return None,
-        };
-        let key = OpGrantKey::new(
-            agent_prefix,
-            conn_id,
-            method,
-            host,
-            path,
-            scope_digest,
-            tier,
-        );
-        // Peek first so an expired entry (of any tier) is dropped and a
-        // reusable `exact` grant survives a hit.
-        let entry = cache.op_grants.get(&key)?;
-        if entry.expires_at.is_some_and(|exp| now >= exp) {
-            cache.op_grants.remove(&key);
-            return None;
-        }
-        if tier.single_use() {
-            cache.op_grants.remove(&key).map(|e| e.value)
-        } else {
-            Some(entry.value.clone())
-        }
-    }
-
-    /// Look up a cached OAuth `access_token` by `sha256(refresh_token)` hex (§5).
-    /// Returns `None` if locked, never minted, or past its expiry. Lazily evicts
-    /// expired entries (same shape as `cache_lookup`).
     /// The per-vault async write lock — serializes anything that reseals the
     /// vault body (connect exchange, oauth refresh-token rotation) so two writers
     /// can't clobber each other. Same map the connect + sync paths use inline.
@@ -1672,32 +1926,32 @@ impl AppState {
         self.vault_tombstones.lock().unwrap().contains_key(vault_id)
     }
 
+    /// The minted OAuth access token cached under `sha256(refresh_token)` hex
+    /// (§5). `None` if locked, never minted, or past its expiry (dropped then).
     pub fn oauth_access_lookup(&self, vault_id: &str, refresh_hash: &str) -> Option<Vec<u8>> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = now_secs();
         let runtime = self.runtime_if_present(vault_id)?;
         let mut state = runtime.state.lock().unwrap();
-        let cache = match &mut *state {
-            VaultState::Unlocked { cache, .. } => cache,
-            _ => return None,
+        let VaultState::Unlocked { oauth_access, .. } = &mut *state else {
+            return None;
         };
-        let entry = cache.oauth_access.get(refresh_hash)?;
-        if let Some(exp) = entry.expires_at {
-            if now >= exp {
-                cache.oauth_access.remove(refresh_hash);
-                return None;
+        match oauth_access.0.get(refresh_hash) {
+            Some((token, exp)) if now < *exp => Some(token.to_vec()),
+            Some(_) => {
+                oauth_access.0.remove(refresh_hash);
+                None
             }
+            None => None,
         }
-        Some(entry.value.clone())
     }
 
-    /// Store a freshly-minted OAuth `access_token` under `sha256(refresh_token)`
-    /// hex (§5). `expires_at` should be the provider-reported absolute expiry
-    /// minus a small safety margin (the broker uses ~60s) so we refresh before
-    /// the upstream would reject. No-op when the vault is locked at the time of
-    /// the call.
+    /// Cache a freshly-minted OAuth `access_token` under `sha256(refresh_token)`
+    /// hex (§5), for every tier: a short-lived derived credential, and minting
+    /// per request would rotate the refresh token on every request at a
+    /// rotating provider. `expires_at` should be the provider-reported absolute
+    /// expiry minus a small safety margin (the broker uses ~60s) so we refresh
+    /// before the upstream would reject. Expired tokens are swept. No-op when
+    /// the vault is locked at the time of the call.
     pub fn oauth_access_insert(
         &self,
         vault_id: &str,
@@ -1705,20 +1959,16 @@ impl AppState {
         value: Vec<u8>,
         expires_at: u64,
     ) {
+        let now = now_secs();
         let Some(runtime) = self.runtime_if_present(vault_id) else {
             return;
         };
         let mut state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *state {
-            cache.oauth_access.insert(
+        if let VaultState::Unlocked { oauth_access, .. } = &mut *state {
+            oauth_access.0.retain(|_, (_, exp)| now < *exp);
+            oauth_access.0.insert(
                 refresh_hash.to_string(),
-                CacheEntry {
-                    value,
-                    expires_at: Some(expires_at),
-                    // oauth_access has its own lookup path; the flag is unread here.
-                    from_bootstrap: false,
-                    agent_prefix: None,
-                },
+                (zeroize::Zeroizing::new(value), expires_at),
             );
         }
     }
@@ -1756,270 +2006,51 @@ impl AppState {
         }
     }
 
-    /// [`Self::evaluate_request_decision`] as `(level, matched_rule_id, ttl)`.
+    /// The policy decision for a request, from a snapshot's policy inputs and
+    /// this daemon's compiled services ([`crate::snapshot::PolicyInputs::decide`]):
+    /// `(effective level, what decided it, ttl seconds)`. Pure policy.
     #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_request_policy(
+    pub fn evaluate_request_decision(
         &self,
-        vault_id: &str,
-        agent_prefix: &str,
+        inputs: &crate::snapshot::PolicyInputs,
         connection_id: &str,
         service_id: &str,
         method: &str,
         path: &str,
-        host: &str,
         body: Option<&str>,
         vars: &crate::core::policy::VarMap,
-        has_scope_shape: bool,
-    ) -> Option<(
+    ) -> (
         crate::core::policy::AccessLevel,
-        Option<String>,
+        crate::core::policy::DecidedBy,
         Option<u64>,
-    )> {
-        let (level, by, ttl) = self.evaluate_request_decision(
-            vault_id,
-            agent_prefix,
+    ) {
+        inputs.decide(
+            &self.services,
             connection_id,
             service_id,
             method,
             path,
-            host,
             body,
             vars,
-            has_scope_shape,
-        )?;
-        let id = match by {
-            crate::core::policy::DecidedBy::Rule { id, .. } => id,
-            crate::core::policy::DecidedBy::Floor => None,
-        };
-        Some((level, id, ttl))
-    }
-
-    /// Evaluate the per-request policy decision for `(vault, connection,
-    /// service, method, path, body)`. Returns `None` when the vault is Locked
-    /// or never unlocked (caller should treat that as "vault locked").
-    ///
-    /// Returned tuple: `(effective_level, what decided it, ttl_seconds)`.
-    ///
-    /// Resolution (PROTOCOL.md §6.4):
-    ///   - merge the service's built-in rules with this connection's
-    ///     user rules (`cache.policy.connections[conn].rules`),
-    ///   - most-restrictive matching rule wins (deny-override), each rule's
-    ///     decision being its own `level`,
-    ///   - else connection / tag / global default floor, else ask-always,
-    ///   - a vault (`aux.services`) definition's policy only tightens: its
-    ///     tightening parts ([`crate::service::ServicePolicy::tightening`])
-    ///     decide alongside, and the stricter of the decision with and
-    ///     without them stands ([`crate::core::policy::stricter`]),
-    ///   - **the ask-grant ledger**: an unscoped `Ask` whose unit (the matched
-    ///     rule's id and the request's read/write class, or the floor's class)
-    ///     has a live entry for
-    ///     this `(agent, connection, host)` downgrades to `Allow`. Anything
-    ///     else asks (`grant_lookup` never authorizes an ask from residency).
-    ///
-    /// The vault state lock is held only to copy what the decision needs;
-    /// rule matching (a body regex included) runs outside it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_request_decision(
-        &self,
-        vault_id: &str,
-        agent_prefix: &str,
-        connection_id: &str,
-        service_id: &str,
-        method: &str,
-        path: &str,
-        host: &str,
-        body: Option<&str>,
-        vars: &crate::core::policy::VarMap,
-        // True when the service declares a `[requests]` scope SHAPE for this
-        // path (i.e. the proxy resolved a `RequestScope`), regardless of whether
-        // this particular request populated any values. A scoped path binds its
-        // approval to the exact request through `op_grants`, so it never
-        // consults the value-blind ledger below.
-        has_scope_shape: bool,
-    ) -> Option<(
-        crate::core::policy::AccessLevel,
-        crate::core::policy::DecidedBy,
-        Option<u64>,
-    )> {
-        use crate::core::policy::{evaluate_decision, merge_levels, merge_rules, stricter};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // The tag/global floors live in `cache.policy` (the user's
-        // `aux.policy` overlaid on compiled defaults at refresh), read live
-        // here, so a policy edit is realtime on the next request.
-        let (conn_policy, floors, vault_policy) = {
-            let runtime = self.runtime_if_present(vault_id)?;
-            let state = runtime.state.lock().unwrap();
-            let VaultState::Unlocked { cache, .. } = &*state else {
-                return None;
-            };
-            (
-                cache.policy.connections.get(connection_id).cloned(),
-                crate::core::policy::Policy {
-                    timeout: cache.policy.timeout,
-                    default: cache.policy.default.clone(),
-                    categories: cache.policy.categories.clone(),
-                    connections: HashMap::new(),
-                    allow_installed_services: cache.policy.allow_installed_services,
-                },
-                cache
-                    .custom_services
-                    .get(service_id)
-                    .and_then(|d| d.policy.clone()),
-            )
-        };
-        // Built-in rules come from the connection's *service* definition; the
-        // user's per-connection edits/additions (`aux.policy.connections.
-        // <id>.rules`) merge on top, and the user's per-connection default
-        // overrides the service's field-wise. Per connection, so two
-        // connections of the same service can be policed independently.
-        let empty_rules = HashMap::new();
-        let user_rules = conn_policy
-            .as_ref()
-            .map(|c| &c.rules)
-            .unwrap_or(&empty_rules);
-        let user_default = conn_policy.as_ref().and_then(|c| c.default.as_ref());
-        let tags = self.services.service_tags(service_id);
-        let decide = |built_in: &[crate::core::policy::PolicyRule],
-                      recipe: Option<&crate::core::policy::Levels>| {
-            let rules = merge_rules(built_in, user_rules);
-            let levels = merge_levels(user_default, recipe);
-            evaluate_decision(
-                method,
-                path,
-                body,
-                vars,
-                Some(&rules),
-                levels.as_ref(),
-                &floors,
-                tags,
-            )
-        };
-        let (level, by, ttl) = match &vault_policy {
-            Some(p) => stricter(decide(&[], None), decide(&p.rules, p.defaults.as_ref())),
-            None => decide(
-                self.services
-                    .default_policy_rules(service_id)
-                    .unwrap_or(&[]),
-                self.services.default_policy_levels(service_id).as_ref(),
-            ),
-        };
-
-        // Ask-grant ledger: a prior approval of the SAME unit (rule id and
-        // class, or floor class) for this agent, connection, and host, not yet expired,
-        // downgrades this Ask to Allow. The policy above was re-run on this
-        // request, so a rule unit matches only when the same rule (its `when`
-        // included) decided again. Expired entries are dropped passively.
-        if level == crate::core::policy::AccessLevel::Ask && !has_scope_shape {
-            if let Some(unit) = crate::approval::reuse::GrantUnit::of(&by, method) {
-                let key = (
-                    agent_prefix.to_string(),
-                    connection_id.to_string(),
-                    host.to_ascii_lowercase(),
-                    unit,
-                );
-                let runtime = self.runtime_if_present(vault_id)?;
-                let mut state = runtime.state.lock().unwrap();
-                if let VaultState::Unlocked { cache, .. } = &mut *state {
-                    if let Some(&exp) = cache.ask_grants.get(&key) {
-                        if exp > now {
-                            return Some((crate::core::policy::AccessLevel::Allow, by, ttl));
-                        }
-                        cache.ask_grants.remove(&key);
-                    }
-                }
-            }
-        }
-
-        Some((level, by, ttl))
+        )
     }
 
     /// For a scoped request (`rs`: its matched `[requests]` shape), the first
     /// of this connection's own policy edits that cannot be enforced as
-    /// written there, with the reason
-    /// ([`crate::core::policy::unenforceable_user_rule`]). The proxy refuses
-    /// such a request rather than ask under a rule an approval cannot bind.
-    /// The policy is sealed and written by the console, so this is where the
-    /// daemon holds the line. `None` when locked or nothing is refused.
+    /// written there ([`crate::snapshot::PolicyInputs::rule_problem`]). The
+    /// policy is sealed and written by the console, so this is where the
+    /// daemon holds the line.
     #[allow(clippy::too_many_arguments)]
     pub fn connection_rule_problem(
         &self,
-        vault_id: &str,
+        inputs: &crate::snapshot::PolicyInputs,
         connection_id: &str,
         service_id: &str,
         method: &str,
         path: &str,
         rs: &crate::service::RequestScope,
     ) -> Option<String> {
-        let (user_rules, vault_policy) = {
-            let runtime = self.runtime_if_present(vault_id)?;
-            let state = runtime.state.lock().unwrap();
-            let VaultState::Unlocked { cache, .. } = &*state else {
-                return None;
-            };
-            (
-                cache.policy.connections.get(connection_id)?.rules.clone(),
-                cache
-                    .custom_services
-                    .get(service_id)
-                    .and_then(|d| d.policy.clone()),
-            )
-        };
-        // The rules the edits merge onto: the vault definition's (tightening)
-        // rules, else the registry definition's.
-        let built_in = match &vault_policy {
-            Some(p) => p.rules.as_slice(),
-            None => self
-                .services
-                .default_policy_rules(service_id)
-                .unwrap_or(&[]),
-        };
-        crate::core::policy::unenforceable_user_rule(
-            built_in,
-            &user_rules,
-            method,
-            path,
-            &rs.shape,
-            &rs.declared,
-            &rs.binds,
-        )
-    }
-
-    /// Record an approved `ask` in the ask-grant ledger: `(agent, connection,
-    /// host, unit)` until now + `ttl_seconds`. Called once the Use op is
-    /// approved (`approve.rs` `DeferredGrant::Ledger`). A fresh approval of
-    /// the same key replaces the expiry. No-op when the vault is locked at the
-    /// moment of the call.
-    pub fn record_ask_grant(
-        &self,
-        vault_id: &str,
-        agent_prefix: &str,
-        connection_id: &str,
-        host: &str,
-        unit: crate::approval::reuse::GrantUnit,
-        ttl_seconds: u64,
-    ) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return;
-        };
-        let mut state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *state {
-            cache.ask_grants.insert(
-                (
-                    agent_prefix.to_string(),
-                    connection_id.to_string(),
-                    host.to_ascii_lowercase(),
-                    unit,
-                ),
-                now + ttl_seconds,
-            );
-        }
+        inputs.rule_problem(&self.services, connection_id, service_id, method, path, rs)
     }
 
     /// Keep why a change of `item_id` was not applied (see
@@ -2216,23 +2247,6 @@ impl AppState {
         self.clear_sync_conflict(vault_id, &rotation_note_key(conn_id));
     }
 
-    /// Replace a connection's cached credential value `old` with `new`
-    /// wherever the unlocked session holds it (its entry, its named secrets).
-    /// A no-op when locked or not held. Under the build mutex: an install
-    /// that read the store before a rotation was stored swaps first, and this
-    /// edit then lands on its cache.
-    pub fn cache_replace_value(&self, vault_id: &str, conn_id: &str, old: &[u8], new: &[u8]) {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return;
-        };
-        runtime.with_build_lock(|| {
-            let mut state = runtime.state.lock().unwrap();
-            if let VaultState::Unlocked { cache, .. } = &mut *state {
-                cache.replace_value(conn_id, old, new);
-            }
-        });
-    }
-
     /// The pull after unlock of `vault_id` landed (or the vault locked).
     pub fn clear_catch_up(&self, vault_id: &str) {
         if let Some(runtime) = self.runtime_if_present(vault_id) {
@@ -2354,15 +2368,10 @@ impl AppState {
         agent_id: &str,
         connection_id: &str,
     ) -> Option<bool> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache
-                .agents
-                .get(agent_id)
-                .map(|e| e.connections.allows(connection_id)),
-            _ => None,
-        }
+        self.snapshot(vault_id)?
+            .agents
+            .get(agent_id)
+            .map(|e| e.connections.allows(connection_id))
     }
 
     /// Is `agent_id` present in this vault's authorized-agents table (§11)?
@@ -2376,14 +2385,8 @@ impl AppState {
     /// legacy agent, whose api-key prefix simply isn't an `ag_` and takes the
     /// hash-set path instead).
     pub fn agent_is_authorized(&self, vault_id: &str, agent_id: &str) -> bool {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return false;
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.agents.contains_key(agent_id),
-            _ => false,
-        }
+        self.snapshot(vault_id)
+            .is_some_and(|s| s.agents.contains_key(agent_id))
     }
 
     /// Is `agent_id` present in the authorized-agents table of ANY currently
@@ -2396,7 +2399,7 @@ impl AppState {
     pub fn agent_is_authorized_any(&self, agent_id: &str) -> bool {
         let runtimes: Vec<_> = self.vault_runtimes.lock().unwrap().values().cloned().collect();
         runtimes.iter().any(|runtime| {
-            matches!(&*runtime.state.lock().unwrap(), VaultState::Unlocked { cache, .. } if cache.agents.contains_key(agent_id))
+            matches!(&*runtime.state.lock().unwrap(), VaultState::Unlocked { snapshot, .. } if snapshot.agents.contains_key(agent_id))
         })
     }
 
@@ -2414,18 +2417,13 @@ impl AppState {
         agent_id: &str,
         candidates: &[String],
     ) -> Option<Vec<String>> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.agents.get(agent_id).map(|entry| {
-                candidates
-                    .iter()
-                    .filter(|id| entry.connections.allows(id))
-                    .cloned()
-                    .collect()
-            }),
-            _ => None,
-        }
+        self.snapshot(vault_id)?.agents.get(agent_id).map(|entry| {
+            candidates
+                .iter()
+                .filter(|id| entry.connections.allows(id))
+                .cloned()
+                .collect()
+        })
     }
 
     /// The approval-hold window (seconds): how long a pending `ask` op waits
@@ -2439,16 +2437,9 @@ impl AppState {
     /// locked or sets no timeout.
     pub fn policy_approval_hold(&self, vault_id: &str) -> u64 {
         const DEFAULT_APPROVAL_HOLD: u64 = 1800;
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return DEFAULT_APPROVAL_HOLD;
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => {
-                cache.policy.timeout.unwrap_or(DEFAULT_APPROVAL_HOLD)
-            }
-            _ => DEFAULT_APPROVAL_HOLD,
-        }
+        self.snapshot(vault_id)
+            .and_then(|s| s.inputs.policy.timeout)
+            .unwrap_or(DEFAULT_APPROVAL_HOLD)
     }
 
     // ── Proxy-facing accessors (resident phantom-only proxy) ─────────────────
@@ -2461,18 +2452,14 @@ impl AppState {
         &self,
         vault_id: &str,
     ) -> Vec<(String, crate::storage::plaintext::Connection)> {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return Vec::new();
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache
-                .connections
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            _ => Vec::new(),
-        }
+        self.snapshot(vault_id)
+            .map(|s| {
+                s.connections
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn connection_snapshot(
@@ -2480,12 +2467,7 @@ impl AppState {
         vault_id: &str,
         conn: &str,
     ) -> Option<crate::storage::plaintext::Connection> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.connections.get(conn).cloned(),
-            _ => None,
-        }
+        self.snapshot(vault_id)?.connections.get(conn).cloned()
     }
 
     /// Snapshot this vault's per-vault custom (`aux.services`) definitions from
@@ -2496,36 +2478,23 @@ impl AppState {
         &self,
         vault_id: &str,
     ) -> std::collections::HashMap<String, crate::service::ServiceDef> {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return Default::default();
-        };
-        let state = runtime.state.lock().unwrap();
-        match &*state {
-            VaultState::Unlocked { cache, .. } => cache.custom_services.clone(),
-            _ => Default::default(),
-        }
+        self.snapshot(vault_id)
+            .map(|s| s.inputs.custom.clone())
+            .unwrap_or_default()
     }
 
     /// The exact FQDNs a connection's credential may egress to, resolved
     /// through the compiled registry and the vault's custom services. `None`
     /// when the vault is Locked or the connection id is unknown.
     pub fn resolved_hosts_for(&self, vault_id: &str, conn: &str) -> Option<Vec<String>> {
-        let runtime = self.runtime_if_present(vault_id)?;
-        let state = runtime.state.lock().unwrap();
-        let cache = match &*state {
-            VaultState::Unlocked { cache, .. } => cache,
-            _ => return None,
-        };
-        let conn_rec = cache.connections.get(conn)?;
-        let def = conn_rec.service.as_deref().and_then(|s| {
-            // custom-FIRST (see proxy::handler)
-            cache
-                .custom_services
-                .get(s)
-                .cloned()
-                .or_else(|| self.services.get(s).cloned())
-        });
-        Some(crate::core::host::resolved_hosts(conn_rec, def.as_ref()))
+        let snapshot = self.snapshot(vault_id)?;
+        let conn_rec = snapshot.connections.get(conn)?;
+        // custom-FIRST (see proxy::handler)
+        let def = conn_rec
+            .service
+            .as_deref()
+            .and_then(|s| snapshot.inputs.def(&self.services, s));
+        Some(crate::core::host::resolved_hosts(conn_rec, def))
     }
 
     /// True iff `host` is in the union of `resolved_hosts` over the connections
@@ -2546,19 +2515,14 @@ impl AppState {
             let unlocked_hosts = {
                 let state = runtime.state.lock().unwrap();
                 match &*state {
-                    VaultState::Unlocked { cache, .. } => {
+                    VaultState::Unlocked { snapshot, .. } => {
                         let mut hosts = Vec::new();
-                        for conn_rec in cache.connections.values() {
-                            let def = conn_rec.service.as_deref().and_then(|s| {
-                                cache
-                                    .custom_services
-                                    .get(s)
-                                    .cloned()
-                                    .or_else(|| self.services.get(s).cloned())
-                            });
-                            for resolved in
-                                crate::core::host::resolved_hosts(conn_rec, def.as_ref())
-                            {
+                        for conn_rec in snapshot.connections.values() {
+                            let def = conn_rec
+                                .service
+                                .as_deref()
+                                .and_then(|s| snapshot.inputs.def(&self.services, s));
+                            for resolved in crate::core::host::resolved_hosts(conn_rec, def) {
                                 hosts.push(resolved.to_ascii_lowercase());
                             }
                         }
@@ -2602,32 +2566,21 @@ impl AppState {
         }
         hit
     }
+}
 
-    /// Session-level host widen (component C partial): append an exact FQDN to a
-    /// connection's anchored hosts in the unlocked routing snapshot so the
-    /// agent's retried request passes the anchor. Durable persistence into
-    /// `aux.connections` is a separate write (see BUILD_NOTES). No-op when the
-    /// vault is Locked or the connection is unknown.
-    pub fn widen_connection_host(&self, vault_id: &str, conn: &str, host: &str) {
-        let Some(runtime) = self.runtime_if_present(vault_id) else {
-            return;
-        };
-        let mut runtime_state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *runtime_state {
-            if let Some(conn_rec) = cache.connections.get_mut(conn) {
-                let hosts = conn_rec.hosts.get_or_insert_with(Vec::new);
-                if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
-                    hosts.push(host.to_string());
-                }
-            }
-        }
-    }
+/// Unix seconds now.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::snapshot::{PolicyInputs, Snapshot};
     use std::path::PathBuf;
 
     /// The ask-always tier (single-use).
@@ -2635,7 +2588,7 @@ mod tests {
         crate::approval::reuse::BoundTier::AskAlways
     }
 
-    /// A scoped ask's `exact` tier (peeked), here under the write floor.
+    /// A scoped ask's `exact` tier (a window), here under the write floor.
     fn ex() -> crate::approval::reuse::BoundTier {
         use crate::approval::reuse::{BoundTier, Class, GrantUnit};
         BoundTier::Exact(GrantUnit::Floor(Class::Write))
@@ -2667,7 +2620,7 @@ mod tests {
         s.set_ledger(crate::principal_ledger::LedgerGate::default()); // parked
         s.unlock_vault(
             "v".into(),
-            SecretsCache::default(),
+            Snapshot::default(),
             zeroize::Zeroizing::new(vec![7u8; 32]),
         );
         assert!(
@@ -2677,7 +2630,7 @@ mod tests {
         s.open_ledger_for_tests(&[]);
         s.unlock_vault(
             "v".into(),
-            SecretsCache::default(),
+            Snapshot::default(),
             zeroize::Zeroizing::new(vec![7u8; 32]),
         );
         assert!(!s.is_vault_locked("v"));
@@ -2727,672 +2680,204 @@ mod tests {
         assert_eq!(state.op_payload_take("deadbeef"), None, "unknown digest");
     }
 
-    fn unlock_with_empty_cache(state: &AppState, vault_id: &str) {
+    fn unlock_empty(state: &AppState, vault_id: &str) {
         state.unlock_vault(
             vault_id.to_string(),
-            SecretsCache::default(),
+            Snapshot::default(),
             zeroize::Zeroizing::new(Vec::new()),
         );
     }
 
-    /// Directly seed a bootstrap-resident entry (what `bootstrap_cache_from_view`
-    /// produces for an allow-read connection) — there's no public setter since
-    /// only unlock writes these.
-    fn insert_bootstrap(state: &AppState, vault_id: &str, conn: &str, value: &[u8]) {
-        let runtime = state.runtime(vault_id).unwrap();
-        let mut runtime_state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *runtime_state {
-            cache.entries.insert(
-                conn.to_string(),
-                CacheEntry {
-                    value: value.to_vec(),
-                    expires_at: None,
-                    from_bootstrap: true,
-                    agent_prefix: None,
-                },
-            );
+    fn far() -> u64 {
+        now_secs() + 600
+    }
+
+    fn creds(keys: &[&str]) -> CredentialSet {
+        CredentialSet::new("svc", keys.iter().map(|k| k.to_string()))
+    }
+
+    /// A request-bound permit's key.
+    #[allow(clippy::too_many_arguments)]
+    fn bound(
+        agent: &str,
+        conn: &str,
+        method: &str,
+        host: &str,
+        path: &str,
+        digest: &str,
+        tier: &crate::approval::reuse::BoundTier,
+        keys: &[&str],
+    ) -> PermitKey {
+        PermitKey {
+            of: PermitFor::Request(OpGrantKey::new(
+                agent, conn, method, host, path, digest, tier,
+            )),
+            credentials: creds(keys),
         }
     }
 
-    #[test]
-    fn bootstrap_entry_serves_allow_but_never_ask_paths() {
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        insert_bootstrap(&state, "v1", "github", b"tok");
-        use crate::core::policy::AccessLevel;
-        let lookup = |level| {
-            crate::proxy::handler::grant_lookup(
-                &state,
-                "v1",
-                "agA",
-                "github",
-                level,
-                &crate::core::policy::DecidedBy::Floor,
-                "GET",
-                "api.github.com",
-                "/user",
-                "",
-                false,
-            )
-            .0
+    /// Steps 6 and 8 for a request with this permit key: let through, and
+    /// its single-use permit spent?
+    fn redeem(state: &AppState, vid: &str, key: PermitKey) -> bool {
+        let Some(snapshot) = state.snapshot(vid) else {
+            return false;
         };
-        // allow fast-path uses the residency…
-        assert_eq!(state.cache_lookup("v1", "github"), Some(b"tok".to_vec()));
-        assert_eq!(lookup(AccessLevel::Allow), Some(b"tok".to_vec()));
-        // …but ask must NOT: a resident value is not a grant.
-        assert_eq!(lookup(AccessLevel::Ask), None);
-        // ask-always never reads `entries` at all — the residency (and even a
-        // real conn-keyed ask grant) is invisible to op_grant_take.
-        state.cache_insert(
-            "v1",
-            "github",
-            b"granted".to_vec(),
-            None,
-            Some("agA".into()),
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "github",
-                "DELETE",
-                "api.github.com",
-                "/repos/a/b",
-                "",
-                &aa()
-            ),
-            None
-        );
-        // Nor does an approval-held value authorize an ask: only the
-        // ask-grant ledger does (it downgrades the decision before lookup).
-        assert_eq!(lookup(AccessLevel::Ask), None);
-    }
-
-    #[test]
-    fn cache_insert_no_expiry_persists_lookups() {
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        state.cache_insert("v1", "svc", b"secret".to_vec(), None, Some("agA".into()));
-        assert_eq!(state.cache_lookup("v1", "svc"), Some(b"secret".to_vec()));
-        // Multiple lookups still hit (no eviction without expiry).
-        assert_eq!(state.cache_lookup("v1", "svc"), Some(b"secret".to_vec()));
-    }
-
-    #[test]
-    fn op_grant_take_consumes_single_use() {
-        // The ask-always captive-portal contract: one approval = one replay.
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        let far = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
-        state.op_grant_insert(
-            "v1",
-            "agA",
-            "svc",
-            "POST",
-            "api.x.com",
-            "/v2/purchase",
-            "",
-            &aa(),
-            b"tok".to_vec(),
-            far,
-        );
-        // First take returns the value …
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            Some(b"tok".to_vec())
-        );
-        // … and removes it: a second take misses, and nothing leaked into the
-        // conn-keyed entries for the allow/ask paths to find.
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            None
-        );
-        assert_eq!(state.cache_lookup("v1", "svc"), None);
-    }
-
-    /// Security regression (the $80/$180 hole): an ask-always grant is bound
-    /// to the REQUEST the user approved. A replay whose method, host, or path
-    /// differs must miss — and the miss must NOT consume the stored grant, so
-    /// the legitimate replay still works afterwards.
-    #[test]
-    fn op_grant_take_is_request_bound() {
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        let far = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
-        state.op_grant_insert(
-            "v1",
-            "agA",
-            "svc",
-            "POST",
-            "api.x.com",
-            "/v2/purchase",
-            "",
-            &aa(),
-            b"tok".to_vec(),
-            far,
-        );
-        // Different path / method / host / connection → all miss.
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/refund",
-                "",
-                &aa()
-            ),
-            None
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "DELETE",
-                "api.x.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            None
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.y.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            None
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "other",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            None
-        );
-        // Host comparison is case-insensitive (hosts are lowercased at insert).
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "API.X.COM",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            Some(b"tok".to_vec())
-        );
-    }
-
-    /// Op-agent binding (team §C1): every grant surface is keyed by the agent
-    /// the approval was minted for. Agent B holding a perfectly valid key must
-    /// never redeem/ride agent A's approval — and B's miss must not consume
-    /// A's grant.
-    #[test]
-    fn grants_are_agent_bound_across_all_three_surfaces() {
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        let far = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
-
-        // (1) ask-always / scoped op_grants.
-        state.op_grant_insert(
-            "v1",
-            "agA",
-            "svc",
-            "POST",
-            "api.x.com",
-            "/v2/purchase",
-            "",
-            &aa(),
-            b"tok".to_vec(),
-            far,
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agB",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            None,
-            "agent B cannot redeem A's grant"
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                "",
-                &aa()
-            ),
-            Some(b"tok".to_vec()),
-            "B's miss must not have consumed A's grant"
-        );
-
-        // (2) the ask-grant ledger: recorded for A, B still re-prompts.
-        let unit = crate::approval::reuse::GrantUnit::Rule(
-            "read".into(),
-            crate::approval::reuse::Class::Read,
-        );
-        state.record_ask_grant("v1", "agA", "gh", "H.com", unit.clone(), 60);
-        {
-            let runtime = state.runtime("v1").unwrap();
-            let runtime_state = runtime.state.lock().unwrap();
-            if let VaultState::Unlocked { cache, .. } = &*runtime_state {
-                let key_a = (
-                    "agA".to_string(),
-                    "gh".to_string(),
-                    "h.com".to_string(),
-                    unit.clone(),
-                );
-                let mut key_b = key_a.clone();
-                key_b.0 = "agB".to_string();
-                assert!(cache.ask_grants.contains_key(&key_a));
-                assert!(!cache.ask_grants.contains_key(&key_b));
-            } else {
-                panic!("vault not unlocked");
-            }
+        match state.authorize(vid, snapshot, BTreeMap::new(), Some(key)) {
+            Ok(auth) => state.consume(vid, auth).unwrap(),
+            Err(_) => false,
         }
     }
 
+    /// One approval = one replay: a single-use permit is spent by the request
+    /// that redeems it.
     #[test]
-    fn op_grant_take_honors_expiry() {
+    fn a_single_use_permit_is_spent_once() {
         let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        state.op_grant_insert(
-            "v1",
-            "agA",
-            "svc",
-            "POST",
-            "api.x.com",
-            "/p",
-            "",
-            &aa(),
-            b"stale".to_vec(),
-            0,
-        );
-        // Expired grant is not returned (and is consumed/dropped).
-        assert_eq!(
-            state.op_grant_take("v1", "agA", "svc", "POST", "api.x.com", "/p", "", &aa()),
-            None
-        );
+        unlock_empty(&state, "v1");
+        let key = || bound("agA", "svc", "POST", "api.x.com", "/v2/purchase", "", &aa(), &["K"]);
+        assert!(state.permit_insert("v1", key(), far(), None));
+        assert!(redeem(&state, "v1", key()));
+        assert!(!redeem(&state, "v1", key()), "spent");
     }
 
-    /// Phase 2: the scope digest is part of the key. Approving `amount=80`
-    /// (digest_80) means a replay whose fields hash to a DIFFERENT digest (the
-    /// $180 request) misses — without consuming — so the honest $80 replay still
-    /// works afterwards.
+    /// The $80/$180 hole: a permit is bound to the request the user approved.
+    /// A replay whose method, host, path, connection, agent, bound values or
+    /// tier differs misses, without spending it; the host compares
+    /// case-insensitively.
     #[test]
-    fn op_grant_take_is_scope_digest_bound() {
+    fn a_request_bound_permit_misses_any_other_request() {
         let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        let far = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
+        unlock_empty(&state, "v1");
         let d80 = crate::service::scope_digest(&[("amount".into(), "80".into())]);
         let d180 = crate::service::scope_digest(&[("amount".into(), "180".into())]);
-        state.op_grant_insert(
-            "v1",
-            "agA",
-            "svc",
-            "POST",
-            "api.x.com",
-            "/v2/purchase",
-            &d80,
-            &aa(),
-            b"tok".to_vec(),
-            far,
-        );
-        // The tampered ($180) replay misses and does NOT consume…
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                &d180,
-                &aa()
-            ),
-            None
-        );
-        // …so the honest ($80) replay still succeeds, exactly once.
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                &d80,
-                &aa()
-            ),
-            Some(b"tok".to_vec())
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/v2/purchase",
-                &d80,
-                &aa()
-            ),
-            None
-        );
-    }
-
-    /// A scoped `ask` peeks (reuses within its window for the SAME bound
-    /// action), while a DIFFERENT bound value still misses — so the request
-    /// consent is never a false promise, but the identical action isn't
-    /// re-prompted every time (that's the ask-vs-ask-always distinction).
-    #[test]
-    fn op_grant_take_peek_reuses_same_action_but_not_a_different_one() {
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        let far = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
-        let d_read = crate::service::scope_digest(&[("q".into(), "alpha".into())]);
-        let d_other = crate::service::scope_digest(&[("q".into(), "beta".into())]);
-        state.op_grant_insert(
-            "v1",
-            "agA",
-            "svc",
-            "POST",
-            "api.x.com",
-            "/search",
-            &d_read,
-            &ex(),
-            b"tok".to_vec(),
-            far,
-        );
-        // Peek (consume=false) reuses the SAME action any number of times…
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/search",
-                &d_read,
-                &ex()
-            ),
-            Some(b"tok".to_vec())
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/search",
-                &d_read,
-                &ex()
-            ),
-            Some(b"tok".to_vec())
-        );
-        // …but a DIFFERENT bound value misses (re-prompt), without disturbing the grant.
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/search",
-                &d_other,
-                &ex()
-            ),
-            None
-        );
-        assert_eq!(
-            state.op_grant_take(
-                "v1",
-                "agA",
-                "svc",
-                "POST",
-                "api.x.com",
-                "/search",
-                &d_read,
-                &ex()
-            ),
-            Some(b"tok".to_vec())
-        );
-    }
-
-    #[test]
-    fn cache_lookup_evicts_expired_entry() {
-        let state = test_state();
-        unlock_with_empty_cache(&state, "v1");
-        // Already-expired entry.
-        state.cache_insert("v1", "svc", b"secret".to_vec(), Some(0), Some("agA".into()));
-        assert_eq!(state.cache_lookup("v1", "svc"), None);
-        // Subsequent insert with valid TTL should succeed (lazy eviction
-        // dropped the stale entry; nothing leaks across).
-        let future = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600;
-        state.cache_insert(
-            "v1",
-            "svc",
-            b"new".to_vec(),
-            Some(future),
-            Some("agA".into()),
-        );
-        assert_eq!(state.cache_lookup("v1", "svc"), Some(b"new".to_vec()));
-    }
-
-    #[test]
-    fn cache_lookup_returns_none_when_locked() {
-        let state = test_state();
-        // Never unlocked.
-        assert_eq!(state.cache_lookup("v1", "svc"), None);
-        // Insert into a locked vault should be a no-op too.
-        state.cache_insert("v1", "svc", b"x".to_vec(), None, Some("agA".into()));
-        assert_eq!(state.cache_lookup("v1", "svc"), None);
-    }
-
-    /// The rule-approval RECORD is keyed by (agent, connection, rule, method,
-    /// host): a recorded GET approval downgrades only that key's decision.
-    /// This pins the policy layer only; what an approval lets the agent reuse
-    /// end to end (the held connection value) is pinned by the
-    /// `reuse_*` tests in server/handlers/approve.rs.
-    #[test]
-    fn ask_grant_is_scoped_to_method_and_rule() {
-        use crate::core::policy::{AccessLevel, ConnectionPolicy, Policy, RuleConfig};
-
-        // Inject the test rules as the connection's user rules (level = ask).
-        // "gh" has no service definition, so built-in is empty and these are the only rules.
-        let ask_rule = |pat: &str| RuleConfig {
-            match_pattern: Some(pat.to_string()),
-            level: Some(AccessLevel::Ask),
-            ttl: Some(60),
-            ..Default::default()
+        let k = |agent: &str, conn: &str, m: &str, h: &str, p: &str, d: &str| {
+            bound(agent, conn, m, h, p, d, &aa(), &["K"])
         };
-        let mut rules = std::collections::HashMap::new();
-        rules.insert("read".to_string(), ask_rule("GET /x"));
-        rules.insert("write".to_string(), ask_rule("POST /x"));
-        let mut policy = Policy::default();
-        policy.connections.insert(
-            "gh".to_string(),
-            ConnectionPolicy {
-                default: None,
-                rules,
-            },
-        );
-
-        let state = test_state();
-        let vid = "v-scope";
-        let mut cache = SecretsCache::default();
-        cache.policy = policy;
-        state.unlock_vault(vid.to_string(), cache, zeroize::Zeroizing::new(Vec::new()));
-
-        // Baseline: GET resolves to Ask under the "read" rule. (Default
-        // connection: connection_id == service_id == "gh".)
-        let (lvl, rule, _) = state
-            .evaluate_request_policy(
-                vid,
-                "agA",
-                "gh",
-                "gh",
-                "GET",
-                "/x",
-                "api.gh.com",
-                None,
-                &crate::core::policy::VarMap::new(),
-                false, // unscoped rule: coarse connection-window applies
-            )
-            .unwrap();
-        assert_eq!(lvl, AccessLevel::Ask);
-        assert_eq!(rule.as_deref(), Some("read"));
-
-        // User approves that GET toward host A (rule "read").
-        state.record_ask_grant(
-            vid,
-            "agA",
-            "gh",
-            "api.gh.com",
-            crate::approval::reuse::GrantUnit::Rule(
-                "read".into(),
-                crate::approval::reuse::Class::Read,
-            ),
-            60,
-        );
-
-        // The same GET toward the same host now fast-paths (the feature works).
-        let (lvl, _, _) = state
-            .evaluate_request_policy(
-                vid,
-                "agA",
-                "gh",
-                "gh",
-                "GET",
-                "/x",
-                "api.gh.com",
-                None,
-                &crate::core::policy::VarMap::new(),
-                false, // unscoped rule: coarse connection-window applies
-            )
-            .unwrap();
-        assert_eq!(lvl, AccessLevel::Allow, "approved GET should fast-path");
-
-        // Same GET/rule toward a DIFFERENT host must NOT fast-path — the grant
-        // is host-scoped (E2E-5 oracle: approve host A → call host B → re-ask).
-        let (lvl, _, _) = state
-            .evaluate_request_policy(
-                vid,
-                "agA",
-                "gh",
-                "gh",
-                "GET",
-                "/x",
-                "evil.gh.com",
-                None,
-                &crate::core::policy::VarMap::new(),
-                false, // unscoped rule: coarse connection-window applies
-            )
-            .unwrap();
-        assert_eq!(
-            lvl,
-            AccessLevel::Ask,
-            "approving host A must never fast-path host B"
-        );
-
-        // A POST is a DIFFERENT verb/rule — the GET approval must not cover it.
-        let (lvl, rule, _) = state
-            .evaluate_request_policy(
-                vid,
-                "agA",
-                "gh",
-                "gh",
-                "POST",
-                "/x",
-                "api.gh.com",
-                None,
-                &crate::core::policy::VarMap::new(),
-                false, // unscoped rule: coarse connection-window applies
-            )
-            .unwrap();
-        assert_eq!(
-            lvl,
-            AccessLevel::Ask,
-            "approving a GET must never fast-path a POST"
-        );
-        assert_eq!(rule.as_deref(), Some("write"));
+        state.permit_insert("v1", k("agA", "svc", "POST", "api.x.com", "/buy", &d80), far(), None);
+        for other in [
+            k("agA", "svc", "POST", "api.x.com", "/refund", &d80),
+            k("agA", "svc", "DELETE", "api.x.com", "/buy", &d80),
+            k("agA", "svc", "POST", "api.y.com", "/buy", &d80),
+            k("agA", "other", "POST", "api.x.com", "/buy", &d80),
+            k("agB", "svc", "POST", "api.x.com", "/buy", &d80),
+            k("agA", "svc", "POST", "api.x.com", "/buy", &d180),
+            bound("agA", "svc", "POST", "api.x.com", "/buy", &d80, &ex(), &["K"]),
+        ] {
+            assert!(!redeem(&state, "v1", other));
+        }
+        assert!(redeem(&state, "v1", k("agA", "svc", "POST", "API.X.COM", "/buy", &d80)));
     }
 
-    /// A rule unit matches only when the policy, re-run on the later request,
-    /// lands on the SAME rule (`when` included); a floor unit only for its
-    /// own class. Both are bound to the agent, connection and host.
+    /// A permit is keyed by the credentials the request resolved: another
+    /// KEY, an extra KEY or another service misses, for a request-bound
+    /// permit and a unit window alike.
     #[test]
-    fn ask_grant_ledger_matches_the_rerun_decision() {
+    fn a_permit_serves_only_the_same_credentials() {
         use crate::approval::reuse::{Class, GrantUnit};
+        let state = test_state();
+        unlock_empty(&state, "v1");
+        let fp = state.snapshot("v1").unwrap().fingerprint;
+        let unit = |keys: &[&str], service: &str| PermitKey {
+            of: PermitFor::Unit {
+                agent: "agA".into(),
+                conn: "svc".into(),
+                host: "api.x.com".into(),
+                unit: GrantUnit::Floor(Class::Read),
+            },
+            credentials: CredentialSet::new(service, keys.iter().map(|k| k.to_string())),
+        };
+        assert!(state.permit_insert("v1", unit(&["A"], "svc"), far(), Some(fp)));
+        assert!(!redeem(&state, "v1", unit(&["B"], "svc")));
+        assert!(!redeem(&state, "v1", unit(&["A", "B"], "svc")));
+        assert!(!redeem(&state, "v1", unit(&["A"], "other")));
+        assert!(redeem(&state, "v1", unit(&["A"], "svc")));
+        assert!(redeem(&state, "v1", unit(&["A"], "svc")), "a window is not spent");
+
+        let one = |keys: &[&str]| bound("agA", "svc", "DELETE", "api.x.com", "/x", "", &aa(), keys);
+        state.permit_insert("v1", one(&["A"]), far(), None);
+        assert!(!redeem(&state, "v1", one(&["A", "B"])));
+        assert!(redeem(&state, "v1", one(&["A"])));
+    }
+
+    /// An expired permit is absent, at the lookup and when it is spent.
+    #[test]
+    fn an_expired_permit_is_absent() {
+        let state = test_state();
+        unlock_empty(&state, "v1");
+        let key = || bound("agA", "svc", "POST", "h", "/p", "", &aa(), &["K"]);
+        state.permit_insert("v1", key(), 0, None);
+        assert!(!redeem(&state, "v1", key()));
+    }
+
+    /// A scoped ask's `exact` permit is a window: the same request reuses it,
+    /// another bound value misses without disturbing it.
+    #[test]
+    fn an_exact_window_is_reused_not_spent() {
+        let state = test_state();
+        unlock_empty(&state, "v1");
+        let fp = state.snapshot("v1").unwrap().fingerprint;
+        let d = |q: &str| crate::service::scope_digest(&[("q".into(), q.into())]);
+        let key = |q: &str| bound("agA", "svc", "POST", "api.x.com", "/search", &d(q), &ex(), &["K"]);
+        assert!(state.permit_insert("v1", key("alpha"), far(), Some(fp)));
+        assert!(redeem(&state, "v1", key("alpha")));
+        assert!(redeem(&state, "v1", key("alpha")));
+        assert!(!redeem(&state, "v1", key("beta")));
+        assert!(redeem(&state, "v1", key("alpha")));
+    }
+
+    /// Permits live only in Unlocked: none is stored on a locked vault, and a
+    /// lock drops them all.
+    #[test]
+    fn permits_live_only_while_unlocked() {
+        let state = test_state();
+        let key = || bound("agA", "svc", "POST", "h", "/p", "", &aa(), &["K"]);
+        assert!(!state.permit_insert("v1", key(), far(), None), "locked");
+        unlock_empty(&state, "v1");
+        assert!(state.permit_insert("v1", key(), far(), None));
+        state.lock_vault("v1");
+        unlock_empty(&state, "v1");
+        assert!(!redeem(&state, "v1", key()), "the lock dropped it");
+    }
+
+    /// A window is stored only under the policy the op was minted under, and
+    /// a request decided on an older snapshot's policy does not redeem one.
+    #[test]
+    fn a_window_follows_the_policy_fingerprint() {
+        use crate::approval::reuse::{Class, GrantUnit};
+        let state = test_state();
+        unlock_empty(&state, "v1");
+        let before = state.snapshot("v1").unwrap();
+        let key = || PermitKey {
+            of: PermitFor::Unit {
+                agent: "agA".into(),
+                conn: "svc".into(),
+                host: "h".into(),
+                unit: GrantUnit::Floor(Class::Read),
+            },
+            credentials: creds(&["K"]),
+        };
+        assert!(!state.permit_insert("v1", key(), far(), None), "a window needs its fingerprint");
+        assert!(!state.permit_insert("v1", key(), far(), Some([9u8; 32])), "another policy");
+        assert!(state.permit_insert("v1", key(), far(), Some(before.fingerprint)));
+        // A policy edit: the served snapshot's fingerprint changes and the
+        // window ends in the same swap.
+        let mut edited = Snapshot::default();
+        edited.inputs.policy.timeout = Some(60);
+        state.unlock_vault("v1".into(), edited, zeroize::Zeroizing::new(Vec::new()));
+        assert!(!redeem(&state, "v1", key()));
+        let after = state.snapshot("v1").unwrap();
+        assert!(state.permit_insert("v1", key(), far(), Some(after.fingerprint)));
+        // A request still holding the pre-edit snapshot misses the window.
+        let stale = state.authorize("v1", before, BTreeMap::new(), Some(key()));
+        assert!(matches!(stale, Err(Unauthorized::NoPermit)));
+        assert!(redeem(&state, "v1", key()));
+    }
+
+    /// A unit window is keyed by the decision a later request's own policy
+    /// re-run yields: the same rule and class, or the same floor class; the
+    /// agent and host are part of it.
+    #[test]
+    fn a_unit_window_matches_the_rerun_decision() {
         use crate::core::policy::{AccessLevel, ConnectionPolicy, Levels, Policy, RuleConfig};
         let mut rules = std::collections::HashMap::new();
         rules.insert(
@@ -3427,65 +2912,83 @@ mod tests {
         );
         let state = test_state();
         let vid = "v-ledger";
-        let cache = SecretsCache {
-            policy,
-            ..Default::default()
-        };
-        state.unlock_vault(vid.to_string(), cache, zeroize::Zeroizing::new(Vec::new()));
-        let decide = |method: &str, path: &str, amount: Option<&str>| {
+        let mut snapshot = Snapshot::default();
+        snapshot.inputs.policy = policy;
+        state.unlock_vault(vid.to_string(), snapshot, zeroize::Zeroizing::new(Vec::new()));
+        let fp = state.snapshot(vid).unwrap().fingerprint;
+        let key_of = |agent: &str, method: &str, path: &str, host: &str, amount: Option<&str>| {
             let mut vars = crate::core::policy::VarMap::new();
             if let Some(a) = amount {
                 vars.insert("amount".into(), serde_json::from_str(a).unwrap());
             }
-            state
-                .evaluate_request_decision(
-                    vid,
-                    "agA",
-                    "shop",
-                    "shop",
-                    method,
-                    path,
-                    "api.shop.com",
-                    None,
-                    &vars,
-                    false,
-                )
+            let inputs = state.snapshot(vid).unwrap().inputs.clone();
+            let (level, by, _) =
+                state.evaluate_request_decision(&inputs, "shop", "shop", method, path, None, &vars);
+            PermitKey::of(level, &by, false, agent, "shop", method, host, path, "", creds(&["K"]))
                 .unwrap()
-                .0
         };
-        state.record_ask_grant(
-            vid,
-            "agA",
-            "shop",
-            "api.shop.com",
-            GrantUnit::Rule("pay".into(), Class::Write),
-            60,
-        );
-        assert_eq!(decide("POST", "/pay", Some("50")), AccessLevel::Allow);
-        // Same path, but `when` now picks the stricter rule: it asks.
-        assert_eq!(decide("POST", "/pay", Some("150")), AccessLevel::AskAlways);
-        // The floor is a different unit.
-        assert_eq!(decide("POST", "/other", None), AccessLevel::Ask);
+        let approve = |key: PermitKey| assert!(state.permit_insert(vid, key, far(), Some(fp)));
+        approve(key_of("agA", "POST", "/pay", "api.shop.com", Some("50")));
+        assert!(redeem(&state, vid, key_of("agA", "POST", "/pay", "api.shop.com", Some("70"))));
+        // Same path, but `when` now picks the stricter rule: not this unit.
+        assert!(!redeem(&state, vid, key_of("agA", "POST", "/pay", "api.shop.com", Some("150"))));
+        // The floor is a different unit; another agent or host misses.
+        assert!(!redeem(&state, vid, key_of("agA", "POST", "/other", "api.shop.com", None)));
+        assert!(!redeem(&state, vid, key_of("agB", "POST", "/pay", "api.shop.com", Some("50"))));
+        assert!(!redeem(&state, vid, key_of("agA", "POST", "/pay", "evil.shop.com", Some("50"))));
 
-        state.record_ask_grant(
-            vid,
+        approve(key_of("agA", "GET", "/a", "api.shop.com", None));
+        assert!(redeem(&state, vid, key_of("agA", "GET", "/b", "API.shop.com", None)));
+        assert!(
+            !redeem(&state, vid, key_of("agA", "DELETE", "/a", "api.shop.com", None)),
+            "read never serves a write"
+        );
+    }
+
+    /// A path that declares a `[requests]` shape is keyed per request (an
+    /// `exact` window bound to its values), never by its unit: approving one
+    /// value-less scoped ask opens nothing another value could ride.
+    #[test]
+    fn a_scoped_path_is_keyed_by_its_request() {
+        use crate::core::policy::{AccessLevel, DecidedBy};
+        let by = DecidedBy::Rule {
+            id: Some("purchase".into()),
+            label: None,
+        };
+        let key = |scoped: bool, digest: &str| {
+            PermitKey::of(
+                AccessLevel::Ask,
+                &by,
+                scoped,
+                "agA",
+                "shop",
+                "POST",
+                "api.shop.com",
+                "/buy",
+                digest,
+                creds(&["K"]),
+            )
+            .unwrap()
+        };
+        assert!(matches!(key(false, "").of, PermitFor::Unit { .. }));
+        let scoped = key(true, "");
+        assert!(matches!(&scoped.of, PermitFor::Request(k) if !k.tier.single_use()));
+        assert_ne!(scoped, key(true, "d80"));
+        assert_ne!(scoped, key(false, ""));
+        // Allow and deny mint nothing.
+        assert!(PermitKey::of(
+            AccessLevel::Allow,
+            &by,
+            false,
             "agA",
             "shop",
-            "api.shop.com",
-            GrantUnit::Floor(Class::Read),
-            300,
-        );
-        assert_eq!(decide("GET", "/a", None), AccessLevel::Allow);
-        assert_eq!(
-            decide("DELETE", "/a", None),
-            AccessLevel::Ask,
-            "read never serves a write"
-        );
-        assert_eq!(
-            decide("PUT", "/a", None),
-            AccessLevel::Ask,
-            "read never serves a write"
-        );
+            "POST",
+            "h",
+            "/buy",
+            "",
+            creds(&["K"])
+        )
+        .is_none());
     }
 
     /// A vault (`aux.services`) definition's policy only tightens: its deny
@@ -3518,37 +3021,29 @@ level = "allow"
         let state = test_state();
         let (custom, skipped) = crate::service::vault_custom_services(&aux, true, &state.services);
         assert!(skipped.is_empty(), "{skipped:?}");
-        let unlock = |policy: Policy| {
-            let cache = SecretsCache {
-                policy,
-                custom_services: custom.clone(),
-                ..Default::default()
+        let decide = |policy: &Policy, m: &str, p: &str| {
+            let inputs = PolicyInputs {
+                policy: policy.clone(),
+                custom: custom.clone(),
             };
-            state.unlock_vault("v1".into(), cache, zeroize::Zeroizing::new(Vec::new()));
-        };
-        let decide = |m: &str, p: &str| {
             state
-                .evaluate_request_policy(
-                    "v1",
-                    "ag",
+                .evaluate_request_decision(
+                    &inputs,
                     "acme",
                     "acme",
                     m,
                     p,
-                    "api.acme.dev",
                     None,
                     &crate::core::policy::VarMap::new(),
-                    false,
                 )
-                .unwrap()
                 .0
         };
         // Global floor allow: the deny rule and the write default tighten;
         // the definition's allow rule and read default change nothing.
-        unlock(Policy::default());
-        assert_eq!(decide("DELETE", "/v1/things"), AccessLevel::Deny);
-        assert_eq!(decide("POST", "/v1/pay"), AccessLevel::Ask);
-        assert_eq!(decide("GET", "/v1/things"), AccessLevel::Allow);
+        let open = Policy::default();
+        assert_eq!(decide(&open, "DELETE", "/v1/things"), AccessLevel::Deny);
+        assert_eq!(decide(&open, "POST", "/v1/pay"), AccessLevel::Ask);
+        assert_eq!(decide(&open, "GET", "/v1/things"), AccessLevel::Allow);
         // The owner's stricter floor is never loosened by the definition.
         let mut strict = Policy::default();
         strict.default = Some(Levels {
@@ -3556,10 +3051,9 @@ level = "allow"
             write: Some(AccessLevel::AskAlways),
             ttl: None,
         });
-        unlock(strict);
-        assert_eq!(decide("POST", "/v1/pay"), AccessLevel::AskAlways);
-        assert_eq!(decide("GET", "/v1/things"), AccessLevel::AskAlways);
-        assert_eq!(decide("DELETE", "/v1/things"), AccessLevel::Deny);
+        assert_eq!(decide(&strict, "POST", "/v1/pay"), AccessLevel::AskAlways);
+        assert_eq!(decide(&strict, "GET", "/v1/things"), AccessLevel::AskAlways);
+        assert_eq!(decide(&strict, "DELETE", "/v1/things"), AccessLevel::Deny);
         // The owner's own per-connection default is consent to loosen.
         let mut owner = Policy::default();
         owner.connections.insert(
@@ -3573,9 +3067,8 @@ level = "allow"
                 rules: Default::default(),
             },
         );
-        unlock(owner);
-        assert_eq!(decide("POST", "/v1/pay"), AccessLevel::Allow);
-        assert_eq!(decide("DELETE", "/v1/things"), AccessLevel::Deny);
+        assert_eq!(decide(&owner, "POST", "/v1/pay"), AccessLevel::Allow);
+        assert_eq!(decide(&owner, "DELETE", "/v1/things"), AccessLevel::Deny);
     }
 
     /// A connection's own rule edit that decides a scoped request on a field
@@ -3609,7 +3102,8 @@ scope = ["amount"]
             level: Some(AccessLevel::Ask),
             ..Default::default()
         };
-        let with_rules = |rules: Vec<(&str, RuleConfig)>| {
+        let state = test_state();
+        let problem = |rules: Vec<(&str, RuleConfig)>, conn: &str| {
             let mut p = Policy::default();
             p.connections.insert(
                 "shop".to_string(),
@@ -3618,140 +3112,70 @@ scope = ["amount"]
                     rules: rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
                 },
             );
-            let state = test_state();
-            let cache = SecretsCache {
+            let inputs = PolicyInputs {
                 policy: p,
-                ..Default::default()
+                custom: Default::default(),
             };
-            state.unlock_vault("v1".into(), cache, zeroize::Zeroizing::new(Vec::new()));
-            state
+            state.connection_rule_problem(&inputs, conn, "shop", "POST", "/buy", &rs)
         };
-        let state = with_rules(vec![("small", rule(Some("vars.amount < 10"), None))]);
         assert_eq!(
-            state.connection_rule_problem("v1", "shop", "shop", "POST", "/buy", &rs),
+            problem(vec![("small", rule(Some("vars.amount < 10"), None))], "shop"),
             None
         );
-        let state = with_rules(vec![("forced", rule(Some("vars.force == 1"), None))]);
-        let e = state
-            .connection_rule_problem("v1", "shop", "shop", "POST", "/buy", &rs)
-            .expect("unbound deciding field");
+        let forced = vec![("forced", rule(Some("vars.force == 1"), None))];
+        let e = problem(forced.clone(), "shop").expect("unbound deciding field");
         assert!(e.contains("'forced'") && e.contains("vars.force"), "{e}");
         // Another connection of the vault has no such edit.
-        assert_eq!(
-            state.connection_rule_problem("v1", "shop_2", "shop", "POST", "/buy", &rs),
-            None
-        );
-        let state = with_rules(vec![("bodyish", rule(None, Some("gift")))]);
-        assert!(state
-            .connection_rule_problem("v1", "shop", "shop", "POST", "/buy", &rs)
-            .is_some());
+        assert_eq!(problem(forced, "shop_2"), None);
+        assert!(problem(vec![("bodyish", rule(None, Some("gift")))], "shop").is_some());
         // A protective deny on the body mints no approval: not refused.
-        let state = with_rules(vec![(
-            "no_gifts",
-            RuleConfig {
-                level: Some(AccessLevel::Deny),
-                ..rule(None, Some("gift"))
-            },
-        )]);
-        assert_eq!(
-            state.connection_rule_problem("v1", "shop", "shop", "POST", "/buy", &rs),
-            None
-        );
-        // Locked: nothing to report (the request fails as locked anyway).
-        assert_eq!(
-            state.connection_rule_problem("v-none", "shop", "shop", "POST", "/buy", &rs),
-            None
-        );
+        let no_gifts = RuleConfig {
+            level: Some(AccessLevel::Deny),
+            ..rule(None, Some("gift"))
+        };
+        assert_eq!(problem(vec![("no_gifts", no_gifts)], "shop"), None);
     }
 
-    // A path that declares a `[requests]` scope shape must bind its approval
-    // per-value (op_grants) and NEVER ride the coarse connection-window
-    // downgrade — otherwise approving one value-less (empty-body) ask would let
-    // any later value ride it (approve a blank purchase, then spend anything).
+    /// The policy fingerprint changes with any policy input and with nothing
+    /// else: a vault definition counts by its policy and its `[requests]`
+    /// shapes only.
     #[test]
-    fn scoped_path_never_rides_the_coarse_window() {
-        use crate::core::policy::{AccessLevel, ConnectionPolicy, Policy, RuleConfig};
-
-        let mut rules = std::collections::HashMap::new();
-        rules.insert(
-            "purchase".to_string(),
-            RuleConfig {
-                match_pattern: Some("POST /buy".to_string()),
-                level: Some(AccessLevel::Ask),
-                ttl: Some(60),
-                ..Default::default()
-            },
-        );
-        let mut policy = Policy::default();
-        policy.connections.insert(
-            "shop".to_string(),
-            ConnectionPolicy {
-                default: None,
-                rules,
-            },
-        );
-        let state = test_state();
-        let vid = "v-scoped";
-        let mut cache = SecretsCache::default();
-        cache.policy = policy;
-        state.unlock_vault(vid.to_string(), cache, zeroize::Zeroizing::new(Vec::new()));
-
-        // A ledger entry for the rule exists (as an unscoped caller's
-        // approval would write).
-        state.record_ask_grant(
-            vid,
-            "agA",
-            "shop",
-            "api.shop.com",
-            crate::approval::reuse::GrantUnit::Rule(
-                "purchase".into(),
-                crate::approval::reuse::Class::Write,
-            ),
-            60,
-        );
-
-        // A scope-less caller still fast-paths — the legitimate coarse window.
-        let (lvl, _, _) = state
-            .evaluate_request_policy(
-                vid,
-                "agA",
-                "shop",
-                "shop",
-                "POST",
-                "/buy",
-                "api.shop.com",
-                None,
-                &crate::core::policy::VarMap::new(),
-                false,
-            )
-            .unwrap();
+    fn the_policy_fingerprint_covers_exactly_the_policy_inputs() {
+        use crate::core::policy::{AccessLevel, Levels, Policy};
+        let def = |hosts: &str, write: &str, scope: &str| {
+            let src = format!(
+                "[service]\nid = \"acme\"\nname = \"Acme\"\nhosts = [{hosts}]\nsecrets = [\"ACME_KEY\"]\n\
+                 [policy.levels]\nwrite = \"{write}\"\n\
+                 [requests.pay]\nmatch = \"POST /pay\"\nvars.amount = \"/amount\"\nvars.to = \"/to\"\nscope = [{scope}]\n"
+            );
+            crate::service::gate::admit_toml(&src).unwrap()
+        };
+        let with = |policy: Policy, d: crate::service::ServiceDef| {
+            PolicyInputs {
+                policy,
+                custom: [("acme".to_string(), d)].into_iter().collect(),
+            }
+            .fingerprint()
+        };
+        let base = with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\""));
+        assert_eq!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\"")));
         assert_eq!(
-            lvl,
-            AccessLevel::Allow,
-            "an unscoped rule still uses the window"
+            base,
+            with(Policy::default(), def("\"api.acme.dev\", \"x.acme.dev\"", "ask", "\"amount\"")),
+            "a definition's hosts are not policy"
         );
-
-        // A SCOPED path must NOT ride that value-blind window — it re-asks so its
-        // per-value op_grant binds the amount/merchant.
-        let (lvl, _, _) = state
-            .evaluate_request_policy(
-                vid,
-                "agA",
-                "shop",
-                "shop",
-                "POST",
-                "/buy",
-                "api.shop.com",
-                None,
-                &crate::core::policy::VarMap::new(),
-                true,
-            )
-            .unwrap();
-        assert_eq!(
-            lvl,
-            AccessLevel::Ask,
-            "a scoped path must never fast-path via the coarse window"
-        );
+        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask-always", "\"amount\"")));
+        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\", \"to\"")));
+        let mut timeout = Policy::default();
+        timeout.timeout = Some(60);
+        assert_ne!(base, with(timeout, def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        let mut floor = Policy::default();
+        floor.default = Some(Levels {
+            read: Some(AccessLevel::Ask),
+            write: None,
+            ttl: None,
+        });
+        assert_ne!(base, with(floor, def("\"api.acme.dev\"", "ask", "\"amount\"")));
     }
 }
 
@@ -3851,14 +3275,9 @@ mod install_tests {
         state.install(V, InstallKey::Unlock(zeroize::Zeroizing::new(key.to_vec())))
     }
 
-    /// The secret names the served cache holds (`None`: locked).
+    /// The secret names the served snapshot holds (`None`: locked).
     fn served_names(state: &AppState) -> Option<std::collections::BTreeSet<String>> {
-        let runtime = state.runtime_if_present(V)?;
-        let st = runtime.state.lock().unwrap();
-        match &*st {
-            VaultState::Unlocked { cache, .. } => Some(cache.native_keys.iter().cloned().collect()),
-            VaultState::Locked => None,
-        }
+        Some(state.snapshot(V)?.native_names().cloned().collect())
     }
 
     fn names(xs: &[&str]) -> Option<std::collections::BTreeSet<String>> {
@@ -3882,7 +3301,7 @@ mod install_tests {
         assert!(!state.is_vault_locked(V));
         assert!(state.is_vault_key_changed(V));
         assert_eq!(served_names(&state), names(&["FOO"]));
-        assert_eq!(state.cache_lookup(V, "foo"), Some(b"v1".to_vec()));
+        assert_eq!(state.served_native(V, "FOO"), Some(b"v1".to_vec()));
     }
 
     /// Only the vault-unlock op unlocks: a refresh or an approved write's
@@ -3899,7 +3318,7 @@ mod install_tests {
         assert!(!state.is_vault_locked(V));
     }
 
-    /// A park that lands while the vault-unlock install builds its cache wins:
+    /// A park that lands while the vault-unlock install builds its snapshot wins:
     /// the gate is checked under the state lock, at the swap.
     #[test]
     fn a_park_racing_an_unlock_leaves_the_vault_locked() {
@@ -3914,7 +3333,7 @@ mod install_tests {
         assert!(state.cloned_state_key(V).is_none(), "no K held");
     }
 
-    /// A lock that lands while a refresh builds its cache wins: the refresh
+    /// A lock that lands while a refresh builds its snapshot wins: the refresh
     /// never re-unlocks the vault.
     #[test]
     fn a_refresh_racing_a_lock_leaves_the_vault_locked() {
@@ -3957,12 +3376,13 @@ mod install_tests {
         assert!(state.install(V, InstallKey::Held).served());
         let b = newer.lock().unwrap().take().unwrap().join().unwrap();
         assert!(b.served());
-        assert_eq!(state.cache_lookup(V, "foo"), Some(b"v2".to_vec()));
+        assert_eq!(state.served_native(V, "FOO"), Some(b"v2".to_vec()));
     }
 
     /// A rotated refresh token stored while an install that read the store
-    /// earlier builds its cache: the rotation's cache edit waits for that
-    /// install's swap and lands on its cache, so the new token is served.
+    /// earlier builds its snapshot: the rotation's store write and patch wait
+    /// for that install's swap and land on its snapshot, so the new token is
+    /// served.
     #[test]
     fn a_rotation_stored_during_an_install_is_served() {
         let (_dir, state) = install_state();
@@ -3983,15 +3403,15 @@ mod install_tests {
                 let _ = done.send(());
             }));
             let waited = finished.recv_timeout(std::time::Duration::from_millis(300));
-            assert!(waited.is_err(), "the cache edit waits for the swap");
+            assert!(waited.is_err(), "the rotation waits for the swap");
         });
         assert!(state.install(V, InstallKey::Held).served());
         rotation.lock().unwrap().take().unwrap().join().unwrap();
-        assert_eq!(state.cache_lookup(V, "foo"), Some(b"rt-2".to_vec()));
+        assert_eq!(state.served_native(V, "FOO"), Some(b"rt-2".to_vec()));
     }
 
     /// A pull that adds a row this key cannot read (a newer member's, a
-    /// re-key not caught up with) is served: no row the served cache read
+    /// re-key not caught up with) is served: no row the served snapshot read
     /// is lost. The new row is noted as a key change.
     #[test]
     fn a_pull_adding_an_unreadable_row_is_served() {
@@ -4029,9 +3449,9 @@ mod install_tests {
         assert_eq!(served_names(&state), names(&["BAR", "FOO"]));
     }
 
-    /// A row the served cache read that no longer reads under the held key
+    /// A row the served snapshot read that no longer reads under the held key
     /// (re-sealed under a key this device lacks): the install is refused and
-    /// the served cache stays; the write is stored and says it is served
+    /// the served snapshot stays; the write is stored and says it is served
     /// after `sprott unlock`.
     #[tokio::test]
     async fn a_readable_row_turning_unreadable_refuses_the_install() {
@@ -4046,9 +3466,9 @@ mod install_tests {
         assert_eq!(
             served_names(&state),
             names(&["FOO"]),
-            "the served cache stays"
+            "the served snapshot stays"
         );
-        assert_eq!(state.cache_lookup(V, "foo"), Some(b"v1".to_vec()));
+        assert_eq!(state.served_native(V, "FOO"), Some(b"v1".to_vec()));
         assert!(state.is_vault_key_changed(V));
         let stored = crate::server::handlers::metadata::fold_store_with_key(&state, V, &K)
             .unwrap()

@@ -6664,7 +6664,7 @@ mod peritem_tests {
         .unwrap();
         state.unlock_vault(
             vault.into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(vec![7; 32]),
         );
         state.record_cloud_contact(vault);
@@ -6716,7 +6716,7 @@ mod peritem_tests {
         assert!(state.is_vault_locked(vault));
         state.unlock_vault(
             vault.into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(vec![8; 32]),
         );
         assert!(state.is_vault_locked(vault));

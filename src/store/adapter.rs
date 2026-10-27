@@ -27,10 +27,13 @@ pub type AdapterResult<T> = std::result::Result<T, AdapterError>;
 pub enum Adapter {
     NativeSecrets(NativeSecretsAdapter),
     Gcp(GcpSecretManagerAdapter),
+    /// Tests: an external store held in memory ([`memory`]).
+    #[cfg(test)]
+    Memory(std::sync::Arc<memory::MemoryStore>),
 }
 
-/// The session cache (`SecretsCache`) derives Debug; never print adapter
-/// internals (credentials) — the kind tag is all a debug dump may show.
+/// The snapshot prints its stores; never print adapter internals
+/// (credentials) — the kind tag is all a debug dump may show.
 impl std::fmt::Debug for Adapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Adapter")
@@ -44,12 +47,16 @@ impl Adapter {
         match self {
             Adapter::NativeSecrets(_) => "native-secrets",
             Adapter::Gcp(_) => "gcp-secret-manager",
+            #[cfg(test)]
+            Adapter::Memory(_) => memory::KIND,
         }
     }
 
     pub fn category(&self) -> Category {
         match self {
             Adapter::NativeSecrets(_) | Adapter::Gcp(_) => Category::Value,
+            #[cfg(test)]
+            Adapter::Memory(_) => Category::Value,
         }
     }
 
@@ -60,6 +67,8 @@ impl Adapter {
         match self {
             Adapter::NativeSecrets(a) => Ok(a.resolve(name)),
             Adapter::Gcp(a) => a.resolve(name).await,
+            #[cfg(test)]
+            Adapter::Memory(m) => m.resolve(name),
         }
     }
 
@@ -69,6 +78,8 @@ impl Adapter {
         match self {
             Adapter::NativeSecrets(a) => Ok(a.list()),
             Adapter::Gcp(a) => a.list().await,
+            #[cfg(test)]
+            Adapter::Memory(m) => m.list(),
         }
     }
 
@@ -77,6 +88,8 @@ impl Adapter {
         match self {
             Adapter::NativeSecrets(_) => Ok(()),
             Adapter::Gcp(a) => a.health().await,
+            #[cfg(test)]
+            Adapter::Memory(_) => Ok(()),
         }
     }
 }
@@ -132,12 +145,85 @@ pub fn build_adapter(
                 project_id, sa_json,
             )?))
         }
+        #[cfg(test)]
+        memory::KIND => Ok(Adapter::Memory(memory::store(
+            store
+                .extra
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(store_id),
+        ))),
         // Future kinds (1password-sa, aws-secrets-manager) aren't wired through
-        // this dispatcher yet — they live in store_order but are skipped during
-        // value resolution.
+        // this dispatcher yet. A configured store of such a kind is not
+        // skipped: a KEY it precedes in store_order answers
+        // `store_unavailable` (`crate::snapshot::StoreRef::Unavailable`).
         other => Err(AdapterError::Config(format!(
             "unsupported store kind '{}' (have: native-secrets, gcp-secret-manager)",
             other
         ))),
+    }
+}
+
+/// Tests: an external store held in memory, shared by name across adapter
+/// builds (so a test can change it, count its calls, or break it, while a
+/// snapshot holds an adapter for it).
+#[cfg(test)]
+pub mod memory {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::{AdapterError, AdapterResult};
+
+    pub const KIND: &str = "test-memory";
+
+    #[derive(Default)]
+    pub struct MemoryStore {
+        pub values: Mutex<BTreeMap<String, Vec<u8>>>,
+        /// `resolve` calls so far (the network calls a real store would make).
+        pub resolves: AtomicUsize,
+        /// Every call fails, as a store in an outage.
+        pub down: AtomicBool,
+    }
+
+    impl MemoryStore {
+        pub fn set(&self, key: &str, value: &str) {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.as_bytes().to_vec());
+        }
+
+        pub fn calls(&self) -> usize {
+            self.resolves.load(Ordering::SeqCst)
+        }
+
+        pub(super) fn resolve(&self, name: &str) -> AdapterResult<Option<Vec<u8>>> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            if self.down.load(Ordering::SeqCst) {
+                return Err(AdapterError::Backend("store down".into()));
+            }
+            Ok(self.values.lock().unwrap().get(name).cloned())
+        }
+
+        pub(super) fn list(&self) -> AdapterResult<Vec<String>> {
+            if self.down.load(Ordering::SeqCst) {
+                return Err(AdapterError::Backend("store down".into()));
+            }
+            Ok(self.values.lock().unwrap().keys().cloned().collect())
+        }
+    }
+
+    static STORES: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<MemoryStore>>>> =
+        once_cell::sync::Lazy::new(Default::default);
+
+    /// The store named `name`, made on first use.
+    pub fn store(name: &str) -> Arc<MemoryStore> {
+        STORES
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .clone()
     }
 }

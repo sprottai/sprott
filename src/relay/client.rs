@@ -742,6 +742,8 @@ mod tests {
             decided_by: crate::core::policy::DecidedBy::Floor,
             ttl_seconds: 60,
             host: Some("h".into()),
+            credentials: None,
+            policy_fp: None,
         };
         let (a, b) = {
             let mut s = state.approvals.lock().unwrap();

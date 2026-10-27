@@ -226,6 +226,9 @@ pub(crate) fn held_lines(state: &AppState, vault_id: &str) -> Vec<String> {
     if state.is_vault_key_changed(vault_id) {
         out.push(crate::error::VAULT_KEY_CHANGED_STATUS_MSG.to_string());
     }
+    if state.is_vault_behind(vault_id) {
+        out.push(crate::error::VAULT_BEHIND_STATUS_MSG.to_string());
+    }
     let pv = state
         .vaults
         .per_item_path(vault_id)
@@ -417,7 +420,7 @@ fn redeemed_zeroize_marker() -> std::marker::PhantomData<WebAuthn> {
 //      we get `K` WITHOUT needing a body ciphertext.
 //   2. `PerItemVault::fold_view(K)` — unseal every item row → the same
 //      `VaultPlaintextView` the whole-blob path produced, so every downstream
-//      consumer (bootstrap_cache_from_view, resolve_value_async, Export map)
+//      consumer (the snapshot build, resolve_value_async, Export map)
 //      is byte-for-byte unchanged.
 // ─────────────────────────────────────────────────────────────────────────
 

@@ -193,8 +193,11 @@ fn mint(state: &AppState, scope: Value) -> std::result::Result<Value, String> {
 }
 
 fn unlock_with(state: &AppState, view: &VaultPlaintextView) {
-    let cache = crate::state::SecretsCache {
-        policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+    let cache = crate::snapshot::Snapshot {
+        inputs: crate::snapshot::PolicyInputs {
+            policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+            custom: Default::default(),
+        },
         service_entries: view.aux.services.clone(),
         connections: view
             .aux
@@ -493,8 +496,11 @@ fn state_with_store(
     crate::storage::sealed_vault::write_per_item_atomic(&path, pv).unwrap();
     let view = crate::server::handlers::metadata::decrypt_vault_view_peritem_with_key(k, pv, vault)
         .unwrap();
-    let cache = crate::state::SecretsCache {
-        policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+    let cache = crate::snapshot::Snapshot {
+        inputs: crate::snapshot::PolicyInputs {
+            policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+            custom: Default::default(),
+        },
         service_entries: view.aux.services.clone(),
         // As an unlock fills it: the requests the daemon handles after a sync.
         service_requests: view.aux.service_requests.keys().cloned().collect(),

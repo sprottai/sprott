@@ -11,7 +11,7 @@
 //! request with no phantom is forwarded untouched — the phantom is the only
 //! injection trigger.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -390,7 +390,10 @@ impl BrokerHandler {
         // ledger admits (no later revoke), on a vault whose authorized-agents
         // table lists it, and only while this device itself serves. Localhost
         // is not a trust boundary; an api key alone is no agent credential.
-        {
+        // The vault's snapshot is taken in the same state-lock section as the
+        // lock check and the table is read from it: every later read of vault
+        // content in this request comes from this one snapshot.
+        let snapshot = {
             use crate::principal_ledger::AgentRefusal;
             match crate::principal_ledger::authorize_agent(
                 &self.state,
@@ -399,7 +402,7 @@ impl BrokerHandler {
             )
             .await
             {
-                Ok(_) => {}
+                Ok((_, snapshot)) => snapshot,
                 Err(AgentRefusal::Device(e)) => {
                     let (code, msg) = e.code();
                     return err_response(code, &msg).into();
@@ -439,36 +442,31 @@ impl BrokerHandler {
                     return err_response(ScCode::AgentNotAuthorized, &hint).into();
                 }
             }
-        }
-        let vault_id = match self.vid.clone() {
-            Some(v) => v,
-            // Unreachable in practice: `should_intercept` requires a vid to MITM,
-            // and a phantom over plain HTTP is refused above. Fail closed rather
-            // than guess a vault.
-            None => {
-                return err_response(
-                    ScCode::NoVault,
-                    "no vault bound. Route credential traffic with `sprott run`",
-                )
-                .into()
-            }
         };
-        if let Some(error) = self.state.vault_gone_error(&vault_id) {
+        // Unreachable in practice: `should_intercept` requires a vid to MITM,
+        // and a phantom over plain HTTP is refused above. Fail closed rather
+        // than guess a vault.
+        let (Some(vault_id), Some(snapshot)) = (self.vid.clone(), snapshot) else {
+            return err_response(
+                ScCode::NoVault,
+                "no vault bound. Route credential traffic with `sprott run`",
+            )
+            .into();
+        };
+        let state = self.state.clone();
+        if let Some(error) = state.vault_gone_error(&vault_id) {
             let (code, message) = error.code();
             return err_response(code, &message).into();
         }
         // Daemon too old for this vault's format (cloud returned SC_UPGRADE_REQUIRED
         // for its sync, design 甲) → fail LOUDLY so the agent runs `sc upgrade`,
         // instead of a silent parked-sync mystery the agent works around or calls a bug.
-        if self.state.is_vault_upgrade_required(&vault_id) {
+        if state.is_vault_upgrade_required(&vault_id) {
             return err_response(
                 ScCode::UpgradeRequired,
                 "Sprott needs an update to use this vault. Run `sprott upgrade`",
             )
             .into();
-        }
-        if self.state.is_vault_locked(&vault_id) {
-            return err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG).into();
         }
 
         // ── reach mask (team §8.1) ───────────────────────────────────────────
@@ -476,11 +474,14 @@ impl BrokerHandler {
         // `locked` in the registry, and a named use gets THIS explicit,
         // actionable refusal — never a silent 404, never a policy prompt.
         {
-            // Mask lookup key = the agent's attribution id (resolved `ag_` for a
-            // hop-A PoP agent — table+mask are ag_-keyed since §11 — else the
-            // legacy api-key prefix for the dual-auth Basic path).
+            // Mask lookup key = the agent's attribution id (the resolved `ag_`;
+            // table and mask are ag_-keyed since §11).
             let mask_agent = self.agent_attribution().unwrap_or_default();
-            if self.state.agent_mask_allows(&vault_id, &mask_agent, &conn) == Some(false) {
+            let allowed = snapshot
+                .agents
+                .get(&mask_agent)
+                .map(|e| e.connections.allows(&conn));
+            if allowed == Some(false) {
                 return err_response(
                     ScCode::MaskNotEnabled,
                     &format!(
@@ -499,23 +500,21 @@ impl BrokerHandler {
         // `NoopHooks` → no gate, so a personal vault is never leased. The overlay
         // impl reads `vault_is_shared` + `cloud_contact_age_secs` (both kept as
         // neutral core bookkeeping) to enforce the offline lease.
-        if let Some(denial) = self.state.team.serve_gate(self.state.as_ref(), &vault_id) {
+        if let Some(denial) = state.team.serve_gate(state.as_ref(), &vault_id) {
             return err_response(denial.code, &denial.message).into();
         }
 
         // ── resolve the connection ───────────────────────────────────────────
-        // Resolve the connection record. An explicit aux.connections entry wins;
-        // otherwise, if <conn> names a known service (compiled or custom) we
-        // synthesize its DEFAULT connection (conn == service, hosts derived from
-        // the service) so a default-connection phantom `__sprott__<service>__`
-        // resolves and the resident default-connection credential — bootstrapped
-        // into the cache under the service id — is reachable. Only a genuinely
-        // unknown id fails closed.
+        // An explicit aux.connections entry wins; otherwise, if <conn> names a
+        // known service (compiled or custom) we synthesize its DEFAULT
+        // connection (conn == service, hosts derived from the service) so a
+        // default-connection phantom `__sprott__<service>__` resolves. Only a
+        // genuinely unknown id fails closed.
         // A service installed from a source loads only while the vault's
         // owner allows installed services: a connection naming one while they
         // are off is refused by name, not as unknown.
         let installed_off = |s: &str| {
-            self.state.installed_service_off(&vault_id, s).then(|| {
+            snapshot.installed_service_off(s).then(|| {
                 err_response(
                     ScCode::PolicyDenied,
                     &format!(
@@ -526,83 +525,54 @@ impl BrokerHandler {
                 )
             })
         };
-        let conn_rec = match self.state.connection_snapshot(&vault_id, &conn) {
-            Some(rec) => rec,
+        let conn_rec = match snapshot.connections.get(&conn) {
+            Some(rec) => rec.clone(),
             None => {
                 if let Some(r) = installed_off(&conn) {
                     return r.into();
                 }
-                let known_service = self.state.services.get(&conn).is_some()
-                    || self.state.custom_service(&vault_id, &conn).is_some();
+                let known_service = state.services.get(&conn).is_some()
+                    || snapshot.inputs.custom.contains_key(&conn);
                 if known_service {
                     crate::storage::plaintext::Connection {
-                        name: None,
                         service: Some(conn.clone()),
-                        hosts: None,
-                        secrets: None,
-                        keys: None,
-                        written: None,
+                        ..Default::default()
                     }
                 } else {
-                    let (code, message) = unknown_connection_refusal(
-                        self.state.is_vault_key_changed(&vault_id),
-                        &conn,
-                    );
+                    let (code, message) =
+                        unknown_connection_refusal(state.is_vault_key_changed(&vault_id), &conn);
                     return err_response(code, &message).into();
                 }
             }
         };
-        let def = conn_rec.service.as_deref().and_then(|s| {
-            // custom-FIRST precedence (the SSoT for this rule): a vault-authored
-            // def (aux.services) shadows a same-id registry service, so shipping
-            // a first-party service NEVER silently repoints a user's existing
-            // connection (their `gcp` that is really github keeps working). The
-            // registry def applies only where no custom def exists — a fresh,
-            // opt-in connection, gated by the create-time duplicate-id check.
-            self.state
-                .custom_service(&vault_id, s)
-                .or_else(|| self.state.services.get(s).cloned())
-        });
+        // custom-FIRST precedence (the SSoT for this rule): a vault-authored
+        // def (aux.services) shadows a same-id registry service, so shipping a
+        // first-party service NEVER silently repoints a user's existing
+        // connection (their `gcp` that is really github keeps working). The
+        // registry def applies only where no custom def exists — a fresh,
+        // opt-in connection, gated by the create-time duplicate-id check.
+        let def = conn_rec
+            .service
+            .as_deref()
+            .and_then(|s| snapshot.inputs.def(&state.services, s));
         if def.is_none() {
             if let Some(r) = conn_rec.service.as_deref().and_then(installed_off) {
                 return r.into();
             }
         }
-        // Some(input KEY) ⇔ this connection's wire credential is MINTED (oauth2
-        // access token, snaplii JWT). The key rides along so the resolver can
-        // answer a phantom naming the mint's INPUT secret (refresh token /
-        // api key) with the precise refusal (never-injectable), not a generic
-        // role error.
-        let mint_input = def.as_ref().and_then(|d| d.mint_input_role());
-        // The vault role that backs this connection's credential (oauth refresh
-        // key, else first declared secret), resolved from the SAME custom-aware
-        // `def` above — NOT re-derived registry-only downstream. This is the op
-        // `target` a captive-portal (ask) approval resolves + stashes, so a
-        // custom `[oauth2]` service (registry miss) still names its real secret
-        // instead of falling back to the connection id.
-        //
-        // No def (raw connection): the request's own phantom names the role. A
-        // role-qualified `__sprott__<conn>__<role>__` on a multi-secret raw
-        // connection MUST flow into the op target — without it the approval
-        // resolved a secret named after the CONNECTION, 400'd at apply, and the
-        // relay then recorded the op rejected: the user's real approval read
-        // back as a human "no". Several roles in one request: the first is the
-        // stashed primary (the same order substitution scans).
-        let op_role = def
-            .as_ref()
-            .and_then(|d| d.env_role())
-            .or_else(|| phantoms.iter().find_map(|p| p.role.clone()));
-        // The service id policy/mint use; for a raw connection there is none so
-        // the conn id stands in (registry lookups miss → global default floor).
+        // The service id policy and the mint use; for a raw connection there
+        // is none, so the conn id stands in (a same-named built-in's recipe
+        // and tags apply, else the global floor).
         let service_id = conn_rec.service.clone().unwrap_or_else(|| conn.clone());
-        // The definition whose `[requests]` shapes read this request. `def`
-        // above stays the connection's own for roles and minting.
-        let shape_def = shape_definition(&self.state, &vault_id, def.as_ref(), &service_id);
-        // Compute hosts from the record we hold — NOT a second cache lookup,
-        // which would miss a synthesized default connection and wrongly empty the
+        // The definition whose `[requests]` shapes read this request, from
+        // the request's snapshot. `def` above stays the connection's own for
+        // roles and minting.
+        let shape_def = shape_definition(&snapshot.inputs, &state.services, def, &service_id);
+        // Compute hosts from the record we hold — NOT a second lookup, which
+        // would miss a synthesized default connection and wrongly empty the
         // anchor (→ spurious widen-deny). For the synthesized default this
         // derives the service's declared hosts.
-        let resolved_hosts = crate::core::host::resolved_hosts(&conn_rec, def.as_ref());
+        let resolved_hosts = crate::core::host::resolved_hosts(&conn_rec, def);
         // The `denied` audit row every refusal below writes: the request as
         // it came, with why (`code`).
         let refused = AuditPending {
@@ -612,14 +582,18 @@ impl BrokerHandler {
             path: path.clone(),
             agent_prefix: self.agent_attribution(),
         };
+        let deny = |code: ScCode, msg: &str| -> RequestOrResponse {
+            write_forward_audit(&state, &refused, 0, None, Some(code));
+            err_response(code, msg).into()
+        };
 
-        // ── host anchor (exact FQDN), with the private-address floor beneath ─
-        // The floor runs first, on every brokered request: the destination as
-        // the client's URL parser reads it must be a canonical, public host
-        // (`core::egress`), anchored or not.
+        // ── 1. egress floor (private addresses) ──────────────────────────────
+        // On every brokered request: the destination as the client's URL
+        // parser reads it must be a canonical, public host (`core::egress`),
+        // anchored or not.
         if !crate::core::egress::host_egress_allowed(&dest_host) {
             write_forward_audit(
-                &self.state,
+                &state,
                 &refused,
                 0,
                 Some(&dest_host),
@@ -634,30 +608,58 @@ impl BrokerHandler {
             )
             .into();
         }
-        if !crate::core::host::host_allowed(&dest_host, &resolved_hosts) {
-            // Refused whether or not the widen request below registers.
-            write_forward_audit(
-                &self.state,
-                &refused,
-                0,
-                Some(&dest_host),
-                Some(ScCode::HostNotAnchored),
+
+        // ── 2. phantom check (static) ────────────────────────────────────────
+        // Every explicit role must exist on the connection, through the one
+        // connection-to-KEY binding (`snapshot::bindings`); a mint input is
+        // never injected. Nothing is read from a store yet.
+        let Some(roles) = crate::snapshot::bindings(&conn_rec, def) else {
+            let s = conn_rec.service.as_deref().unwrap_or_default();
+            let why = snapshot
+                .custom_skipped
+                .get(s)
+                .map(String::as_str)
+                .unwrap_or("this device has no such service");
+            return deny(
+                ScCode::PolicyDenied,
+                &format!(
+                    "connection '{}' uses service '{}', whose definition is not loaded: {}",
+                    conn, s, why
+                ),
             );
-            return self.widen_deny(&vault_id, &conn, &dest_host, ip).await;
+        };
+        let mut wants: Vec<(String, crate::snapshot::Want)> = Vec::new();
+        for ph in &phantoms {
+            match crate::snapshot::check_phantom(ph.role.as_deref(), &roles) {
+                Ok(want) => wants.push((ph.raw.clone(), want)),
+                Err(crate::snapshot::PhantomRefusal::RefreshForbidden) => {
+                    return deny(ScCode::RefreshForbidden, REFRESH_FORBIDDEN_MSG);
+                }
+                Err(crate::snapshot::PhantomRefusal::UnknownRole(role)) => {
+                    let hint = phantom_role_hint(&conn, &conn_rec, def);
+                    return deny(
+                        ScCode::UnknownRole,
+                        &format!(
+                            "connection '{}' has no role '{}'. Its phantoms: {}",
+                            conn, role, hint
+                        ),
+                    );
+                }
+            }
         }
 
-        // ── request scope + policy (Phase 2, design/request-scope.md) ─────────
+        // ── 3. request scope + policy (Phase 2, design/request-scope.md) ─────
         // Resolve the matching `[requests]` shape and extract its vars from the
         // SAME buffered body (unified boundary) + the URL query. Feeds three
-        // consumers: the policy `when` predicate (`vars`), the ask-always grant
-        // identity (`scope_digest`), and the approval consent (via `req_scope`
-        // → captive_portal). Absent shape ⇒ empty vars + `""` digest = the
-        // Phase-1 path-only grant, unchanged.
+        // consumers: the policy `when` predicate (`vars`), the request-bound
+        // permit identity (`scope_digest`), and the approval consent (via
+        // `req_scope` → captive_portal). Absent shape ⇒ empty vars + `""`
+        // digest = the Phase-1 path-only key, unchanged. A request that can't
+        // be read the standard way is refused here, before policy.
         //
         // Policy `body` rules see the body text plus its decoded JSON form
-        // (policy_body_view). Op-agent binding: every approval/grant surface
-        // below keys on the requesting agent (the pipeline validated self.key
-        // before secrets).
+        // (policy_body_view). Pure policy, from the snapshot's inputs: no
+        // approval is consulted here (step 6 is).
         let policy_view = body_text
             .as_deref()
             .map(crate::core::policy::policy_body_view);
@@ -677,14 +679,13 @@ impl BrokerHandler {
             // see, and no client sends one by mistake.
             if let Some(Err(e)) = &decoded {
                 if !matches!(e, DecodeError::Unsupported(_))
-                    || shape_def.as_ref().is_some_and(|d| d.request_shape(&method, p).is_some())
+                    || shape_def.is_some_and(|d| d.request_shape(&method, p).is_some())
                 {
-                    write_forward_audit(&self.state, &refused, 0, None, Some(e.code()));
+                    write_forward_audit(&state, &refused, 0, None, Some(e.code()));
                     return Err(err_response(e.code(), &e.to_string()));
                 }
             }
             let req_scope = shape_def
-                .as_ref()
                 .and_then(|d| d.extract_request_scope(&method, p, parts.uri.query(), readable));
             if let Some(rs) = req_scope.as_ref() {
                 // A request its shape can't read the standard way is refused
@@ -696,17 +697,21 @@ impl BrokerHandler {
                     } else {
                         ScCode::RequestUnreadable
                     };
-                    write_forward_audit(&self.state, &refused, 0, None, Some(code));
+                    write_forward_audit(&state, &refused, 0, None, Some(code));
                     return Err(err_response(code, &u.message));
                 }
                 // A connection rule edit that decides on a field an approval on
                 // this path does not bind (an unbound `when` var, or the body)
                 // is refused here, by name, rather than asked under.
-                if let Some(problem) = self
-                    .state
-                    .connection_rule_problem(&vault_id, &conn, &service_id, &method, p, rs)
-                {
-                    write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::PolicyDenied));
+                if let Some(problem) = state.connection_rule_problem(
+                    &snapshot.inputs,
+                    &conn,
+                    &service_id,
+                    &method,
+                    p,
+                    rs,
+                ) {
+                    write_forward_audit(&state, &refused, 0, None, Some(ScCode::PolicyDenied));
                     return Err(err_response(ScCode::PolicyDenied, &problem));
                 }
             }
@@ -714,32 +719,23 @@ impl BrokerHandler {
                 .as_ref()
                 .map(|r| r.vars.clone())
                 .unwrap_or_default();
-            let decision = self.state.evaluate_request_decision(
-                &vault_id,
-                &agent_prefix,
+            let decision = state.evaluate_request_decision(
+                &snapshot.inputs,
                 &conn,
                 &service_id,
                 &method,
                 p,
-                &dest_host,
                 policy_view.as_deref(),
                 &vars,
-                // A declared `[requests]` shape (even with no resolved values)
-                // makes this a scoped path: bind per-value via op_grants, never
-                // the coarse connection-window downgrade.
-                req_scope.is_some(),
             );
-            match decision {
-                Some(d) => Ok((req_scope, d)),
-                None => Err(err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG)),
-            }
+            Ok((req_scope, decision))
         };
         // An encoded slash has two readings, and servers differ on which they
-        // take (core/path.rs): decide on both and keep the stricter. The grant
+        // take (core/path.rs): decide on both and keep the stricter. The permit
         // keys, the audit row and the upstream all use the path as normalized.
         let decided = match crate::core::path::slash_decoded(&path) {
             Err(e) => {
-                write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::RequestUnreadable));
+                write_forward_audit(&state, &refused, 0, None, Some(ScCode::RequestUnreadable));
                 Err(err_response(ScCode::RequestUnreadable, &e.to_string()))
             }
             Ok(others) => decide(&path).and_then(|first| {
@@ -763,159 +759,216 @@ impl BrokerHandler {
         let scope_digest = req_scope.as_ref().map(|r| r.digest()).unwrap_or_default();
 
         use crate::core::policy::AccessLevel;
+        // Deny refuses before any value is located, let alone read.
         if level == AccessLevel::Deny {
-            write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::PolicyDenied));
-            return err_response(ScCode::PolicyDenied, "this request is blocked by policy").into();
+            return deny(ScCode::PolicyDenied, "this request is blocked by policy");
         }
 
-        // The credential bytes come from the session cache (the proxy has no
-        // grant to open the vault). A miss falls through to the captive portal.
-        //   - Allow: read the resident value (incl. the unlock bootstrap) + the
-        //     allow multi-secret map, the frictionless fast-path. An Ask the
-        //     ask-grant ledger authorized (same rule / floor class) arrives here
-        //     already downgraded to Allow.
-        //   - Ask: request-bound grants only (`op_grants`), never residency, so
-        //     an ask the ledger did not authorize always reaches the portal.
-        //   - AskAlways: ONE-SHOT, REQUEST-BOUND. Redeems only the grant the
-        //     approve ceremony minted for exactly this (connection, method,
-        //     host, path) — consumed single-use. It never reads `entries` at
-        //     all, so it can't ride the allow residency OR a plain-ask/stale
-        //     leftover: an approval is spendable only by the action the user
-        //     saw, once.
-        let (primary, secrets_map) = grant_lookup(
-            &self.state,
-            &vault_id,
-            &agent_prefix,
-            &conn,
-            level,
-            &decided_by,
-            &method,
-            &dest_host,
-            &path,
-            &scope_digest,
-            req_scope.is_some(),
-        );
-
-        // First touch of an external-store-backed connection: an Allow-level
-        // miss tries ONE lazy fill (fetch into the same `from_bootstrap`
-        // residency the unlock bootstrap gives native secrets — see
-        // `lazy_fill_external`), then re-reads the cache. A second miss falls
-        // through to the portal exactly as before; ask/ask-always never lazy
-        // fill (their ceremony resolves through the vault view, store-agnostic
-        // already).
-        let mut primary = primary;
-        let mut secrets_map = secrets_map;
-        let mut lazy_filled = false;
-        let values = loop {
-            match self
-                .resolve_values(
-                    &vault_id,
-                    &conn,
-                    &service_id,
-                    mint_input.as_deref(),
-                    &phantoms,
-                    primary.take(),
-                    secrets_map.take(),
-                )
-                .await
-            {
-                Ok(v) => break v,
-                Err(ResolveErr::NeedsApproval) => {
-                    if level == AccessLevel::Allow && !lazy_filled {
-                        match crate::server::handlers::approve::lazy_fill_external(
-                            &self.state,
-                            &vault_id,
-                            &conn,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                lazy_filled = true;
-                                primary = self.state.cache_lookup(&vault_id, &conn);
-                                secrets_map = self.state.cache_lookup_secrets(&vault_id, &conn);
-                                continue;
-                            }
-                            Ok(false) => {}
-                            Err(store_id) => {
-                                // P2: a configured store's outage is an explicit
-                                // refusal, never a portal that would misread it
-                                // as "needs approval".
-                                return err_response(
-                                    ScCode::StoreUnavailable,
-                                    &format!(
-                                        "external store '{}' failed while resolving this \
-                                         connection's secret. Check the store's credentials \
-                                         and permissions (daemon logs have the full error)",
-                                        store_id
-                                    ),
-                                )
-                                .into();
-                            }
-                        }
-                    }
-                    return self
-                        .captive_portal(
-                            &vault_id,
-                            &conn,
-                            &conn_rec,
-                            &service_id,
-                            op_role.clone(),
-                            &dest_host,
-                            &method,
-                            &path,
-                            level,
-                            decided_by.clone(),
-                            ttl,
-                            req_scope.as_ref(),
-                            ip,
-                        )
-                        .await;
+        // ── 4. values: present and located, none opened ─────────────────────
+        // Each KEY is walked through the store order once per snapshot (the
+        // walk memo says where it was found); a role-less phantom takes the
+        // sole present candidate. This establishes presence and location
+        // only: no sealed value is opened, so an agent's retries while an
+        // approval is pending touch no secret. Missing → a 4xx, never an op.
+        let mut keys: BTreeMap<String, crate::snapshot::Location> = BTreeMap::new();
+        let mut injects: Vec<(String, Inject)> = Vec::new();
+        for (raw, want) in &wants {
+            use crate::snapshot::Want;
+            let located = match want {
+                Want::Role(b) => locate_one(&snapshot, &state, &vault_id, &b.key)
+                    .await
+                    .map(|at| (b.key.clone(), at, false)),
+                Want::Access(b) => locate_one(&snapshot, &state, &vault_id, &b.key)
+                    .await
+                    .map(|at| (b.key.clone(), at, true)),
+                Want::RoleLess => locate_role_less(&snapshot, &state, &vault_id, &roles)
+                    .await
+                    .map(|(key, at)| (key, at, false)),
+            };
+            let (key, at, minted) = match located {
+                Ok(l) => l,
+                Err(Unlocated::NotSet(missing)) => {
+                    let (code, msg) = not_set_refusal(
+                        &conn,
+                        &missing,
+                        state.is_vault_key_changed(&vault_id),
+                    );
+                    return deny(code, &msg);
                 }
-                Err(ResolveErr::Ambiguous) => {
-                    let roles = phantom_role_hint(&conn, &conn_rec, def.as_ref());
-                    return err_response(
+                Err(Unlocated::Ambiguous) => {
+                    let roles = phantom_role_hint(&conn, &conn_rec, def);
+                    return deny(
                         ScCode::AmbiguousPhantom,
                         &format!(
                             "'{}' exposes several secrets. Use a role phantom: {}",
                             conn, roles
                         ),
-                    )
-                    .into();
+                    );
                 }
-                Err(ResolveErr::RefreshForbidden) => {
-                    return err_response(
-                        ScCode::RefreshForbidden,
-                        "a refresh token never leaves the vault. This connection injects a \
-                     minted access token; use its default phantom. To reveal the stored \
-                     secret, run `sprott secret get` (needs a passkey)",
-                    )
-                    .into();
+                Err(Unlocated::Store(store_id)) => {
+                    // P2: a configured store's outage is an explicit refusal,
+                    // never a portal that would misread it as "needs approval".
+                    return deny(ScCode::StoreUnavailable, &store_unavailable_msg(&store_id));
                 }
-                Err(ResolveErr::Exposes(role)) => {
-                    return err_response(
-                        ScCode::ExposesUnsupported,
-                        &format!("connection '{}' role '{}' is not yet mintable", conn, role),
-                    )
-                    .into();
+                Err(Unlocated::Vault(e)) => {
+                    let (code, msg) = e.code();
+                    return deny(code, &msg);
                 }
-                Err(ResolveErr::Mint(msg)) => {
-                    return err_response(ScCode::OauthMint, &msg).into();
+            };
+            keys.entry(key.clone()).or_insert(at);
+            injects.push((
+                raw.clone(),
+                if minted {
+                    Inject::Minted(key)
+                } else {
+                    Inject::Value(key)
+                },
+            ));
+        }
+
+        // ── 5. host anchor (exact FQDN) ──────────────────────────────────────
+        // An unanchored host mints the widen-host op, only for a request that
+        // passed 1-4. While this device's copy of the vault is behind the
+        // store (an install was refused, so an approved widen may be stored
+        // but not served) it says so instead of minting another.
+        if !crate::core::host::host_allowed(&dest_host, &resolved_hosts) {
+            // Refused whether or not the widen request below registers.
+            write_forward_audit(
+                &state,
+                &refused,
+                0,
+                Some(&dest_host),
+                Some(ScCode::HostNotAnchored),
+            );
+            if state.is_vault_behind(&vault_id) {
+                return err_response(
+                    ScCode::VaultKeyChanged,
+                    &format!(
+                        "connection '{}' is not anchored to '{}' on this device, whose copy of \
+                         the vault is behind (a change could not be applied here). Run \
+                         `sprott unlock`, then retry",
+                        conn, dest_host
+                    ),
+                )
+                .into();
+            }
+            return self.widen_deny(&vault_id, &conn, &dest_host, ip).await;
+        }
+
+        // ── 6. permit ────────────────────────────────────────────────────────
+        // A request policy allows carries no permit. Anything else needs a
+        // live permit of its decided tier under its key: the request line (or
+        // the unit) and the credentials it resolved. None → mint an op and
+        // open the portal.
+        let credentials = crate::state::CredentialSet::new(&service_id, keys.keys().cloned());
+        let portal = Portal {
+            conn: conn.clone(),
+            service_id: service_id.clone(),
+            host: dest_host.clone(),
+            method: method.clone(),
+            path: path.clone(),
+            level,
+            decided_by: decided_by.clone(),
+            ttl,
+            credentials: credentials.clone(),
+            fingerprint: snapshot.fingerprint,
+        };
+        let permit = match level {
+            AccessLevel::Allow => None,
+            _ => match crate::state::PermitKey::of(
+                level,
+                &decided_by,
+                req_scope.is_some(),
+                &agent_prefix,
+                &conn,
+                &method,
+                &dest_host,
+                &path,
+                &scope_digest,
+                credentials,
+            ) {
+                Some(key) => Some(key),
+                None => {
+                    return self
+                        .captive_portal(&vault_id, &portal, req_scope.as_ref(), ip)
+                        .await;
                 }
-                Err(ResolveErr::NotUtf8) => {
-                    return err_response(
-                        ScCode::SecretEncoding,
-                        "resolved credential is not valid UTF-8",
-                    )
-                    .into();
-                }
+            },
+        };
+        let auth = match state.authorize(&vault_id, snapshot.clone(), keys, permit) {
+            Ok(auth) => auth,
+            Err(crate::state::Unauthorized::NoPermit) => {
+                return self
+                    .captive_portal(&vault_id, &portal, req_scope.as_ref(), ip)
+                    .await;
+            }
+            Err(crate::state::Unauthorized::Refused(e)) => {
+                let (code, msg) = e.code();
+                return err_response(code, &msg).into();
             }
         };
 
-        // ── substitute everywhere + strip shadowing auth, then forward ───────
+        // ── 7. values, only now ──────────────────────────────────────────────
+        let values = match state.materialize(&vault_id, &auth) {
+            Ok(values) => values,
+            Err(crate::state::Unreadable::NotHeld(key)) => {
+                let (code, msg) = not_set_refusal(&conn, &[key], false);
+                return deny(code, &msg);
+            }
+            Err(crate::state::Unreadable::Refused(e)) => {
+                let (code, msg) = e.code();
+                return err_response(code, &msg).into();
+            }
+        };
+        let mut substitutes = PhantomValues::default();
+        for (raw, inject) in &injects {
+            let bytes = match inject {
+                Inject::Value(key) => values.get(key).map(<[u8]>::to_vec),
+                Inject::Minted(key) => {
+                    // The ACCESS phantom of a minted mechanism: minted from the
+                    // stored input (oauth refresh token / snaplii api key) with
+                    // the snapshot's definition, after following any rotation
+                    // made since; cached in `oauth_access` for every tier.
+                    let (Some(input), Some(auth_def)) =
+                        (values.get(key), def.and_then(|d| d.auth.as_ref()))
+                    else {
+                        return err_response(
+                            ScCode::OauthMint,
+                            "this connection's mint input could not be read",
+                        )
+                        .into();
+                    };
+                    match crate::server::broker_flow::resolve_auth_value(
+                        &state, &vault_id, &conn, &service_id, auth_def, input,
+                    )
+                    .await
+                    {
+                        Ok(token) => Some(token),
+                        Err(crate::error::AppError::Unauthorized(m)) => {
+                            return err_response(ScCode::OauthMint, &m).into();
+                        }
+                        Err(other) => {
+                            return err_response(ScCode::OauthMint, &format!("{:?}", other)).into();
+                        }
+                    }
+                }
+            };
+            let Some(text) = bytes.and_then(|b| String::from_utf8(b).ok()) else {
+                return err_response(
+                    ScCode::SecretEncoding,
+                    "resolved credential is not valid UTF-8",
+                )
+                .into();
+            };
+            substitutes.insert(raw.clone(), text);
+        }
+        drop(values);
+
+        // ── substitute everywhere + strip shadowing auth ─────────────────────
         let mut parts = parts;
         // URL: rebuild the absolute URI with the substituted path+query. The
         // authority (host[:port]) is preserved from the MITM'd request.
-        let (new_pq, _) = resolver::substitute(&pq, |ph| values.get(&ph.raw).cloned());
+        let (new_pq, _) = resolver::substitute(&pq, |ph| substitutes.get(&ph.raw));
         if new_pq != pq {
             let authority = parts
                 .uri
@@ -930,8 +983,9 @@ impl BrokerHandler {
         // Headers: substitute values, decode/re-encode Basic, strip proxy/agent
         // auth, drop hop-by-hop. The body is never rewritten (not an injection
         // site), so its content-length stays what was set when it was read.
-        let new_headers = rewrite_headers(&parts.headers, &values, false);
+        let new_headers = rewrite_headers(&parts.headers, &substitutes, false);
         parts.headers = new_headers;
+        drop(substitutes);
         // A body a shape decided on goes upstream as it was read: decoded.
         let forward_decoded = match decoded {
             Some(Ok(d)) if req_scope.is_some() => {
@@ -971,6 +1025,27 @@ impl BrokerHandler {
             .into();
         }
 
+        // ── 8. consume ───────────────────────────────────────────────────────
+        // Every request, allow included: the vault must still be Unlocked,
+        // and a single-use permit is spent now (failures before this keep it;
+        // nothing after restores it). One another request spent first sends
+        // this one to the portal.
+        match state.consume(&vault_id, auth) {
+            Ok(true) => {}
+            Ok(false) => {
+                return self
+                    .captive_portal(&vault_id, &portal, req_scope.as_ref(), ip)
+                    .await;
+            }
+            Err(e) => {
+                let (code, msg) = e.code();
+                return err_response(code, &msg).into();
+            }
+        }
+        // The snapshot is not held while the request is forwarded.
+        drop(snapshot);
+
+        // ── 9. forward ───────────────────────────────────────────────────────
         // Body: forwarded byte-for-byte, or decoded when a shape decided on it
         // (never an injection site). A phantom in the body passes through as
         // inert placeholder text — never substituted
@@ -991,104 +1066,30 @@ impl BrokerHandler {
         });
         Request::from_parts(parts, out_body).into()
     }
-
-    /// Resolve every phantom to its credential string. Errors distinguish
-    /// "needs a passkey" (→ portal) from hard misuse (→ 4xx).
-    #[allow(clippy::too_many_arguments)]
-    async fn resolve_values(
-        &self,
-        vault_id: &str,
-        conn: &str,
-        service_id: &str,
-        mint_input: Option<&str>,
-        phantoms: &[Phantom],
-        primary: Option<Vec<u8>>,
-        secrets_map: Option<HashMap<String, Vec<u8>>>,
-    ) -> Result<HashMap<String, String>, ResolveErr> {
-        let mut out = HashMap::new();
-        for ph in phantoms {
-            let is_minted = mint_input.is_some();
-            let bytes: Vec<u8> =
-                if is_minted && ph.role.as_deref().map(|r| r == "access").unwrap_or(true) {
-                    // The ACCESS phantom of a minted mechanism: mint from the stored
-                    // input secret (primary) — oauth refresh token / snaplii api key.
-                    let refresh = primary.clone().ok_or(ResolveErr::NeedsApproval)?;
-                    crate::server::broker_flow::resolve_auth_value(
-                        &self.state,
-                        vault_id,
-                        conn,
-                        service_id,
-                        &refresh,
-                    )
-                    .await
-                    .map_err(|e| match e {
-                        crate::error::AppError::Unauthorized(m) => ResolveErr::Mint(m),
-                        other => ResolveErr::Mint(format!("{:?}", other)),
-                    })?
-                } else if is_minted {
-                    let role = ph.role.clone().unwrap_or_default();
-                    // Naming the REFRESH secret is a category error, not a missing
-                    // feature: phantoms resolve to a connection's PRODUCED value
-                    // (the minted access token), never a production INPUT. The
-                    // refusal is precise so the boundary self-documents.
-                    if mint_input.is_some_and(|k| role.eq_ignore_ascii_case(k)) {
-                        return Err(ResolveErr::RefreshForbidden);
-                    }
-                    // An `exposes` value derived at connect (e.g. codex account_id):
-                    // stored UPPERCASED in the vault, cached with the connection's
-                    // other roles — matched case-insensitively like any role. Absent
-                    // (not yet derived / pre-`exposes` connect) → the precise refusal.
-                    match secrets_map.as_ref().and_then(|m| {
-                        m.iter()
-                            .find(|(k, _)| k.eq_ignore_ascii_case(&role))
-                            .map(|(_, v)| v.clone())
-                    }) {
-                        Some(v) => v,
-                        None => return Err(ResolveErr::Exposes(role)),
-                    }
-                } else {
-                    match &ph.role {
-                        Some(r) => secrets_map
-                            .as_ref()
-                            .and_then(|m| {
-                                m.iter()
-                                    .find(|(k, _)| k.eq_ignore_ascii_case(r))
-                                    .map(|(_, v)| v.clone())
-                            })
-                            .ok_or(ResolveErr::NeedsApproval)?,
-                        None => match &secrets_map {
-                            Some(m) if m.len() > 1 => return Err(ResolveErr::Ambiguous),
-                            Some(m) if m.len() == 1 => m.values().next().cloned().unwrap(),
-                            _ => primary.clone().ok_or(ResolveErr::NeedsApproval)?,
-                        },
-                    }
-                };
-            let s = String::from_utf8(bytes).map_err(|_| ResolveErr::NotUtf8)?;
-            out.insert(ph.raw.clone(), s);
-        }
-        Ok(out)
-    }
-
     /// Build + register the captive-portal (ask) op and return the 401 that
     /// surfaces the approve link through a dumb tool's error output.
     #[allow(clippy::too_many_arguments)]
     async fn captive_portal(
         &self,
         vault_id: &str,
-        conn: &str,
-        conn_rec: &crate::storage::plaintext::Connection,
-        service_id: &str,
-        op_role: Option<String>,
-        host: &str,
-        method: &str,
-        path: &str,
-        level: crate::core::policy::AccessLevel,
-        decided_by: crate::core::policy::DecidedBy,
-        ttl: Option<u64>,
+        p: &Portal,
         req_scope: Option<&crate::service::RequestScope>,
         ip: IpAddr,
     ) -> RequestOrResponse {
         use crate::protocol::operation::{Act, ActType, Bind, Operation, Valid};
+        let Portal {
+            conn,
+            service_id,
+            host,
+            method,
+            path,
+            level,
+            decided_by,
+            ttl,
+            credentials,
+            fingerprint,
+        } = p;
+        let (level, decided_by) = (*level, decided_by.clone());
         let now = now_secs();
         // Two DIFFERENT windows, deliberately independent:
         //   - grant_ttl: how long the approved `ask`-once grant stays cached so
@@ -1099,28 +1100,9 @@ impl BrokerHandler {
         let grant_ttl = ttl.unwrap_or(DEFAULT_ASK_TTL);
         let hold_secs = self.state.policy_approval_hold(vault_id);
 
-        // `op_role` was resolved in `handle` from the custom-aware `def` (the
-        // same source the forward path mints from); a raw, service-less
-        // connection has none, so the connection id stands in.
-        let role = op_role.unwrap_or_else(|| service_id.to_string());
-        // The op `target` is the role's bound BARE key (record `keys` map,
-        // identity default) — the same slot every writer uses. A raw record
-        // lists its KEYs verbatim (uppercase) while a phantom role is
-        // lowercase, so canonicalize against the record's own list; a
-        // role-less phantom on a raw connection means its SOLE key (a
-        // multi-secret role-less phantom already failed ambiguous_phantom
-        // long before an op is minted).
-        let target = {
-            let bound = crate::storage::plaintext::secret_key_for(Some(conn_rec), &role);
-            match conn_rec.secrets.as_deref() {
-                Some(ks) => ks
-                    .iter()
-                    .find(|k| k.eq_ignore_ascii_case(&bound))
-                    .cloned()
-                    .unwrap_or_else(|| if ks.len() == 1 { ks[0].clone() } else { bound }),
-                None => bound,
-            }
-        };
+        // The op names the credentials an approval of it permits: the KEYs
+        // the request resolved, the same set its permit is keyed by.
+        let target = credentials.target();
 
         let mut scope = json!({
             "connection_id": conn,
@@ -1148,6 +1130,12 @@ impl BrokerHandler {
             method,
             grant_ttl,
         );
+        // A window (`exact`, `rule`, `floor`) carries the policy fingerprint
+        // it was decided under: approve stores no window when the policy
+        // changed since.
+        let window = crate::approval::Reuse::of(level, &decided_by, req_scope.is_some(), method)
+            .and_then(|r| r.window(grant_ttl))
+            .is_some();
         // Phase 2: fold the bound `[requests]` scope-field VALUES and the consent
         // template into the op scope. They are signed into β (the user's passkey
         // authorizes exactly the fields shown) and re-derived at approve to build
@@ -1191,6 +1179,8 @@ impl BrokerHandler {
             decided_by,
             ttl_seconds: grant_ttl,
             host: Some(host.to_string()),
+            credentials: Some(credentials.clone()),
+            policy_fp: window.then_some(*fingerprint),
         };
 
         match crate::server::broker_flow::register_pending_use(
@@ -1374,69 +1364,6 @@ pub(crate) fn stamp_signed_level(
     }
 }
 
-/// What [`grant_lookup`] yields: the primary credential bytes and the
-/// multi-secret role map (allow paths only).
-pub(crate) type GrantValues = (Option<Vec<u8>>, Option<HashMap<String, Vec<u8>>>);
-
-/// The proxy's credential lookup for one request, by policy level — the READ
-/// side of every grant an approval writes. Kept a free function so the apply
-/// tests drive the exact lookup the live pipeline uses.
-///
-/// A request-bound grant is redeemed only from the tier this request's own
-/// decision yields ([`crate::approval::reuse::BoundTier::of`], the function
-/// apply minted it with), so no tier spends or reuses another tier's grant:
-/// - `ask-always`: the single-use grant an ask-always approval minted for
-///   exactly this request (consumed), never the connection cache.
-/// - a scoped `ask` (`scoped`: the path has a `[requests]` shape): peek the
-///   `exact` grant minted for the same request, values and unit (reused within
-///   its window; anything else misses).
-/// - an `ask` a rule with no id decided: the single-use grant such an ask
-///   minted for exactly this request (consumed).
-/// - any other `ask`: nothing. Never the resident value: it is authorized by
-///   the ask-grant ledger, which downgrades it to `allow` before this lookup,
-///   or it asks.
-/// - `allow` (including an ask the ledger downgraded): the resident/held
-///   connection value plus the allow multi-secret map.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn grant_lookup(
-    state: &AppState,
-    vault_id: &str,
-    agent_prefix: &str,
-    conn: &str,
-    level: crate::core::policy::AccessLevel,
-    decided_by: &crate::core::policy::DecidedBy,
-    method: &str,
-    host: &str,
-    path: &str,
-    scope_digest: &str,
-    scoped: bool,
-) -> GrantValues {
-    use crate::core::policy::AccessLevel;
-    match level {
-        AccessLevel::AskAlways | AccessLevel::Ask => (
-            crate::approval::reuse::BoundTier::of(level, decided_by, scoped, method).and_then(
-                |tier| {
-                    state.op_grant_take(
-                        vault_id,
-                        agent_prefix,
-                        conn,
-                        method,
-                        host,
-                        path,
-                        scope_digest,
-                        &tier,
-                    )
-                },
-            ),
-            None,
-        ),
-        _ => (
-            state.cache_lookup(vault_id, conn),
-            state.cache_lookup_secrets(vault_id, conn),
-        ),
-    }
-}
-
 /// The waiter line for pending-approval bodies — only when the approve link
 /// is absolute (cloud-paired). An unpaired daemon has no reachable approval
 /// surface, and a hinted wait there would just block until the op expires.
@@ -1448,22 +1375,165 @@ fn wait_hint(approve_url: &str, op_id: &str) -> String {
     }
 }
 
-/// Resolution failure taxonomy — decides portal vs 4xx vs 5xx.
-enum ResolveErr {
-    /// The credential isn't in the session cache — needs a passkey (→ portal).
-    NeedsApproval,
-    /// Bare `__sprott__conn__` on a connection exposing several secrets.
-    Ambiguous,
-    /// An oauth2 `exposes` role the mint doesn't surface yet.
-    Exposes(String),
-    /// The phantom names the oauth REFRESH secret — never injectable (a
-    /// production input, not a produced value); egress would equal export.
-    RefreshForbidden,
-    /// The oauth mint failed / the refresh token is dead.
-    Mint(String),
-    /// The resolved bytes aren't valid UTF-8.
-    NotUtf8,
+/// What a captive-portal op is minted for: the request as policy decided it
+/// (step 3) and the credentials it resolved (step 4).
+struct Portal {
+    conn: String,
+    service_id: String,
+    host: String,
+    method: String,
+    path: String,
+    level: crate::core::policy::AccessLevel,
+    decided_by: crate::core::policy::DecidedBy,
+    ttl: Option<u64>,
+    credentials: crate::state::CredentialSet,
+    /// The policy fingerprint of the snapshot it was decided on.
+    fingerprint: [u8; 32],
 }
+
+/// What a phantom injects: a KEY's value, or the token minted from a minted
+/// connection's input KEY.
+enum Inject {
+    Value(String),
+    Minted(String),
+}
+
+/// The value each phantom (by its raw token) is replaced with: plaintext that
+/// lives only for this request and is zeroized when dropped. Never printed.
+#[derive(Default)]
+struct PhantomValues(HashMap<String, zeroize::Zeroizing<String>>);
+
+impl PhantomValues {
+    fn insert(&mut self, raw: String, value: String) {
+        self.0.insert(raw, zeroize::Zeroizing::new(value));
+    }
+
+    fn get(&self, raw: &str) -> Option<String> {
+        self.0.get(raw).map(|v| v.as_str().to_string())
+    }
+}
+
+impl std::fmt::Debug for PhantomValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.keys().map(|k| format!("{}: <redacted>", k)))
+            .finish()
+    }
+}
+
+/// Why step 4 refused a request.
+enum Unlocated {
+    /// Absent from every store: this KEY, or every candidate of a role-less
+    /// phantom none of whose candidates is present.
+    NotSet(Vec<String>),
+    /// A role-less phantom with more than one candidate present.
+    Ambiguous,
+    /// A configured store ahead of the KEY failed, or can't be read here.
+    Store(String),
+    /// The vault locked or went away meanwhile.
+    Vault(crate::error::AppError),
+}
+
+impl From<crate::snapshot::WalkError> for Unlocated {
+    fn from(e: crate::snapshot::WalkError) -> Unlocated {
+        match e {
+            crate::snapshot::WalkError::StoreUnavailable(id) => Unlocated::Store(id),
+            crate::snapshot::WalkError::Vault(e) => Unlocated::Vault(e),
+        }
+    }
+}
+
+/// Where an explicit role's KEY is. A recorded "absent" is not taken: the
+/// KEY is walked again, so one added to an external store later is found.
+async fn locate_one(
+    snapshot: &crate::snapshot::Snapshot,
+    state: &AppState,
+    vault_id: &str,
+    key: &str,
+) -> Result<crate::snapshot::Location, Unlocated> {
+    match snapshot.locate(state, vault_id, key, false).await? {
+        Some(at) => Ok(at),
+        None => Err(Unlocated::NotSet(vec![key.to_string()])),
+    }
+}
+
+/// A role-less phantom on a static connection: its sole present candidate.
+/// With several candidates, a recorded "absent" picks among them (no network
+/// for a KEY a walk found nowhere) as long as one is present; with none
+/// present, each is walked again. More than one present is ambiguous.
+async fn locate_role_less(
+    snapshot: &crate::snapshot::Snapshot,
+    state: &AppState,
+    vault_id: &str,
+    roles: &[crate::snapshot::Bound],
+) -> Result<(String, crate::snapshot::Location), Unlocated> {
+    let candidates = crate::snapshot::role_less_candidates(roles);
+    if let [only] = candidates.as_slice() {
+        return locate_one(snapshot, state, vault_id, &only.key)
+            .await
+            .map(|at| (only.key.clone(), at));
+    }
+    for use_absent in [true, false] {
+        let mut present = Vec::new();
+        for c in &candidates {
+            if let Some(at) = snapshot.locate(state, vault_id, &c.key, use_absent).await? {
+                if !present.is_empty() {
+                    return Err(Unlocated::Ambiguous);
+                }
+                present.push((c.key.clone(), at));
+            }
+        }
+        if let Some(found) = present.pop() {
+            return Ok(found);
+        }
+    }
+    Err(Unlocated::NotSet(
+        candidates.iter().map(|c| c.key.clone()).collect(),
+    ))
+}
+
+/// The refusal for KEYs absent from every store: `secret_not_set`. On a vault
+/// whose key changed it is `vault_key_changed`, saying the KEY may sit in a
+/// row this device can't read (a permanently unreadable row is one `sprott
+/// unlock` does not fix).
+fn not_set_refusal(conn: &str, keys: &[String], key_changed: bool) -> (ScCode, String) {
+    let msg = match (keys, key_changed) {
+        ([], _) => format!("connection '{}' binds no secret", conn),
+        ([one], false) => format!("connection '{}': secret {} is not set in this vault", conn, one),
+        (many, false) => format!(
+            "connection '{}': none of its secrets ({}) is set in this vault",
+            conn,
+            many.join(", ")
+        ),
+        ([one], true) => format!(
+            "connection '{}': secret {} is unset, or in a row this device can't read",
+            conn, one
+        ),
+        (many, true) => format!(
+            "connection '{}': secrets {} are unset, or in rows this device can't read",
+            conn,
+            many.join(", ")
+        ),
+    };
+    let code = if key_changed && !keys.is_empty() {
+        ScCode::VaultKeyChanged
+    } else {
+        ScCode::SecretNotSet
+    };
+    (code, msg)
+}
+
+fn store_unavailable_msg(store_id: &str) -> String {
+    format!(
+        "external store '{}' is unavailable, so a secret this request needs could not be read. \
+         Check the store's credentials and permissions (daemon logs have the full error)",
+        store_id
+    )
+}
+
+const REFRESH_FORBIDDEN_MSG: &str = "a refresh token never leaves the vault. This connection \
+     injects a minted access token; use its default phantom. To reveal the stored secret, run \
+     `sprott secret get` (needs a passkey)";
 
 // ── free helpers ─────────────────────────────────────────────────────────────
 
@@ -1562,7 +1632,7 @@ fn content_length(headers: &HeaderMap) -> Option<u64> {
 /// replaces, drop hop-by-hop, and drop content-length when the body was rewritten.
 fn rewrite_headers(
     headers: &HeaderMap,
-    values: &HashMap<String, String>,
+    values: &PhantomValues,
     body_rewritten: bool,
 ) -> HeaderMap {
     let mut out = HeaderMap::new();
@@ -1589,7 +1659,7 @@ fn rewrite_headers(
                 if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(rest.trim()) {
                     if let Ok(text) = String::from_utf8(decoded) {
                         let (new_text, any) =
-                            resolver::substitute(&text, |ph| values.get(&ph.raw).cloned());
+                            resolver::substitute(&text, |ph| values.get(&ph.raw));
                         if any {
                             let enc = base64::engine::general_purpose::STANDARD
                                 .encode(new_text.as_bytes());
@@ -1604,7 +1674,7 @@ fn rewrite_headers(
                 // Basic with no phantom → strip.
                 continue;
             }
-            let (new_v, any) = resolver::substitute(vs, |ph| values.get(&ph.raw).cloned());
+            let (new_v, any) = resolver::substitute(vs, |ph| values.get(&ph.raw));
             if any {
                 if let Ok(hv) = header::HeaderValue::from_str(&new_v) {
                     out.insert(header::AUTHORIZATION, hv);
@@ -1615,7 +1685,7 @@ fn rewrite_headers(
         }
         // Any other header: substitute in place (no-op if it has no phantom).
         // `append` preserves legitimately repeated headers (e.g. Cookie).
-        let (new_v, _) = resolver::substitute(vs, |ph| values.get(&ph.raw).cloned());
+        let (new_v, _) = resolver::substitute(vs, |ph| values.get(&ph.raw));
         match header::HeaderValue::from_str(&new_v) {
             Ok(hv) => {
                 out.append(name.clone(), hv);
@@ -1679,17 +1749,13 @@ fn plain(status: StatusCode, msg: &str) -> Response<Body> {
 /// service gets that service's rules; its shapes must come from the same
 /// place, or a rule's `when` never has the vars its shape declares and the
 /// rule silently never fires. Custom first, as everywhere.
-fn shape_definition(
-    state: &AppState,
-    vault_id: &str,
-    def: Option<&crate::service::ServiceDef>,
+fn shape_definition<'a>(
+    inputs: &'a crate::snapshot::PolicyInputs,
+    services: &'a crate::service::ServiceRegistry,
+    def: Option<&'a crate::service::ServiceDef>,
     service_id: &str,
-) -> Option<crate::service::ServiceDef> {
-    def.cloned().or_else(|| {
-        state
-            .custom_service(vault_id, service_id)
-            .or_else(|| state.services.get(service_id).cloned())
-    })
+) -> Option<&'a crate::service::ServiceDef> {
+    def.or_else(|| inputs.def(services, service_id))
 }
 
 /// Buffer a brokered request's body for policy, at most `cap` bytes.
@@ -1968,6 +2034,9 @@ fn write_forward_audit(
 }
 
 #[cfg(test)]
+mod permit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2115,7 +2184,9 @@ mod tests {
     fn a_raw_connection_named_like_a_service_is_read_by_its_shapes() {
         use crate::core::policy::{evaluate, AccessLevel, Policy};
         let state = test_handler().state;
-        let def = shape_definition(&state, "v1", None, "railway").expect("the registry's railway");
+        let inputs = crate::snapshot::PolicyInputs::default();
+        let def = shape_definition(&inputs, &state.services, None, "railway")
+            .expect("the registry's railway");
         let rules = state.services.default_policy_rules("railway").unwrap().to_vec();
         let decide = |body: &str| {
             let rs = def
@@ -2130,7 +2201,7 @@ mod tests {
         );
         assert_eq!(decide(r#"{"query":"query { project(id: \"p\") { name } }"}"#), AccessLevel::Allow);
         // A raw connection named like nothing has no shapes and no rules.
-        assert!(shape_definition(&state, "v1", None, "my-own-api").is_none());
+        assert!(shape_definition(&inputs, &state.services, None, "my-own-api").is_none());
     }
 
     /// A brokered request never upgrades to a WebSocket: hop-by-hop headers are
@@ -2141,7 +2212,7 @@ mod tests {
         h.insert("upgrade", "websocket".parse().unwrap());
         h.insert("connection", "Upgrade".parse().unwrap());
         h.insert("authorization", "Bearer __sprott__railway__".parse().unwrap());
-        let out = rewrite_headers(&h, &HashMap::new(), false);
+        let out = rewrite_headers(&h, &PhantomValues::default(), false);
         assert!(!out.contains_key("upgrade") && !out.contains_key("connection"));
     }
 
@@ -2219,9 +2290,10 @@ mod tests {
         assert_eq!(floor["reuse_class"], "write");
         assert_eq!(floor["window_s"], 300);
 
+        // An allow-level request mints no op: nothing to reuse.
         let allow = stamp(AccessLevel::Allow, &DecidedBy::Floor, false, "GET", 600);
         assert_eq!(allow["level"], "allow");
-        assert_eq!(allow["reuse"], "none");
+        assert!(allow.get("reuse").is_none());
         assert!(allow.get("window_s").is_none());
     }
 
@@ -2396,7 +2468,7 @@ mod tests {
 
     #[test]
     fn rewrite_headers_strips_proxy_auth_and_injects_basic() {
-        let mut values = HashMap::new();
+        let mut values = PhantomValues::default();
         values.insert("__sprott__github__".to_string(), "ghp_REAL".to_string());
         let mut h = HeaderMap::new();
         h.insert(
@@ -2427,7 +2499,7 @@ mod tests {
         // git clone https://__sprott__github__@github.com → Basic b64("phantom:") —
         // the phantom rides the USERNAME slot (password empty). Regression pair
         // to the password-position test above.
-        let mut values = HashMap::new();
+        let mut values = PhantomValues::default();
         values.insert("__sprott__github__".to_string(), "ghp_REAL".to_string());
         let mut h = HeaderMap::new();
         h.insert(
@@ -2456,7 +2528,7 @@ mod tests {
     fn rewrite_headers_strips_shadowing_agent_bearer() {
         // The phantom lives elsewhere; the agent's own Authorization must not
         // ride along (it would shadow the injected credential).
-        let values: HashMap<String, String> = HashMap::new();
+        let values = PhantomValues::default();
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,
@@ -2468,7 +2540,7 @@ mod tests {
 
     #[test]
     fn rewrite_headers_substitutes_bearer_phantom() {
-        let mut values = HashMap::new();
+        let mut values = PhantomValues::default();
         values.insert("__sprott__stripe_key__".to_string(), "sk_live_X".to_string());
         let mut h = HeaderMap::new();
         h.insert(
@@ -2484,7 +2556,7 @@ mod tests {
 
     #[test]
     fn rewrite_headers_drops_content_length_when_body_rewritten() {
-        let values: HashMap<String, String> = HashMap::new();
+        let values = PhantomValues::default();
         let mut h = HeaderMap::new();
         h.insert(header::CONTENT_LENGTH, "42".parse().unwrap());
         h.insert("x-custom", "keep-me".parse().unwrap());

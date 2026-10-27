@@ -26,7 +26,6 @@
 //! principal authentication — that's a deployment-layer concern (the
 //! Sprott pro-backend is the auth boundary).
 
-pub mod broker;
 pub mod broker_flow;
 pub mod handlers;
 

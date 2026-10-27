@@ -12,3 +12,5 @@ mod adapter;
 pub mod adapters;
 
 pub use adapter::{build_adapter, Adapter, AdapterError};
+#[cfg(test)]
+pub use adapter::memory;

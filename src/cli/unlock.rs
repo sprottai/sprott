@@ -32,21 +32,19 @@ async fn drive(custom_op: &str, verb: &str, approval: &ApprovalArgs) -> Result<(
 
     // Already in the asked-for state: say so instead of minting an approval, so
     // re-running after an approval (what `sc op wait` says to do) ends here.
-    // An unlocked vault whose key was replaced (a member was removed) still needs
-    // this approval: the device holds only the old key, so it is not done.
+    // An unlocked vault whose key was replaced (a member was removed), or whose
+    // copy on this device is behind its store (an install was refused), still
+    // needs this approval: unlocking again is what serves the store.
     let state = crate::cli::status::fetch_status(&custodian, &vault).await.state;
-    let key_changed = match (custom_op, &state) {
+    let needs_unlock = match (custom_op, &state) {
         ("vault-unlock", VaultState::Unlocked { .. }) => {
             let client = crate::cli::webauthn::http_client()?;
-            crate::cli::status::fetch_held(&client, &custodian, &vault)
-                .await
-                .iter()
-                .any(|line| line == crate::error::VAULT_KEY_CHANGED_STATUS_MSG)
+            unlock_still_needed(&crate::cli::status::fetch_held(&client, &custodian, &vault).await)
         }
         _ => false,
     };
     let done = match (custom_op, &state) {
-        ("vault-unlock", VaultState::Unlocked { .. }) if !key_changed => Some("unlocked"),
+        ("vault-unlock", VaultState::Unlocked { .. }) if !needs_unlock => Some("unlocked"),
         ("vault-lock", VaultState::Locked { .. }) => Some("locked"),
         _ => None,
     };
@@ -76,6 +74,15 @@ async fn drive(custom_op: &str, verb: &str, approval: &ApprovalArgs) -> Result<(
     let done = if custom_op == "vault-unlock" { "unlocked" } else { "locked" };
     println!("{} is {}.", upper_first(&name), done);
     Ok(())
+}
+
+/// Whether an Unlocked vault's status lines (`GET /v/{vid}/held`) say a new
+/// unlock is still needed: its key changed, or this device's copy is behind.
+fn unlock_still_needed(held: &[String]) -> bool {
+    held.iter().any(|line| {
+        line == crate::error::VAULT_KEY_CHANGED_STATUS_MSG
+            || line == crate::error::VAULT_BEHIND_STATUS_MSG
+    })
 }
 
 fn upper_first(s: &str) -> String {

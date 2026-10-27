@@ -106,6 +106,11 @@ pub struct VaultRuntime {
     pub shared: Mutex<Option<bool>>,
     pub upgrade_required: AtomicBool,
     pub key_changed: AtomicBool,
+    /// The last install was refused while Unlocked: the served snapshot is
+    /// behind the store (an approved widen, say, is stored but not served).
+    /// Cleared by every served install, never by a rotation's patch; shown on
+    /// the status line so `sprott unlock` proceeds on an Unlocked vault.
+    pub behind: AtomicBool,
     pub sync_conflicts: Mutex<BTreeMap<String, SyncNote>>,
     pub catch_up_failure: Mutex<Option<String>>,
     pub pending_rotations: Mutex<BTreeMap<(String, String), crate::state::PendingRotation>>,
@@ -116,11 +121,11 @@ pub struct VaultRuntime {
     pub oauth_reauth_needed: Mutex<HashSet<String>>,
     pub live_ceremony_ops: Mutex<HashMap<String, String>>,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Held across every cache install, from reading the store and the key to
-    /// the swap ([`AppState::install`]), and around the one in-place cache
-    /// edit (a rotated refresh token, [`AppState::cache_replace_value`]), so
-    /// an install that read the store earlier never swaps over a later one.
-    /// Lock order: `write_lock` → this → `state`. Only taken through
+    /// Held across every install, from reading the store and the key to the
+    /// swap ([`AppState::install`]), and across a stored rotation's store
+    /// write and snapshot patch (`crate::auth::connect::persist_rotated_refresh_locked`),
+    /// so an install that read the store earlier never swaps over a later
+    /// one. Lock order: `write_lock` → this → `state`. Only taken through
     /// [`Self::with_build_lock`]; never held across an await.
     build: Mutex<()>,
     /// Tests: run once by the next install, under the build mutex, right
@@ -145,6 +150,7 @@ impl VaultRuntime {
             shared: Mutex::new(None),
             upgrade_required: AtomicBool::new(false),
             key_changed: AtomicBool::new(false),
+            behind: AtomicBool::new(false),
             sync_conflicts: Mutex::new(BTreeMap::new()),
             catch_up_failure: Mutex::new(None),
             pending_rotations: Mutex::new(BTreeMap::new()),
@@ -200,6 +206,16 @@ impl VaultRuntime {
         }
     }
 
+    /// Lock this vault: K, S, the snapshot, the permits and the minted access
+    /// tokens go with the Unlocked state, and the key-changed and behind
+    /// notes are cleared (the next served install sets whichever applies).
+    /// Lock, a device park and close all end here.
+    pub fn set_locked(&self) {
+        *self.state.lock().unwrap() = VaultState::Locked;
+        self.key_changed.store(false, Ordering::Release);
+        self.behind.store(false, Ordering::Release);
+    }
+
     pub(crate) fn mark_closed(&self) {
         self.closed.store(true, Ordering::Release);
     }
@@ -242,7 +258,7 @@ impl VaultRuntime {
         // A writer which entered before close may finish; taking the same lock
         // makes dropping K and the audit fd the final local action.
         let _write = self.write_lock.lock().await;
-        *self.state.lock().unwrap() = VaultState::Locked;
+        self.set_locked();
         self.audit.lock().unwrap().take();
     }
 }

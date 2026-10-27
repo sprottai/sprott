@@ -101,6 +101,9 @@ fn render_use(op: &Operation) -> String {
 
     let request = if !method.is_empty() || !host.is_empty() || !path.is_empty() {
         format!("{} {}{}", method, host, path).trim().to_string()
+    } else if op.act.target.contains(", ") {
+        // A request that resolved several KEYs names them all.
+        format!("the secrets at \"{}\"", op.act.target)
     } else {
         format!("the secret at \"{}\"", op.act.target)
     };

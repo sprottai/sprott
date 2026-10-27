@@ -516,24 +516,20 @@ pub(crate) fn stamp_at_mint(
         None => BTreeSet::new(),
     };
     let (connections, native, custom_defs, has_external) = {
-        let runtime = state.runtime_if_present(vault_id);
-        let Some(runtime) = runtime else {
+        let Some(snapshot) = state.snapshot(vault_id) else {
             return Err(crate::error::VAULT_LOCKED_MSG.to_string());
         };
-        let runtime_state = runtime.state.lock().unwrap();
-        match &*runtime_state {
-            crate::state::VaultState::Unlocked { cache, .. } => (
-                cache
-                    .connections
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<BTreeMap<_, _>>(),
-                cache.native_keys.iter().cloned().collect::<BTreeSet<_>>(),
-                cache.custom_services.clone(),
-                !cache.external_store_order.is_empty(),
-            ),
-            _ => return Err(crate::error::VAULT_LOCKED_MSG.to_string()),
-        }
+        (
+            snapshot
+                .connections
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            snapshot.native_names().cloned().collect::<BTreeSet<_>>(),
+            snapshot.inputs.custom.clone(),
+            // A store other than native-secrets in the effective order.
+            snapshot.stores.has_external(),
+        )
     };
     let custom = service.as_deref().and_then(|s| custom_defs.get(s));
     let def = match &service {
@@ -944,14 +940,14 @@ secrets = ["MIXED_KEY"]
     }
 
     fn unlock(state: &crate::state::AppState, conns: &[(&str, Connection)], native: &[&str]) {
-        let mut cache = crate::state::SecretsCache::default();
+        let mut snapshot = crate::snapshot::Snapshot::default();
         for (id, c) in conns {
-            cache.connections.insert(id.to_string(), c.clone());
+            snapshot.connections.insert(id.to_string(), c.clone());
         }
         for k in native {
-            cache.native_keys.insert(k.to_string());
+            snapshot.native.insert(k.to_string(), None);
         }
-        state.unlock_vault("v1".into(), cache, zeroize::Zeroizing::new(Vec::new()));
+        state.unlock_vault("v1".into(), snapshot, zeroize::Zeroizing::new(Vec::new()));
     }
 
     fn add_op(target: &str, scope: Value) -> crate::protocol::operation::Operation {

@@ -38,7 +38,7 @@ Sprott reports them because it saw them happen.
 | `no_vault` | 403 | No vault is bound to the request. | Route credential traffic with `sprott run`. |
 | `vault_access_revoked` | 403 | This account is no longer a member of the vault. | Ask a vault admin to add it back. |
 | `vault_deleted` | 410 | The vault was deleted. | None. |
-| `vault_key_changed` | 409 | The vault's members changed and its key was replaced. This device doesn't have the new key yet. | Run `sprott unlock`. |
+| `vault_key_changed` | 409 | The vault's members changed and its key was replaced, and this device doesn't have the new key yet; or a secret the request needs is unset or in a row this device can't read (the message names it); or this device's copy of the vault is behind (a change could not be applied here). | Run `sprott unlock`. |
 | `team_lease_expired` | 403 | This machine has not reached the cloud for too long, so the shared vault's credentials stop serving. | Restore the network; it serves again once it reconnects. |
 | `ledger_stale` | 423 | Sprott could not reach your account for 7 days, so vaults are locked. Data stays. | Check the network, then `sprott up`. |
 | `upgrade_required` | 426 | This vault needs a newer Sprott. | Run `sprott upgrade`. |
@@ -84,6 +84,8 @@ Sprott reports them because it saw them happen.
 | Code | Status | What it means | What to do |
 |---|---|---|---|
 | `unknown_connection` | 400 | The phantom names no connection. | Copy the phantom from `sprott connection ls`. |
+| `unknown_role` | 400 | The phantom names a role its connection doesn't have. The message lists the connection's phantoms. | Use one of them. |
+| `secret_not_set` | 404 | A secret the phantom needs is in none of the vault's stores. The message names it. | Set it (`sprott set <KEY>`), or use another phantom. |
 | `phantom_unresolved` | 424 | A phantom could not be resolved, so the request was blocked before it left. | Check the name with `sprott connection ls`, or run `sprott unlock`. |
 | `ambiguous_phantom` | 400 | A bare phantom on a connection with several values. | Use the per-key phantom, `__sprott__<conn>__<key>__`. |
 | `multi_connection` | 400 | One request named several connections. | Send one connection per request. |
@@ -92,7 +94,6 @@ Sprott reports them because it saw them happen.
 | `request_invalid` | 422 | A GraphQL query that parses but isn't valid. | Fix the query. |
 | `content_encoding_unsupported` | 415 | The body uses a content coding other than gzip, deflate, br or zstd. | Send it uncompressed or in one of those. |
 | `phantom_renamed` | 400 | The request uses a phantom from before Sprott 2.0 (`__sc__<conn>__`). | Use the name in the message (`__sprott__<conn>__`). |
-| `exposes_unsupported` | 400 | That value can't be produced for this connection. | Use one of the connection's listed phantoms. |
 | `bad_request` | 400 | Malformed request. | Fix the request. |
 | `not_found` | 404 | No such resource. | Fix the request. |
 | `method_not_allowed` | 405 | The local API accepts only GET. | Fix the request. |
@@ -107,7 +108,7 @@ Sprott reports them because it saw them happen.
 | `upstream_error` | 502 | The service answered, but the exchange failed. Not a credential problem. | Retry. |
 | `upstream_body` | 502 | The request body could not be read. | Retry. |
 | `oauth_mint` | 502 | The provider refused to issue a token. | Retry; reconnect the account in the console if it keeps failing. |
-| `store_unavailable` | 502 | An external secret store failed while resolving a value. | Retry; `sprott log` has the full error. |
+| `store_unavailable` | 502 | An external secret store listed ahead of the value failed, or can't be used on this device. | Retry; `sprott log` has the full error. |
 
 ### Internal
 

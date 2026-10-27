@@ -7,23 +7,21 @@
 //! apply picks its grant from it. The three can't drift because none of them
 //! re-derives the mapping.
 //!
-//! Authorization is separate from value residency. An approval that reuses
-//! writes an entry into the vault's ask-grant ledger keyed by the policy unit
-//! that produced the ask (`state::record_ask_grant`); a later ask-level
-//! request is served without asking only when the policy, re-run on that
-//! request, lands on the SAME unit with a live ledger entry
-//! (`state::evaluate_request_decision`). Whether the credential value happens
-//! to be resident in memory never authorizes an ask.
+//! Authorization is separate from value supply. An approval leaves a permit
+//! that carries no value (`state::PermitKey`): keyed by what it reuses (the
+//! request line and tier, or the policy unit that produced the ask) and by
+//! the credentials the request resolved. A later request is served without
+//! asking only when its own decision, re-run on that request, yields the
+//! same key with a live permit (`state::AppState::authorize`). Whether a
+//! value happens to be resident in memory never authorizes anything.
 //!
 //! The values (all bound to the approving agent, the connection, and the
 //! destination host; the device is implicit, the ledger lives in this daemon):
 //!
 //! - `none`: nothing reusable. `ask-always` (and an `ask` from a rule with no
 //!   id, which has no unit to key, scoped path or not) mints a single-use
-//!   grant for exactly the approved request; its replay spends it. An
-//!   `allow`-level request whose value was not resident is also `none`:
-//!   approving it holds the value for allow-level traffic for the policy
-//!   window and never serves an ask. No `window_s` is stamped.
+//!   permit for exactly the approved request; its replay spends it. No
+//!   `window_s` is stamped. (An `allow`-level request mints no op.)
 //! - `exact`: a scoped ask (the service declares a `[requests]` shape for the
 //!   path): only this identical request, with the same bound values, decided
 //!   by the same unit, is reused within `window_s`.
@@ -38,15 +36,17 @@
 //!   the floors use) don't ask within `window_s`. A read approval never serves
 //!   a write, and no rule-matched request rides it.
 //!
-//! A request-bound grant (`none` from an ask, `exact`) is redeemable only by
-//! a request of the tier that minted it ([`BoundTier`]): an ask-always grant
-//! only by an ask-always request, an `exact` grant only by a scoped ask of
-//! the same unit, a single-use ask grant only by an ask a rule with no id
-//! decided.
+//! A request-bound permit (`none` from an ask, `exact`) is redeemable only by
+//! a request of the tier that minted it ([`BoundTier`]): an ask-always permit
+//! only by an ask-always request, an `exact` permit only by a scoped ask of
+//! the same unit, a single-use ask permit only by an ask a rule with no id
+//! decided. Every permit serves only a request with the same credentials:
+//! another or an extra role, or a connection rebound to other KEYs, asks
+//! again.
 //!
-//! Every window is an upper bound: any vault change (a write, a sync) or a
-//! lock rebuilds the session cache and drops the ledger. A window can end
-//! early; it never extends.
+//! Every window is an upper bound: any policy change (and a lock) ends the
+//! vault's windows; other vault changes keep them. A window can end early;
+//! it never extends.
 
 use crate::core::policy::{AccessLevel, DecidedBy};
 
@@ -119,7 +119,8 @@ impl Reuse {
     /// The reuse an approval of a Use op minted under `level` grants.
     /// `decided_by` = what decided it; `scoped` = the service declares a
     /// `[requests]` shape for the path (the signed `scoped` marker); `method`
-    /// = the request's method. `None` for `deny`, which never mints an op.
+    /// = the request's method. `None` for `allow` and `deny`, which never
+    /// mint an op.
     pub fn of(
         level: AccessLevel,
         decided_by: &DecidedBy,
@@ -127,8 +128,8 @@ impl Reuse {
         method: &str,
     ) -> Option<Reuse> {
         match level {
-            AccessLevel::Deny => None,
-            AccessLevel::AskAlways | AccessLevel::Allow => Some(Reuse::None),
+            AccessLevel::Deny | AccessLevel::Allow => None,
+            AccessLevel::AskAlways => Some(Reuse::None),
             AccessLevel::Ask => Some(match GrantUnit::of(decided_by, method) {
                 // A rule with no id has no unit: single-use, scoped or not.
                 None => Reuse::None,
@@ -257,10 +258,10 @@ impl Reuse {
     }
 }
 
-/// The tier a request-bound grant (`op_grants`) was minted under, stored as
-/// part of its key: a grant is redeemable only by a request whose own
-/// decision yields the same tier, so no tier spends or reuses another's
-/// approval for the same request line.
+/// The tier a request-bound permit was minted under, stored as part of its
+/// key: a permit is redeemable only by a request whose own decision yields
+/// the same tier, so no tier spends or reuses another's approval for the
+/// same request line.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BoundTier {
     /// Minted by an `ask-always` approval. Single-use; redeemed only by an
@@ -277,8 +278,8 @@ pub enum BoundTier {
 impl BoundTier {
     /// The tier for a decision: what an approval of it mints, and the only
     /// tier a request with that decision may redeem. `None` when the decision
-    /// has no request-bound grant (`allow`, `deny`, and an unscoped `ask` with
-    /// a unit, which the ask-grant ledger serves). Mint and redeem both call
+    /// has no request-bound permit (`allow`, `deny`, and an unscoped `ask`
+    /// with a unit, which a unit permit serves). Mint and redeem both call
     /// this, so they cannot disagree.
     pub fn of(
         level: AccessLevel,
@@ -296,8 +297,8 @@ impl BoundTier {
         }
     }
 
-    /// Whether redeeming spends the grant (single-use tiers) or only reads it
-    /// (`exact`, reused within its window).
+    /// Whether redeeming spends the permit (single-use tiers) or only reads
+    /// it (`exact`, reused within its window).
     pub fn single_use(&self) -> bool {
         !matches!(self, BoundTier::Exact(_))
     }
@@ -390,11 +391,8 @@ mod tests {
             Reuse::of(Ask, &rule(None, Some("x")), true, "POST"),
             Some(Reuse::None)
         );
-        // An allow-level miss never reuses for asks.
-        assert_eq!(
-            Reuse::of(Allow, &DecidedBy::Floor, false, "GET"),
-            Some(Reuse::None)
-        );
+        // An allow-level request mints no op.
+        assert_eq!(Reuse::of(Allow, &DecidedBy::Floor, false, "GET"), None);
         assert_eq!(Reuse::of(Deny, &send, false, "GET"), None);
         assert_eq!(Reuse::None.window(900), None);
         assert_eq!(Reuse::Exact.window(60), Some(60));

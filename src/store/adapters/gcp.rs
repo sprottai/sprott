@@ -11,10 +11,10 @@
 //! GCP console). The SA's private key is RSA; we use `jsonwebtoken` to
 //! sign the bearer JWT.
 //!
-//! The OAuth access token is cached in-memory per-adapter instance. The
-//! session cache holds ONE shared instance per configured store for the
-//! whole unlocked session (`SecretsCache::external_stores`), so the token
-//! survives across calls and dies with the cache on lock. Paths that build
+//! The OAuth access token is cached in-memory per-adapter instance. A
+//! snapshot holds ONE shared instance per configured store for as long as it
+//! is served (`crate::snapshot::Stores::adapters`), so the token survives
+//! across calls and dies with the snapshot (an install, or the lock). Paths that build
 //! a throwaway adapter from a live vault view (`resolve_value_async`) pay
 //! a fresh mint — they are ceremony-paced, so that's fine.
 
