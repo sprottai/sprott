@@ -5,7 +5,9 @@
 //! reads the body as a GraphQL-over-HTTP JSON request (`query`, optional
 //! `operationName` and `variables`; other keys are ignored, as that spec
 //! requires of a server). Policy decides on `fields`, the approval binds
-//! `request` and shows `calls`.
+//! `request` and shows `calls`. A variable travels as the server receives
+//! it, once, with each use a reference to it (`{"$var": name}`), so a value
+//! used many times costs its size once.
 //!
 //! Parsing and validation are apollo-compiler's (the parser Apollo Router builds
 //! on), without a schema. What this file adds are the spec's own steps for
@@ -29,9 +31,10 @@ const SHOW_STRING_MAX: usize = 200;
 const SHOW_STRING_KEEP: usize = 120;
 
 /// One top-level call: the field the server resolves (alias removed), its
-/// arguments as JSON (the spec's mapping: an enum is its name as a string, an
-/// argument whose variable was not provided is absent), and any directive on
-/// it other than `@skip`/`@include` (those decide whether it is a call at all).
+/// arguments as JSON (the spec's mapping: an enum is its name as a string, a
+/// variable use is `{"$var": name}`, an argument whose variable has no value
+/// is absent), and any directive on it other than `@skip`/`@include` (those
+/// decide whether it is a call at all).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     pub field: String,
@@ -40,10 +43,12 @@ pub struct Call {
 }
 
 /// The calls a request makes, in execution order (a mutation's root fields
-/// run serially in this order, so the order is part of the action).
+/// run serially in this order, so the order is part of the action), and the
+/// value of each variable they use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Operation {
     pub calls: Vec<Call>,
+    pub variables: Map<String, Json>,
 }
 
 /// Why a request was refused: the HTTP status and the reason, as a GraphQL
@@ -69,24 +74,48 @@ fn invalid(message: impl Into<String>) -> Refusal {
 }
 
 impl Operation {
-    /// The `request` var: every call in full, as canonical JSON (keys sorted,
-    /// so argument order, which the spec says carries no meaning, doesn't
-    /// change it). What an approval binds.
+    /// The `request` var: every call in full and the variables once, as
+    /// canonical JSON (keys sorted, so argument order, which the spec says
+    /// carries no meaning, doesn't change it). What an approval binds.
     pub fn request_var(&self) -> String {
-        canonical(&Json::Array(
-            self.calls.iter().map(|c| call_json(c, &|s| s)).collect(),
-        ))
+        let mut obj = Map::new();
+        obj.insert(
+            "calls".into(),
+            Json::Array(self.calls.iter().map(|c| call_json(c, &|s| s)).collect()),
+        );
+        if !self.variables.is_empty() {
+            obj.insert("variables".into(), Json::Object(self.variables.clone()));
+        }
+        canonical(&Json::Object(obj))
     }
 
     /// The `calls` var: the same calls for a person to read, within `budget`
-    /// bytes. A long string is always shortened to its start and length. Past
-    /// the budget, in turn: the biggest argument values become their size,
-    /// biggest first, until it fits (the short ids and names that say what a
-    /// call acts on go last); identical calls fold into one with a `count`;
-    /// arguments go and a field's calls fold into one with a `count`; calls
-    /// past the budget become a final `{"more": N}`. Each stage costs one pass.
+    /// bytes. A variable's value is put in place of its uses while that fits
+    /// the budget; past it the use stays a reference and the value is listed
+    /// once, in a final `{"variables": {…}}`. A long string is always
+    /// shortened to its start and length. Past the budget, in turn: the
+    /// biggest values become their size, biggest first, until it fits (the
+    /// short ids and names that say what a call acts on go last); identical
+    /// calls fold into one with a `count`; arguments go and a field's calls
+    /// fold into one with a `count`; calls past the budget become a final
+    /// `{"more": N}`. Each stage costs one pass.
     pub fn calls_var(&self, budget: usize) -> String {
         let mut shown: Vec<Json> = self.calls.iter().map(|c| call_json(c, &shorten)).collect();
+        let mut inlined = 0usize;
+        let mut listed = std::collections::BTreeSet::new();
+        for call in &mut shown {
+            inline_vars(call, &self.variables, budget, &mut inlined, &mut listed);
+        }
+        if !listed.is_empty() {
+            let vars: Map<String, Json> = listed
+                .iter()
+                .filter_map(|n| {
+                    let v = self.variables.get(n)?;
+                    Some((n.clone(), map_strings(v.clone(), &shorten)))
+                })
+                .collect();
+            shown.push(serde_json::json!({ "variables": vars }));
+        }
         let fits = |list: &[Json]| array_len(list) <= budget;
         if fits(&shown) {
             return canonical(&Json::Array(shown));
@@ -192,11 +221,12 @@ fn array_len(items: &[Json]) -> usize {
     2 + items.iter().map(|i| canonical(i).len()).sum::<usize>() + items.len().saturating_sub(1)
 }
 
-/// Replace argument values (of calls and of their directives) with their
-/// size, biggest first, until the list fits `budget` or none is left over
-/// [`SHOW_VALUE_MAX`].
+/// Replace values (a call's arguments, its directives' arguments, the listed
+/// variables) with their size, biggest first, until the list fits `budget`
+/// or none is left over [`SHOW_VALUE_MAX`].
 fn summarize_biggest(calls: &mut [Json], budget: usize) {
-    // (size, call, directive, argument)
+    // (size, element, slot, key): slot = None for `args` or `variables`,
+    // Some(i) for the i-th directive's args.
     let mut big: Vec<(usize, usize, Option<usize>, String)> = Vec::new();
     for (ci, call) in calls.iter().enumerate() {
         let mut add = |args: Option<&Json>, di: Option<usize>| {
@@ -207,7 +237,7 @@ fn summarize_biggest(calls: &mut [Json], budget: usize) {
                 }
             }
         };
-        add(call.get("args"), None);
+        add(call.get("args").or_else(|| call.get("variables")), None);
         if let Some(Json::Array(dirs)) = call.get("directives") {
             for (di, d) in dirs.iter().enumerate() {
                 add(d.get("args"), Some(di));
@@ -223,16 +253,66 @@ fn summarize_biggest(calls: &mut [Json], budget: usize) {
         let size = Json::String(format!("… ({n} bytes)"));
         len = len - n + canonical(&size).len();
         let call = &mut calls[ci];
-        let args = match di {
-            None => call.get_mut("args"),
+        let slot = match di {
+            None => {
+                if call.get("args").is_some() {
+                    call.get_mut("args")
+                } else {
+                    call.get_mut("variables")
+                }
+            }
             Some(di) => call
                 .get_mut("directives")
                 .and_then(|d| d.get_mut(di))
                 .and_then(|d| d.get_mut("args")),
         };
-        if let Some(v) = args.and_then(|a| a.get_mut(&key)) {
+        if let Some(v) = slot.and_then(|a| a.get_mut(&key)) {
             *v = size;
         }
+    }
+}
+
+/// The variable a `{"$var": name}` reference names.
+fn var_ref(v: &Json) -> Option<&str> {
+    let o = v.as_object()?;
+    if o.len() != 1 {
+        return None;
+    }
+    o.get("$var")?.as_str()
+}
+
+/// Put a variable's value (strings shortened) in place of each `{"$var":
+/// name}` in `v` while the bytes put in place stay within `budget`; a use
+/// left as a reference has its name added to `listed`.
+fn inline_vars(
+    v: &mut Json,
+    variables: &Map<String, Json>,
+    budget: usize,
+    inlined: &mut usize,
+    listed: &mut std::collections::BTreeSet<String>,
+) {
+    if let Some(name) = var_ref(v) {
+        let name = name.to_string();
+        if let Some(value) = variables.get(&name) {
+            let shown = map_strings(value.clone(), &shorten);
+            let size = canonical(&shown).len();
+            if *inlined + size <= budget {
+                *inlined += size;
+                *v = shown;
+            } else {
+                listed.insert(name);
+            }
+        }
+        return;
+    }
+    match v {
+        Json::Array(a) => a
+            .iter_mut()
+            .for_each(|x| inline_vars(x, variables, budget, inlined, listed)),
+        Json::Object(o) => o
+            .values_mut()
+            .for_each(|x| inline_vars(x, variables, budget, inlined, listed)),
+        _ => {}
     }
 }
 
@@ -268,15 +348,8 @@ fn shorten(s: String) -> String {
     format!("{start}… ({n} chars)")
 }
 
-/// How many bytes substituting variables into the calls may cost, relative
-/// to the body they came from: a value used a few times is fine, one used
-/// thousands of times is refused instead of multiplied.
-const SUBSTITUTION_FACTOR: usize = 8;
-const SUBSTITUTION_FLOOR: usize = 64 * 1024;
-
-/// Read a parsed JSON body of `body_len` bytes as the GraphQL operation a
-/// server would execute.
-pub fn read(body: &Json, body_len: usize) -> Result<Operation, Refusal> {
+/// Read a parsed JSON body as the GraphQL operation a server would execute.
+pub fn read(body: &Json) -> Result<Operation, Refusal> {
     let obj = body.as_object().ok_or_else(|| {
         bad_request("the body is not a GraphQL request (a JSON object with a query)")
     })?;
@@ -323,10 +396,7 @@ pub fn read(body: &Json, body_len: usize) -> Result<Operation, Refusal> {
     }
 
     let op = get_operation(&doc, op_name)?;
-    let mut vars = variable_values(op, provided)?;
-    vars.budget = body_len
-        .saturating_mul(SUBSTITUTION_FACTOR)
-        .max(SUBSTITUTION_FLOOR);
+    let vars = variable_values(op, provided)?;
     let fragments: std::collections::HashMap<&str, &ast::FragmentDefinition> = doc
         .definitions
         .iter()
@@ -363,7 +433,10 @@ pub fn read(body: &Json, body_len: usize) -> Result<Operation, Refusal> {
                 .collect::<Result<_, Refusal>>()?,
         });
     }
-    Ok(Operation { calls })
+    Ok(Operation {
+        calls,
+        variables: vars.values,
+    })
 }
 
 /// The diagnostics as a GraphQL server reports them: each message with the
@@ -416,16 +489,12 @@ fn get_operation<'d>(
     }
 }
 
-/// The operation's variables: the ones it declares, the values it runs with,
-/// and how many bytes substituting them has cost so far against `budget`
-/// (a variable used many times is copied each time).
+/// The operation's variables: the ones it declares, and the values it runs
+/// with.
 #[derive(Default)]
 struct Vars {
     declared: std::collections::HashSet<String>,
     values: Map<String, Json>,
-    sizes: std::collections::HashMap<String, usize>,
-    spent: std::cell::Cell<usize>,
-    budget: usize,
 }
 
 /// The variable values the operation runs with (§6.1.2): the provided value,
@@ -441,7 +510,6 @@ fn variable_values(
         vars.declared.insert(name.to_string());
         if let Some(v) = provided.get(name) {
             check_numbers(v)?;
-            vars.sizes.insert(name.to_string(), canonical(v).len());
             vars.values.insert(name.to_string(), v.clone());
         } else if let Some(default) = &def.default_value {
             if let Some(v) = value(default, &Vars::default())? {
@@ -536,7 +604,11 @@ fn included(directives: &ast::DirectiveList, vars: &Vars) -> Result<bool, Refusa
             .find(|a| a.name == "if")
             .map(|a| value(&a.value, vars))
             .transpose()?
-            .flatten();
+            .flatten()
+            .and_then(|c| match var_ref(&c) {
+                Some(name) => vars.values.get(name).cloned(),
+                None => Some(c),
+            });
         match cond {
             Some(Json::Bool(b)) if b != want => return Ok(false),
             Some(Json::Bool(_)) => {}
@@ -577,9 +649,10 @@ fn check_numbers(v: &Json) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// A literal as JSON, with variables substituted. `None` = absent (a variable
-/// with no value): an argument or object field it fills is left out, a list
-/// item becomes null. A number past what JSON carries exactly is refused.
+/// A literal as JSON, a variable use as `{"$var": name}`. `None` = absent (a
+/// variable with no value): an argument or object field it fills is left
+/// out, a list item becomes null. A number past what JSON carries exactly is
+/// refused.
 fn value(v: &ast::Value, vars: &Vars) -> Result<Option<Json>, Refusal> {
     Ok(Some(match v {
         ast::Value::Null => Json::Null,
@@ -591,14 +664,10 @@ fn value(v: &ast::Value, vars: &Vars) -> Result<Option<Json>, Refusal> {
             )))
         }
         ast::Value::Variable(name) => {
-            let spent = vars.spent.get() + vars.sizes.get(name.as_str()).copied().unwrap_or(0);
-            if spent > vars.budget {
-                return Err(bad_request(format!(
-                    "the query substitutes ${name} too many times for its size"
-                )));
-            }
-            vars.spent.set(spent);
-            return Ok(vars.values.get(name.as_str()).cloned());
+            return Ok(vars
+                .values
+                .contains_key(name.as_str())
+                .then(|| serde_json::json!({ "$var": name.as_str() })));
         }
         ast::Value::String(s) => Json::String(s.clone()),
         ast::Value::Boolean(b) => Json::Bool(*b),
@@ -646,10 +715,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn read(body: &Json) -> Result<Operation, Refusal> {
-        super::read(body, body.to_string().len())
-    }
-
     fn calls(body: Json) -> String {
         read(&body).unwrap().calls_var(8 * 1024)
     }
@@ -665,7 +730,10 @@ mod tests {
             op.calls_var(8192),
             r#"[{"args":{"id":"abc"},"field":"serviceDelete"}]"#
         );
-        assert_eq!(op.request_var(), op.calls_var(8192));
+        assert_eq!(
+            op.request_var(),
+            r#"{"calls":[{"args":{"id":"abc"},"field":"serviceDelete"}]}"#
+        );
         assert_eq!(op.fields().join("\n"), "serviceDelete");
     }
 
@@ -875,14 +943,26 @@ mod tests {
     }
 
     #[test]
-    fn a_variable_used_too_often_for_its_size_is_refused() {
+    fn a_variable_used_many_times_costs_its_size_once() {
         let refs: String = (0..10_000).map(|_| "$v, ").collect();
         let q = format!("mutation($v: String!) {{ f(x: [{refs}]) }}");
         let body = json!({"query": q, "variables": {"v": "x".repeat(10_000)}});
-        assert_eq!(refused(body), 400);
-        // A small value used often is fine.
-        let body = json!({"query": q, "variables": {"v": "id"}});
-        assert!(read(&body).is_ok());
+        let body_len = body.to_string().len();
+        let op = read(&body).unwrap();
+        assert!(op.request_var().len() < 8 * body_len);
+        assert!(op.request_var().contains(r#"{"$var":"v"}"#));
+        let shown = op.calls_var(8192);
+        assert!(shown.len() <= 8192);
+        assert!(shown.contains(r#""variables""#), "{shown}");
+        // A small value used a few times is shown in place.
+        let q = "mutation($id: String!) { a(id: $id) b(id: $id) }";
+        let shown = read(&json!({"query": q, "variables": {"id": "svc-1"}}))
+            .unwrap()
+            .calls_var(8192);
+        assert_eq!(
+            shown,
+            r#"[{"args":{"id":"svc-1"},"field":"a"},{"args":{"id":"svc-1"},"field":"b"}]"#
+        );
     }
 
     #[test]

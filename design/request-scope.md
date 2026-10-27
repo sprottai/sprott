@@ -69,9 +69,12 @@ consent = "Pay {{ vars.amount }} to {{ vars.merchant }}"   # {{ vars.x | filter 
   - `{ in = "body", at = "/ptr" }` = the explicit long form of the bare string;
   - `{ in = "graphql", at = "request" | "calls" | "fields" }` = the body read as
     the GraphQL operation a server would run: `request` is every top-level call
-    with its arguments as canonical JSON (what an approval binds), `calls` the
-    same shortened for a person to read (what the card shows), `fields` the list
-    of called field names (what rules decide on).
+    with its arguments and the variables once, as canonical JSON (what an
+    approval binds; a variable use is a `{"$var": name}` reference, as the
+    server receives it, so a value used many times costs its size once),
+    `calls` the same with values in place where they fit, shortened for a
+    person to read (what the card shows), `fields` the list of called field
+    names (what rules decide on).
   Addressing is structural (RFC 6901), never a regex over serialized bytes, so
   key order / whitespace don't matter. A pointer that doesn't resolve yields an
   **undefined** var. A source that can't be read the way its standard says

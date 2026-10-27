@@ -756,9 +756,8 @@ impl<'a> Reads<'a> {
     /// The body as the GraphQL operation a server would run.
     fn graphql(&mut self) -> Result<Option<&graphql::Operation>, Unreadable> {
         if self.gql.is_none() {
-            let len = self.body.map_or(0, <[u8]>::len);
             let read = match self.json() {
-                Ok(Some(body)) => graphql::read(body, len).map(Some).map_err(Unreadable::from),
+                Ok(Some(body)) => graphql::read(body).map(Some).map_err(Unreadable::from),
                 Ok(None) => Ok(None),
                 Err(e) => Err(e),
             };
@@ -2508,7 +2507,7 @@ secrets = ["GITHUB_TOKEN"]
             vec![
                 ("calls".to_string(), call.clone()),
                 ("fields".to_string(), r#"["serviceDelete"]"#.to_string()),
-                ("request".to_string(), call),
+                ("request".to_string(), format!(r#"{{"calls":{call}}}"#)),
             ]
         );
         assert_eq!(rs.consent.as_deref(), Some("{{ vars.calls | graphql }}"));
