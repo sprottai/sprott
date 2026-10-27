@@ -792,6 +792,8 @@ User 可在 vault `services.<name>.memory_ttl` 显式覆盖。
 | `Custom("vault-lock")` | 锁定：清空 secrets_cache + 进入 Locked。Grant required —— lock 本身是 daemon state mutation，SUDP 不变量"U-attested state changes only" 同样适用（否则任何持 session token 的 attacker 可以 DOS-lock）。 |
 | `Enroll` | First-time setup：建 vault 后 **auto-unlock**（W_c 已在 grant 里，inline bootstrap，省一次 ceremony）。 |
 
+**只有 `vault-unlock` 能进入 Unlocked。** 其余重建缓存的路径（sync 拉取后的刷新、本机写入、approved write、connect exchange）共用一个 install：同一 vault 的 install 由一把 build mutex 串行；swap 时在 state lock 下检查 ledger gate 与 `is_closed`，vault 已是 Locked 就丢弃这次结果，绝不重新解锁。写入已落盘但这次 install 没有生效时，回报 "stored; served on this device after `sprott unlock`"，approved write 仍保持 approved。非解锁的 install 只在"不倒退"时生效：当前缓存读得到的行在新 fold 里变成读不出，就保留当前缓存并置 key-changed。
+
 **Custom 变体的 paper 定位**：SUDP 协议层只承诺 6 个 core acts (Use/Export/Write/Rotate/Enroll/Revoke) 的语义+安全证明；`Custom(name)` 是 deployment 扩展槽，享受 grant machinery 但 dispatch 自定义。Sprott 用 `vault-unlock` / `vault-lock` 表达 lifecycle 而非污染 SUDP 表面。
 
 **Daemon-side auto-lock timer = 不引入。** 它会等价于把所有 `allow` 政策变成 "ask every N minutes"，违背 `allow` 语义（"once unlocked, no further friction during session"）。Lock 永远是 user-initiated，daemon 仅在进程重启时实质重置（vault_states 不持久化，重启 = 全部 Locked）。

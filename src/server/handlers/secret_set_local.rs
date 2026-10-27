@@ -109,12 +109,6 @@ pub async fn create(
         crate::server::handlers::approve::validate_secret_set(key_raw, &hosts, no_broker)?;
     let conn = key.to_ascii_lowercase();
 
-    // The gate: `K` is resident only while the vault is unlocked. Locked → tell
-    // the CLI to fall back to the passkey ceremony (refused while locked).
-    let Some(k) = state.cloned_state_key(&vault_id) else {
-        return Ok(Json(json!({ "written": false, "locked": true })));
-    };
-
     // Serialize with every other writer that reseals this vault body (connect
     // exchange, oauth rotation, grant-approve writes) — same lock those use.
     let (removed_prior_anchor, current_anchors, existed, used_by, installed) = {
@@ -122,6 +116,12 @@ pub async fn create(
             .vault_write_guard(&vault_id)
             .await
             .map_err(|error| error.app_error())?;
+        // The gate: `K` is resident only while the vault is unlocked. Read under
+        // the write lock (lock runs under it too), so a write that lost the race
+        // to `sprott lock` reads as locked instead of sealing with the evicted K.
+        let Some(k) = state.cloned_state_key(&vault_id) else {
+            return Ok(Json(json!({ "written": false, "locked": true })));
+        };
         let mut view =
             crate::server::handlers::metadata::open_view_with_state_key(&state, &vault_id, &k)?;
         let base = crate::storage::sealed_vault::ViewBase::of(&view)?;

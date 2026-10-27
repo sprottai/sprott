@@ -606,12 +606,14 @@ async fn apply_pending_connects_inner(
     vault_id: &str,
     injected: Option<std::collections::BTreeMap<String, String>>,
 ) -> ConnectReport {
-    let Some(k) = state.cloned_state_key(vault_id) else {
-        return ConnectReport::default(); // Locked — no retained K; next unlock retries.
-    };
-
     let Ok(_guard) = state.vault_write_guard(vault_id).await else {
         return ConnectReport::default();
+    };
+
+    // Read under the write lock (lock runs under it too), so a lock that won
+    // the race leaves nothing to seal with an evicted K.
+    let Some(k) = state.cloned_state_key(vault_id) else {
+        return ConnectReport::default(); // Locked — no retained K; next unlock retries.
     };
 
     // Rotated refresh tokens not stored yet: stored again now.
