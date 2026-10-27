@@ -222,6 +222,18 @@ mod tests {
         }
     }
 
+    /// With no request line, the op names the secrets it uses: one, or
+    /// several (a request that resolved more than one KEY).
+    #[test]
+    fn use_line_without_a_request_names_its_secrets() {
+        let one = render_operation(&use_op(json!({})));
+        assert!(one.starts_with("Use the secret at \"GITHUB_TOKEN\""), "{one}");
+        let mut op = use_op(json!({}));
+        op.act.target = "CF_ACCOUNT, CF_TOKEN".into();
+        let two = render_operation(&op);
+        assert!(two.starts_with("Use the secrets at \"CF_ACCOUNT, CF_TOKEN\""), "{two}");
+    }
+
     /// A CLI / headless approver reads the level, the reuse (rule label or
     /// floor class, with the request's class for a rule) and the window.
     #[test]

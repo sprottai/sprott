@@ -291,38 +291,35 @@ fn bearer(phantom: &str) -> String {
 
 // ── the two cases this fixes ────────────────────────────────────────────────
 
-/// A raw connection `railway` holding RAILWAY_TOKEN, a role phantom, an
-/// ask-always rule on a GraphQL delete: approve once, the replay is
-/// forwarded with the token (the approval used to be spent on a replay that
-/// found no value for the role, and asked again). On this tree the built-in
-/// `delete-infra` reads `vars.fields` from Railway's `[requests]` shape,
-/// which a raw connection has none of, so the case takes the 2.0.1 rule
-/// (a body regex) as the owner's own rule on the connection.
+/// A raw connection `railway` holding RAILWAY_TOKEN, its role phantom, and
+/// the built-in ask-always rule `delete-infra` (a raw connection named like
+/// a service is decided by its rules and read by its shapes): approve once,
+/// the replay is forwarded with the token (the approval used to be spent on
+/// a replay that found no value for the role, and asked again).
 #[tokio::test]
 async fn railway_raw_role_phantom_ask_always_replay_is_forwarded() {
     let (_dir, state) = new_state();
     Vault::new()
         .raw("railway", "backboard.railway.com", &["RAILWAY_TOKEN"])
         .secret("RAILWAY_TOKEN", "rw-token")
-        .rule(
-            "railway",
-            "delete-service",
-            "POST /graphql/**",
-            AccessLevel::AskAlways,
-            Some("serviceDelete"),
-        )
         .unlock(&state);
     let url = "https://backboard.railway.com/graphql/v2";
     let auth = bearer("__sprott__railway__railway_token__");
     let body = r#"{"query":"mutation { serviceDelete(id: \"s\") }"}"#;
     let op = send(&state, "POST", url, &auth, body).await.ask();
-    assert_eq!(target(&state, &op), "RAILWAY_TOKEN");
+    {
+        let approvals = state.approvals.lock().unwrap();
+        let rec = approvals.get_any(&op).unwrap();
+        assert_eq!(rec.op.act.target, "RAILWAY_TOKEN");
+        assert_eq!(rec.op.act.scope["level"], "ask-always");
+        assert_eq!(rec.op.act.scope["reuse"], "none");
+    }
     approve(&state, &op);
     let (sent, _) = send(&state, "POST", url, &auth, body).await.sent();
     assert_eq!(sent, "Bearer rw-token");
     // One approval, one replay.
     send(&state, "POST", url, &auth, body).await.ask();
-    // A query the rule does not match is allowed and forwarded as is.
+    // A query no rule matches is allowed and forwarded.
     let read = r#"{"query":"query { me { name } }"}"#;
     assert_eq!(send(&state, "POST", url, &auth, read).await.sent().0, "Bearer rw-token");
 }
@@ -1221,4 +1218,319 @@ async fn s_outlives_a_re_unlock_and_a_k_rotation() {
         .authorize(V, first, [("SVC_TOKEN".to_string(), at)].into_iter().collect(), None)
         .unwrap();
     assert_eq!(state.materialize(V, &auth).unwrap().get("SVC_TOKEN"), Some(&b"tok"[..]));
+}
+
+// ── minted connections and stored rotations ─────────────────────────────────
+
+/// A vault definition minting access tokens from a refresh token (its token
+/// endpoint is pointed at a local server once served: the gate admits only
+/// a public https one).
+const MINTED: &str = r#"
+[service]
+id = "acme"
+name = "Acme"
+hosts = ["api.acme.dev"]
+secrets = ["ACME_REFRESH_TOKEN"]
+[auth]
+type = "oauth2"
+authorization_url = "https://auth.acme.dev/authorize"
+token_url = "https://auth.acme.dev/token"
+client_id = "acme-public"
+refresh_token = "ACME_REFRESH_TOKEN"
+"#;
+
+/// A rotating token endpoint: of each family only the newest refresh token
+/// `<family>-<n>` is good; a refresh answers access token `at-<family>-<n+1>`
+/// and refresh token `<family>-<n+1>`. Every refresh token it was sent, in
+/// order.
+struct TokenEndpoint {
+    url: String,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+async fn token_endpoint(expires_in: u64) -> TokenEndpoint {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let newest: Arc<std::sync::Mutex<HashMap<String, u32>>> = Default::default();
+    let (log, issued) = (seen.clone(), newest.clone());
+    let app = axum::Router::new().route(
+        "/token",
+        axum::routing::post(move |body: String| {
+            let (log, issued) = (log.clone(), issued.clone());
+            async move {
+                let sent = url::form_urlencoded::parse(body.as_bytes())
+                    .find(|(k, _)| k == "refresh_token")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                log.lock().unwrap().push(sent.clone());
+                let (family, n) = sent.rsplit_once('-').unwrap_or(("", ""));
+                let n: u32 = n.parse().unwrap_or(u32::MAX);
+                let mut issued = issued.lock().unwrap();
+                let current = *issued.entry(family.to_string()).or_insert(0);
+                if n != current {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": "invalid_grant" })),
+                    );
+                }
+                issued.insert(family.to_string(), n + 1);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(json!({
+                        "access_token": format!("at-{}-{}", family, n + 1),
+                        "expires_in": expires_in,
+                        "refresh_token": format!("{}-{}", family, n + 1),
+                    })),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    TokenEndpoint {
+        url: format!("http://{}/token", addr),
+        seen,
+    }
+}
+
+impl TokenEndpoint {
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Point the served snapshot's minted definitions at this endpoint.
+    fn serve(&self, state: &AppState) {
+        let url = self.url.clone();
+        state.edit_snapshot(V, |s| {
+            for def in s.inputs.custom.values_mut() {
+                if let Some(crate::service::AuthDef::Oauth2(o)) = def.auth.as_mut() {
+                    o.token_url = Some(url.clone());
+                }
+            }
+        });
+    }
+}
+
+/// The vault's per-item store on disk under K, holding these secrets (what
+/// a rotation writes to; the snapshot is served from the matching view).
+fn store_secrets(state: &AppState, secrets: &[(&str, &str)]) {
+    use crate::storage::item::{ItemPayload, VaultKeys};
+    use crate::storage::sealed_vault::{read_per_item, write_per_item_atomic, PerItemVault};
+    type S = sudp::primitives::StdPrimitives;
+    let path = state.vaults.per_item_path(V).unwrap();
+    let mut pv = read_per_item(&path).unwrap().unwrap_or_else(|| {
+        PerItemVault::build_initial(
+            b"c".to_vec(),
+            "x".into(),
+            "y".into(),
+            "Dev".into(),
+            vec![0u8; 32],
+            vec![0u8; 48],
+        )
+        .unwrap()
+    });
+    for (key, value) in secrets {
+        let payload = ItemPayload::secret_live(*key, *value);
+        pv.seal_and_bump::<S>(VaultKeys::single(&K), V, payload.ns, &payload.name.clone(), &payload)
+            .unwrap();
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    write_per_item_atomic(&path, &pv).unwrap();
+}
+
+/// What follows a token "more than an hour" later: the in-process memory of
+/// rotations (one hour) is gone.
+fn an_hour_passes(state: &AppState) {
+    state.oauth_rotated_to.lock().unwrap().clear();
+}
+
+/// A stored rotation keeps every permit and serves the new token from the
+/// snapshot it patched, past the hour the in-process rotation memory lasts,
+/// rotation after rotation, with no install.
+#[tokio::test]
+async fn a_stored_rotation_keeps_permits_and_serves_the_newest_token() {
+    let (_dir, state) = new_state();
+    let tokens = token_endpoint(0).await;
+    Vault::new()
+        .service("acme", MINTED)
+        .secret("ACME_REFRESH_TOKEN", "rt-0")
+        .rule("acme", "t", "GET /x", AccessLevel::Ask, None)
+        .unlock(&state);
+    store_secrets(&state, &[("ACME_REFRESH_TOKEN", "rt-0")]);
+    tokens.serve(&state);
+    let url = "https://api.acme.dev/x";
+    let auth = bearer("__sprott__acme__");
+    let op = send(&state, "GET", url, &auth, "").await.ask();
+    assert_eq!(target(&state, &op), "ACME_REFRESH_TOKEN");
+    approve(&state, &op);
+    for n in 1..=3 {
+        let (sent, _) = send(&state, "GET", url, &auth, "").await.sent();
+        assert_eq!(sent, format!("Bearer at-rt-{n}"), "the window and the token survive");
+        assert_eq!(
+            state.served_native(V, "ACME_REFRESH_TOKEN"),
+            Some(format!("rt-{n}").into_bytes())
+        );
+        an_hour_passes(&state);
+    }
+    assert_eq!(tokens.seen(), vec!["rt-0", "rt-1", "rt-2"]);
+}
+
+/// A rotation stored, then one that can't be: the newest token is used
+/// meanwhile and the retry stores it, after which it is served.
+#[tokio::test]
+async fn a_stored_then_unstored_rotation_keeps_the_newest_token() {
+    let (_dir, state) = new_state();
+    let tokens = token_endpoint(0).await;
+    Vault::new()
+        .service("acme", MINTED)
+        .secret("ACME_REFRESH_TOKEN", "rt-0")
+        .unlock(&state);
+    store_secrets(&state, &[("ACME_REFRESH_TOKEN", "rt-0")]);
+    tokens.serve(&state);
+    let url = "https://api.acme.dev/x";
+    let auth = bearer("__sprott__acme__");
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer at-rt-1");
+    let path = state.vaults.per_item_path(V).unwrap();
+    let good = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer at-rt-2");
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer at-rt-3");
+    assert!(state.has_pending_rotations(V));
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, good).unwrap();
+    crate::auth::connect::retry_pending_rotations(&state, V).await;
+    assert!(!state.has_pending_rotations(V));
+    assert_eq!(state.served_native(V, "ACME_REFRESH_TOKEN"), Some(b"rt-3".to_vec()));
+    an_hour_passes(&state);
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer at-rt-4");
+    assert_eq!(tokens.seen(), vec!["rt-0", "rt-1", "rt-2", "rt-3"]);
+}
+
+/// External store listed before native, not holding the refresh token: a
+/// stored rotation lands in native, and the next request walks again and
+/// takes it from there (the patch dropped the KEY's memo entry), refresh
+/// after refresh.
+#[tokio::test]
+async fn an_external_first_store_without_the_token_serves_the_newest_rotation() {
+    let (_dir, state) = new_state();
+    let tokens = token_endpoint(0).await;
+    let name = format!("rotate-{}", uuid::Uuid::new_v4());
+    let ext = crate::store::memory::store(&name);
+    Vault::new()
+        .service("acme", MINTED)
+        .secret("ACME_REFRESH_TOKEN", "rt-0")
+        .store(&name, true)
+        .unlock(&state);
+    store_secrets(&state, &[("ACME_REFRESH_TOKEN", "rt-0")]);
+    tokens.serve(&state);
+    let url = "https://api.acme.dev/x";
+    let auth = bearer("__sprott__acme__");
+    for n in 1..=3 {
+        assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, format!("Bearer at-rt-{n}"));
+        an_hour_passes(&state);
+    }
+    assert_eq!(tokens.seen(), vec!["rt-0", "rt-1", "rt-2"]);
+    assert_eq!(ext.calls(), 3, "one walk per patched snapshot");
+}
+
+/// A refresh token on an ask floor is sealed; a stored rotation re-seals the
+/// new one, which is served hours later with no install.
+#[tokio::test]
+async fn a_non_resident_rotating_connection_serves_its_new_token() {
+    let (_dir, state) = new_state();
+    let tokens = token_endpoint(0).await;
+    Vault::new()
+        .service("acme", MINTED)
+        .secret("ACME_REFRESH_TOKEN", "rt-0")
+        .floor("acme", AccessLevel::Ask, AccessLevel::Ask)
+        .unlock(&state);
+    store_secrets(&state, &[("ACME_REFRESH_TOKEN", "rt-0")]);
+    tokens.serve(&state);
+    assert_eq!(state.snapshot(V).unwrap().holds("ACME_REFRESH_TOKEN"), Some("sealed"));
+    let url = "https://api.acme.dev/x";
+    let auth = bearer("__sprott__acme__");
+    let op = send(&state, "GET", url, &auth, "").await.ask();
+    approve(&state, &op);
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer at-rt-1");
+    assert_eq!(state.snapshot(V).unwrap().holds("ACME_REFRESH_TOKEN"), Some("sealed"));
+    an_hour_passes(&state);
+    an_hour_passes(&state);
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer at-rt-2");
+    assert_eq!(tokens.seen(), vec!["rt-0", "rt-1"]);
+}
+
+/// Seal `vault` as a whole-blob `vault.dat` under K (no per-item store).
+fn write_whole_blob(state: &AppState, vault: &Vault) {
+    use sudp::primitives::domain::DS_SEAL;
+    use sudp::primitives::{Aead, ChaCha20Poly1305};
+    let mut m = sudp::state::ProtectedState::new();
+    m.aux = serde_json::to_value(&vault.aux).unwrap();
+    for (key, value) in &vault.secrets {
+        m.put_secret(key.clone(), value.clone());
+    }
+    let version = sudp::state::CURRENT_VERSION;
+    let mut ad = DS_SEAL.to_vec();
+    ad.extend_from_slice(&version.to_be_bytes());
+    let ct = ChaCha20Poly1305::seal(&K, &m.to_canonical().unwrap(), &ad).unwrap();
+    let sealed: crate::storage::SealedVault = serde_json::from_value(json!({
+        "version": version,
+        "registry": {},
+        "credentials": [],
+        "ciphertext": base64::engine::general_purpose::STANDARD.encode(&ct),
+    }))
+    .unwrap();
+    let path = state.vaults.vault_path(V).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::storage::sealed_vault::write_atomic(&path, &sealed).unwrap();
+}
+
+fn unlock_from_store(state: &AppState) {
+    let key = crate::state::InstallKey::Unlock(zeroize::Zeroizing::new(K.to_vec()));
+    assert!(state.install(V, key).served());
+}
+
+/// A whole-blob vault: an ask-floor KEY is sealed like any other and served
+/// after approval.
+#[tokio::test]
+async fn a_whole_blob_ask_floor_key_is_sealed_and_served_after_approval() {
+    let (_dir, state) = new_state();
+    let vault = Vault::new()
+        .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
+        .secret("SVC_TOKEN", "blob-7f3a")
+        .floor("svc", AccessLevel::Ask, AccessLevel::Ask);
+    write_whole_blob(&state, &vault);
+    unlock_from_store(&state);
+    let snapshot = state.snapshot(V).unwrap();
+    assert_eq!(snapshot.holds("SVC_TOKEN"), Some("sealed"));
+    assert!(snapshot.readable.contains(crate::storage::sealed_vault::WHOLE_BLOB_ROW));
+    let url = "https://api.svc.dev/x";
+    let auth = bearer("__sprott__svc__");
+    let op = send(&state, "GET", url, &auth, "").await.ask();
+    approve(&state, &op);
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer blob-7f3a");
+}
+
+/// Two rotating connections used alternately on a whole-blob vault: each
+/// mints once. A stored rotation patches the snapshot (no install), so the
+/// other connection's access token is kept.
+#[tokio::test]
+async fn two_rotating_connections_used_alternately_mint_once_each() {
+    let (_dir, state) = new_state();
+    let tokens = token_endpoint(3600).await;
+    let vault = Vault::new()
+        .service("acme", MINTED)
+        .named("acme_two", "acme", &[("ACME_REFRESH_TOKEN", "ACME_REFRESH_TOKEN_TWO")])
+        .secret("ACME_REFRESH_TOKEN", "a-0")
+        .secret("ACME_REFRESH_TOKEN_TWO", "b-0");
+    write_whole_blob(&state, &vault);
+    unlock_from_store(&state);
+    tokens.serve(&state);
+    let one = bearer("__sprott__acme__");
+    let two = bearer("__sprott__acme_two__");
+    for _ in 0..3 {
+        assert_eq!(send(&state, "GET", "https://api.acme.dev/x", &one, "").await.sent().0, "Bearer at-a-1");
+        assert_eq!(send(&state, "GET", "https://api.acme.dev/x", &two, "").await.sent().0, "Bearer at-b-1");
+    }
+    assert_eq!(tokens.seen(), vec!["a-0", "b-0"]);
 }

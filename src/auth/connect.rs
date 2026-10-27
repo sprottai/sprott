@@ -699,9 +699,9 @@ async fn apply_pending_connects_inner(
 
     let services = &state.services;
     // Per-vault custom services (`aux.services`) so a user-authored inline
-    // [oauth2] service's connect can resolve — the bootstrap that populates
-    // this cache always runs before us (sync/watch/unlock+write all refresh
-    // the cache, THEN process connects), so it's fresh here.
+    // [oauth2] service's connect can resolve — the install that builds the
+    // snapshot always runs before us (sync/watch/unlock+write all install,
+    // THEN process connects), so it's fresh here.
     let custom = state.custom_services_snapshot(vault_id);
     let st = state.clone();
     let report = run_pending(services, &custom, &mut m, move |_conn, cfg, p| {
@@ -782,7 +782,7 @@ async fn apply_pending_connects_inner(
     };
 
     // Persist (see `write_view`): the per-item store, then the vault.dat
-    // mirror, then the cache from what landed, so /use sees the new
+    // mirror, then the snapshot from what landed, so a request sees the new
     // refresh_token without a manual lock/unlock. A connect the store did not
     // take is reported failed, never served from memory; one it took that
     // this device does not serve yet is reported so.
@@ -1272,14 +1272,15 @@ impl<'a> WriteKey<'a> {
 ///   2. the whole-blob `vault.dat` mirror, when one backs this vault and `k`
 ///      is the single key it is sealed under (a keyset's key bundle never
 ///      sealed it: it is left as it is);
-///   3. the cache, installed from the store as it now is
+///   3. the snapshot, installed from the store as it now is
 ///      ([`AppState::install`], under `key`'s rules): served only while the
-///      vault is Unlocked and the fold reads every row the served cache read.
+///      vault is Unlocked and the fold reads every row the served snapshot
+///      read.
 ///
 /// Returns the parts of the change the store refused or set aside, each
 /// `(item id, sentence)` (also noted for `sc sync` / `sc status`), and what
-/// the install did. `Err` when neither store took the change: the cache is
-/// left as it was.
+/// the install did. `Err` when neither store took the change: the snapshot
+/// is left as it was.
 fn write_view(
     state: &Arc<AppState>,
     vault_id: &str,

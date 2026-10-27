@@ -78,7 +78,7 @@ async fn drive(custom_op: &str, verb: &str, approval: &ApprovalArgs) -> Result<(
 
 /// Whether an Unlocked vault's status lines (`GET /v/{vid}/held`) say a new
 /// unlock is still needed: its key changed, or this device's copy is behind.
-fn unlock_still_needed(held: &[String]) -> bool {
+pub(crate) fn unlock_still_needed(held: &[String]) -> bool {
     held.iter().any(|line| {
         line == crate::error::VAULT_KEY_CHANGED_STATUS_MSG
             || line == crate::error::VAULT_BEHIND_STATUS_MSG

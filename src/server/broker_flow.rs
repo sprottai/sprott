@@ -144,8 +144,8 @@ pub async fn resolve_auth_value(
 ) -> Result<Vec<u8>> {
 
     // The connection's CURRENT refresh token: whatever path produced `raw`
-    // (the session cache, or a ceremony's fresh decrypt from the store, which
-    // may still hold a replaced value), it is followed through every rotation
+    // (the request's snapshot, or a ceremony's fresh decrypt from the store,
+    // which may still hold a replaced value), it is followed through every rotation
     // made since (stored or still pending), because the provider honors only
     // the newest. This is the one place every mint input passes through.
     let current = state.current_refresh_token(vault_id, conn_id, raw);
@@ -308,7 +308,7 @@ pub async fn resolve_auth_value(
                 new_rt,
                 false,
             ) {
-                // Landed durably in the store (the session cache now holds
+                // Landed durably in the store (the served snapshot now holds
                 // it, nothing is pending for the slot): sent to the cloud once
                 // this lock drops.
                 Ok(_) => crate::auth::connect::spawn_push(state, vault_id),

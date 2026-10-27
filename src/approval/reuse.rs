@@ -76,8 +76,8 @@ impl Class {
 }
 
 /// The policy unit an ask approval belongs to: what decided it, and the
-/// request's class. Keys the ask-grant ledger (`rule` / `floor` reuse) and a
-/// scoped ask's `exact` grant.
+/// request's class. Keys a `rule` / `floor` window permit and a scoped ask's
+/// `exact` permit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrantUnit {
     /// A rule, by id, and the class of the request it decided: a read

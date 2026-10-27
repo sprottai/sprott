@@ -355,8 +355,8 @@ pub async fn sync_vault_now(state: &Arc<AppState>, vault_id: &str) -> Result<Syn
     // The keyset now rides `/keys` (NOT the whole-blob `/blob`, which is a
     // keyset-lifecycle marker only); pull it FIRST so the item fold below sees a
     // fresh K-wrap layer. Best-effort — a 404 (endpoint not live) or a
-    // not-yet-per-item vault is a no-op. On item adoption, refresh the cache from
-    // the folded item view so the new rows are served without a re-unlock.
+    // not-yet-per-item vault is a no-op. On item adoption, install the snapshot
+    // from the folded item view so the new rows are served without a re-unlock.
     if let Some(cloud2) = cfg.cloud_backend.as_deref().filter(|s| !s.is_empty()) {
         if let Some(dk2) = device_key() {
             let lock = StoreLock::Take(state);
@@ -604,21 +604,21 @@ pub(crate) async fn pull_items_now(state: &Arc<AppState>, vault_id: &str) -> Res
     Ok(())
 }
 
-/// After a per-item pull adopted new rows, refresh the in-memory cache for an
+/// After a per-item pull adopted new rows, install the snapshot of an
 /// UNLOCKED vault from the store, under the key it holds — no passkey
 /// ([`AppState::install`]). Locked vault → nothing (the next unlock folds the
-/// new rows). A fold that cannot read a row the served cache reads (a
-/// rotated `K`) leaves the cache and notes the key change.
+/// new rows). A fold that cannot read a row the served snapshot reads (a
+/// rotated `K`) leaves the snapshot and notes the key change.
 pub(crate) fn refresh_after_item_pull(state: &Arc<AppState>, vault: &str) {
     match state.install(vault, crate::state::InstallKey::Held) {
         crate::state::Installed::Served => {
-            tracing::info!(vault = %vault, "per-item pull: cache refreshed from item rows");
+            tracing::info!(vault = %vault, "per-item pull: snapshot installed from item rows");
             // The console's install requests, handled as `sc service add`.
             crate::server::handlers::service_ops::requests::after_sync(state, vault);
         }
         crate::state::Installed::Refused => tracing::warn!(
             vault = %vault,
-            "per-item pull: not served, the held key can't read rows the cache reads (rotated K?); lock+unlock to see new state"
+            "per-item pull: not served, the store could not be folded or the held key can't read rows the snapshot reads (rotated K?); lock+unlock to see new state"
         ),
         crate::state::Installed::NotUnlocked => {}
     }
@@ -1654,11 +1654,11 @@ fn personal_tombstone_verified(
     crate::identity::verify(&pk, &crate::identity::vault_tombstone_input(vault), &sig)
 }
 
-/// After a runtime pull wrote a new `vault.dat`, refresh the in-memory cache
-/// for an UNLOCKED vault from the store, under the key it holds — no passkey
-/// ([`AppState::install`]). If the vault is Locked, nothing is cached to
+/// After a runtime pull wrote a new `vault.dat`, install the snapshot of an
+/// UNLOCKED vault from the store, under the key it holds — no passkey
+/// ([`AppState::install`]). If the vault is Locked, there is nothing to
 /// refresh; the next unlock reads the new file. If the new ciphertext was
-/// sealed under a ROTATED `K`, the held `K` can't open it — the cache stays
+/// sealed under a ROTATED `K`, the held `K` can't open it — the snapshot stays
 /// and the key change is noted (lock+unlock to see new state), mirroring the
 /// post-write refresh path.
 fn refresh_after_pull(state: &Arc<AppState>, vault: &str) {
@@ -1666,7 +1666,7 @@ fn refresh_after_pull(state: &Arc<AppState>, vault: &str) {
         .install(vault, crate::state::InstallKey::Held)
         .served()
     {
-        tracing::info!(vault = %vault, "cloud sync: cache refreshed after pull (no re-unlock)");
+        tracing::info!(vault = %vault, "cloud sync: snapshot installed after pull (no re-unlock)");
     }
 }
 

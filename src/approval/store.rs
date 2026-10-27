@@ -53,8 +53,8 @@ pub struct ApprovalRecord {
     pub policy_context: Option<PolicyContext>,
     /// Prefix of the agent api-key that TRIGGERED this op (op-agent binding,
     /// team §C1) — the daemon-side enforcement handle. Every agent-facing
-    /// consumption surface (proxy op poll, op_grants redeem, ask-cache
-    /// write/read) compares the acting key against this. The same value rides
+    /// consumption surface (proxy op poll, the permit an approval stores and
+    /// its lookup) compares the acting key against this. The same value rides
     /// in `o.act.scope.agent` so the human's signature covers it; this copy
     /// exists so enforcement never re-parses the signed op. `None` = op not
     /// created by an agent request (ceremonies) — no agent gate applies.
@@ -97,10 +97,10 @@ pub struct PolicyContext {
     /// the matched rule's `ttl`, the service / tag default's
     /// `ask_ttl`, or `Policy.timeout` as last resort.
     pub ttl_seconds: u64,
-    /// Resolved destination host of the request that created this op. The
-    /// ask-grant ledger is host-scoped (an approval for host A must not
-    /// authorize host B in the TTL), so the approve handler reads this when it
-    /// stores the permit. Stamped by the proxy at op-create.
+    /// Resolved destination host of the request that created this op. A
+    /// permit is host-scoped (an approval for host A must not authorize host
+    /// B in the TTL), so the approve handler reads this when it stores the
+    /// permit. Stamped by the proxy at op-create.
     pub host: Option<String>,
     /// The credentials the request resolved (its service id and KEYs): the
     /// permit an approval stores is keyed by them, so it serves only a replay
@@ -629,6 +629,27 @@ mod tests {
 
     fn ask() -> PolicyContext {
         pc(crate::core::policy::AccessLevel::Ask, 900)
+    }
+
+    /// A window's mint-time policy fingerprint joins the intent key: ops
+    /// minted under different policies never chain; an op without one keys
+    /// as before (the fixture below).
+    #[test]
+    fn a_window_intent_key_carries_its_policy_fingerprint() {
+        let op = use_op("/user", "v1");
+        let plain = intent_key(&op, &ask());
+        let a = PolicyContext {
+            policy_fp: Some([1u8; 32]),
+            ..ask()
+        };
+        let b = PolicyContext {
+            policy_fp: Some([2u8; 32]),
+            ..ask()
+        };
+        assert!(plain.is_some());
+        assert_ne!(intent_key(&op, &a), plain);
+        assert_ne!(intent_key(&op, &a), intent_key(&op, &b));
+        assert_eq!(intent_key(&op, &a), intent_key(&op, &a.clone()));
     }
 
     /// Pins the intent-key DEFINITION: tag directly concatenated (no

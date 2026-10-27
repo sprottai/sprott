@@ -2470,8 +2470,8 @@ impl AppState {
         self.snapshot(vault_id)?.connections.get(conn).cloned()
     }
 
-    /// Snapshot this vault's per-vault custom (`aux.services`) definitions from
-    /// the unlocked cache. The OAuth connect-finisher resolves a custom service's
+    /// This vault's per-vault custom (`aux.services`) definitions, from the
+    /// served snapshot. The OAuth connect-finisher resolves a custom service's
     /// exchange config against these — the global `self.services` registry holds
     /// built-ins only. Empty when the vault is Locked or none are authored.
     pub fn custom_services_snapshot(
@@ -3480,6 +3480,94 @@ mod install_tests {
         assert_eq!(served_names(&state), names(&["FOO"]));
         assert!(unlock(&state, &K).served());
         assert_eq!(served_names(&state), names(&["BAR"]));
+    }
+
+    /// An install refused for a reason other than the key (the store can't
+    /// be read): the served snapshot stays and the vault is behind its store,
+    /// shown on the status line, so `sprott unlock` proceeds on the Unlocked
+    /// vault; the key-changed note is not set. A served install clears it.
+    #[test]
+    fn an_install_refused_for_an_io_error_marks_the_vault_behind() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        assert!(unlock(&state, &K).served());
+        let path = state.vaults.per_item_path(V).unwrap();
+        let good = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(state.install(V, InstallKey::Held), Installed::Refused);
+        assert!(state.is_vault_behind(V));
+        assert!(!state.is_vault_key_changed(V));
+        assert_eq!(state.served_native(V, "FOO"), Some(b"v1".to_vec()));
+        let held = crate::server::handlers::metadata::held_lines(&state, V);
+        assert!(held.contains(&crate::error::VAULT_BEHIND_STATUS_MSG.to_string()), "{held:?}");
+        assert!(crate::cli::unlock::unlock_still_needed(&held));
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, good).unwrap();
+        assert!(state.install(V, InstallKey::Held).served());
+        assert!(!state.is_vault_behind(V));
+        assert!(!crate::cli::unlock::unlock_still_needed(
+            &crate::server::handlers::metadata::held_lines(&state, V)
+        ));
+        // A lock clears it too.
+        state.runtime(V).unwrap().behind.store(true, std::sync::atomic::Ordering::Release);
+        state.lock_vault(V);
+        assert!(!state.is_vault_behind(V));
+    }
+
+    /// A stored rotation patches the served snapshot without an install: the
+    /// new token is served, and a vault that was behind stays behind (the
+    /// patched copy is as far behind the store as the original).
+    #[test]
+    fn a_rotation_patch_serves_the_token_and_leaves_behind_set() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "rt-1");
+        let bar = put_secret(&state, &K, "BAR", "b");
+        assert!(unlock(&state, &K).served());
+        reseal_elsewhere(&state, &bar);
+        assert_eq!(state.install(V, InstallKey::Held), Installed::Refused);
+        assert!(state.is_vault_behind(V));
+        let stored = crate::auth::connect::persist_rotated_refresh_locked(
+            &state, V, "foo", "FOO", b"rt-1", "rt-2", false,
+        );
+        assert_eq!(stored, Ok(crate::auth::connect::RotationStored::Written));
+        assert_eq!(state.served_native(V, "FOO"), Some(b"rt-2".to_vec()));
+        assert!(state.is_vault_behind(V), "a patch is not an install");
+    }
+
+    /// The vault-unlock op on an Unlocked vault keeps its permits, its
+    /// minted access tokens and S; a lock drops them all.
+    #[test]
+    fn a_re_unlock_keeps_permits_tokens_and_s() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        assert!(unlock(&state, &K).served());
+        let key = PermitKey {
+            of: PermitFor::Request(OpGrantKey::new(
+                "ag",
+                "foo",
+                "POST",
+                "api.example.com",
+                "/x",
+                "",
+                &crate::approval::reuse::BoundTier::AskAlways,
+            )),
+            credentials: CredentialSet::new("foo", ["FOO".to_string()]),
+        };
+        assert!(state.permit_insert(V, key.clone(), now_secs() + 600, None));
+        state.oauth_access_insert(V, "h", b"at".to_vec(), u64::MAX);
+        // Count one open under the held S (it fails: nothing was sealed so).
+        let (seal, _) = state.fill_context(V).unwrap();
+        assert!(seal.open(V, "FOO", b"not sealed").is_none());
+        assert_eq!(state.seal_opens(V), 1);
+        assert!(unlock(&state, &K).served());
+        assert_eq!(state.permits(V).len(), 1);
+        assert_eq!(state.oauth_access_lookup(V, "h"), Some(b"at".to_vec()));
+        assert_eq!(state.seal_opens(V), 1, "the same S");
+        state.lock_vault(V);
+        assert!(unlock(&state, &K).served());
+        assert!(state.permits(V).is_empty());
+        assert_eq!(state.oauth_access_lookup(V, "h"), None);
     }
 
     /// `POST /v/{vid}/secret` (the unlocked `sprott set`).
