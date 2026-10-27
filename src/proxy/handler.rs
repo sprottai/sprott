@@ -595,6 +595,9 @@ impl BrokerHandler {
         // The service id policy/mint use; for a raw connection there is none so
         // the conn id stands in (registry lookups miss → global default floor).
         let service_id = conn_rec.service.clone().unwrap_or_else(|| conn.clone());
+        // The definition whose `[requests]` shapes read this request. `def`
+        // above stays the connection's own for roles and minting.
+        let shape_def = shape_definition(&self.state, &vault_id, def.as_ref(), &service_id);
         // Compute hosts from the record we hold — NOT a second cache lookup,
         // which would miss a synthesized default connection and wrongly empty the
         // anchor (→ spurious widen-deny). For the synthesized default this
@@ -674,13 +677,13 @@ impl BrokerHandler {
             // see, and no client sends one by mistake.
             if let Some(Err(e)) = &decoded {
                 if !matches!(e, DecodeError::Unsupported(_))
-                    || def.as_ref().is_some_and(|d| d.request_shape(&method, p).is_some())
+                    || shape_def.as_ref().is_some_and(|d| d.request_shape(&method, p).is_some())
                 {
                     write_forward_audit(&self.state, &refused, 0, None, Some(e.code()));
                     return Err(err_response(e.code(), &e.to_string()));
                 }
             }
-            let req_scope = def
+            let req_scope = shape_def
                 .as_ref()
                 .and_then(|d| d.extract_request_scope(&method, p, parts.uri.query(), readable));
             if let Some(rs) = req_scope.as_ref() {
@@ -1670,6 +1673,25 @@ fn plain(status: StatusCode, msg: &str) -> Response<Body> {
 /// and never an approval prompt over content the user can't read.
 /// `declared = 0` means the length was unknown (chunked) and the cap was hit
 /// while buffering.
+/// The definition whose `[requests]` shapes read a request: the one whose
+/// rules decide it. Policy resolves built-in rules by `service_id`, which for
+/// a raw connection is the connection id, so a raw connection named like a
+/// service gets that service's rules; its shapes must come from the same
+/// place, or a rule's `when` never has the vars its shape declares and the
+/// rule silently never fires. Custom first, as everywhere.
+fn shape_definition(
+    state: &AppState,
+    vault_id: &str,
+    def: Option<&crate::service::ServiceDef>,
+    service_id: &str,
+) -> Option<crate::service::ServiceDef> {
+    def.cloned().or_else(|| {
+        state
+            .custom_service(vault_id, service_id)
+            .or_else(|| state.services.get(service_id).cloned())
+    })
+}
+
 /// Buffer a brokered request's body for policy, at most `cap` bytes.
 async fn buffer_body(body: Body, cap: u64) -> Result<Vec<u8>, Response<Body>> {
     // `Limited` enforces the cap even without a Content-Length (chunked
@@ -2083,6 +2105,32 @@ mod tests {
             Some(Err(DecodeError::Corrupt(_)))
         ));
         assert_eq!(decode(&[("content-encoding", "gzip")], &gz, 16), Some(Err(DecodeError::OverCap(16))));
+    }
+
+    /// A raw connection named like a registry service is decided by that
+    /// service's rules (policy resolves them by the connection id), so its
+    /// requests are read by that service's shapes too: a `serviceDelete` on
+    /// a raw `railway` connection asks every time, as on the service's own.
+    #[test]
+    fn a_raw_connection_named_like_a_service_is_read_by_its_shapes() {
+        use crate::core::policy::{evaluate, AccessLevel, Policy};
+        let state = test_handler().state;
+        let def = shape_definition(&state, "v1", None, "railway").expect("the registry's railway");
+        let rules = state.services.default_policy_rules("railway").unwrap().to_vec();
+        let decide = |body: &str| {
+            let rs = def
+                .extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
+                .expect("shape");
+            assert!(rs.unreadable.is_none());
+            evaluate("POST", "/graphql/v2", Some(body), &rs.vars, Some(&rules), None, &Policy::default(), &["dev".into()])
+        };
+        assert_eq!(
+            decide(r#"{"query":"mutation Del($id: String!) { x: serviceDelete(id: $id) }","variables":{"id":"svc"}}"#),
+            AccessLevel::AskAlways
+        );
+        assert_eq!(decide(r#"{"query":"query { project(id: \"p\") { name } }"}"#), AccessLevel::Allow);
+        // A raw connection named like nothing has no shapes and no rules.
+        assert!(shape_definition(&state, "v1", None, "my-own-api").is_none());
     }
 
     /// A brokered request never upgrades to a WebSocket: hop-by-hop headers are
