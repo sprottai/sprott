@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use crate::approval::ApprovalStatus;
 use crate::audit::{STATUS_APPROVED, STATUS_REJECTED};
+use crate::auth::connect::WriteKey;
 use crate::error::{AppError, Result};
 use crate::passkey::PasskeyEntry;
 use crate::protocol::grant::{delivery_form, DeliveredVaultKey, DeliveryForm};
@@ -1218,9 +1219,10 @@ pub async fn approve_op(
             // shape Export-with-target="env" returned, so /try's editor
             // doesn't need a separate reveal call).
             "vault-unlock" => {
-                // Read seam: per-item store first (a web-enrolled vault has only
-                // vault.per-item.json, no vault.dat), whole-blob as Option fallback.
-                let (mut view, unlock_key) =
+                // The grant opens the vault (read seam: per-item store first,
+                // a web-enrolled vault has only vault.per-item.json, no
+                // vault.dat; whole-blob as Option fallback): its key `K`.
+                let (_, unlock_key) =
                     crate::server::handlers::metadata::open_view_for_grant_keep_key(
                         &state,
                         &vault_id,
@@ -1229,36 +1231,11 @@ pub async fn approve_op(
                         &validated.credential_id_bytes,
                         existing_vault.as_ref(),
                     )?;
-                // The read seam's view may be partial: a row this key can't open
-                // (or a body shape from a newer client) is skipped, never a reason
-                // to refuse the unlock. `complete` records whether every current
-                // row opened, which decides the key-changed note once K is held.
-                let has_per_item = state
-                    .vaults
-                    .per_item_path(&vault_id)
-                    .ok()
-                    .is_some_and(|p| p.exists());
-                let mut complete = !has_per_item;
-                if has_per_item {
-                    if let Some(v) = crate::sync::fold_with_key(&state, &vault_id, &unlock_key) {
-                        view = v;
-                        complete = true;
-                    }
-                }
                 // Before the vault serves: every held row is offered again under
                 // the key, then the cloud is pulled. A failed pull keeps
                 // retrying in the background and is reported (`sc status`).
-                let (adopted, pull_error) =
+                let (_, pull_error) =
                     crate::sync::catch_up_at_unlock(&state, &vault_id, &unlock_key).await;
-                if adopted {
-                    match crate::sync::fold_with_key(&state, &vault_id, &unlock_key) {
-                        Some(v) => {
-                            view = v;
-                            complete = true;
-                        }
-                        None => complete = false,
-                    }
-                }
                 // vault-unlock is a pure STATE TRANSITION: it uses the grant's
                 // W_c to open the vault, bootstrap the daemon's in-memory
                 // secrets cache, and flip the vault unlocked. It deliberately
@@ -1272,24 +1249,28 @@ pub async fn approve_op(
                 // whole vault's plaintext retrievable. Plaintext leaves the
                 // daemon ONLY through a scope-constrained, single-use `Export`
                 // op (the passkey-gated `sc secret get` / reveal path), never
-                // here. Bootstrap the cache from `view` (every allow-policy
-                // service's auth value via the v3 store_order; native-only at
-                // unlock — external adapters fetch lazily at /use); never
-                // materialize kv.
-                let cache = bootstrap_cache_from_view(&view, &state);
-                tracing::info!(
-                    vault = %vault_id,
-                    cached_services = cache.entries.len(),
-                    "vault unlocked"
-                );
-                state.unlock_vault(vault_id.clone(), cache, unlock_key);
-                // Settled only now that the new K is held: a watcher refresh that
-                // ran on the old K during the catch-up may have marked it again.
-                if complete {
-                    state.clear_vault_key_changed(&vault_id);
-                } else {
-                    state.mark_vault_key_changed(&vault_id);
+                // here. The install folds the store as the catch-up left it
+                // (a row this key can't open is skipped and noted as a key
+                // change, never a reason to refuse the unlock) and bootstraps
+                // the cache (every allow-policy service's auth value via the
+                // v3 store_order; native-only at unlock — external adapters
+                // fetch lazily at /use); never materialize kv. The only
+                // install that takes the vault from Locked to Unlocked.
+                let installed =
+                    state.install(&vault_id, crate::state::InstallKey::Unlock(unlock_key));
+                if !installed.served() {
+                    // Parked or revoked meanwhile, or the store unreadable:
+                    // nothing was unlocked.
+                    return Err(state
+                        .ledger_refusal()
+                        .or_else(|| state.vault_gone_error(&vault_id))
+                        .unwrap_or_else(|| {
+                            AppError::Internal(
+                                "the vault's store could not be read; it was not unlocked".into(),
+                            )
+                        }));
                 }
+                tracing::info!(vault = %vault_id, "vault unlocked");
                 match pull_error {
                     Some(e) => {
                         crate::sync::retry_pull_after_unlock(state.clone(), vault_id.clone(), e)
@@ -1465,15 +1446,16 @@ pub async fn approve_op(
                         "widen-host scope needs connection_id + host".into(),
                     ));
                 }
-                // Session snapshot first, so the agent's immediate retry passes
-                // the anchor, then persist DURABLY into `aux.connections[conn]`
+                // The host is checked before anything changes, the session
+                // included. Then the session snapshot, so the agent's immediate
+                // retry passes the anchor, then persist DURABLY into `aux.connections[conn]`
                 // so the grant survives a restart / re-unlock — the same
                 // open -> mutate -> reseal -> push path connection-add/secret-set
                 // use. The grant already carries W_c (every approve path attaches
                 // it, act-agnostic: cli/approve.rs + fe vault-grant.ts), so this
                 // opens + reseals the vault like any other mutating custom act.
-                state.widen_connection_host(&vault_id, &conn, &host);
                 crate::cli::conn::validate_raw_host(&host).map_err(AppError::BadRequest)?;
+                state.widen_connection_host(&vault_id, &conn, &host);
                 let (mut view, k) =
                     crate::server::handlers::metadata::open_view_for_grant_keep_key(
                         &state,
@@ -1520,7 +1502,13 @@ pub async fn approve_op(
                         );
                     }
                 }
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1530,10 +1518,12 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, conn = %conn, host = %host, "host widened (durable)");
-                (
+                let resp = with_served(
                     json!({ "ok": true, "act": "widen-host", "connection_id": conn, "host": host }),
-                    None,
-                )
+                    installed,
+                );
+                let cached = Some(resp.to_string());
+                (resp, cached)
             }
             // Inverse of widen-host — remove a host from a connection's anchor
             // (tighten access). Minted by `sc connection rm-host`; passkey-gated
@@ -1581,9 +1571,14 @@ pub async fn approve_op(
                         removed = hosts.len() != before;
                     }
                 }
+                let mut installed = crate::state::Installed::Served;
                 if removed {
-                    crate::auth::connect::persist_mutated_view(
-                        &state, &vault_id, &base, &view, &k,
+                    installed = crate::auth::connect::persist_mutated_view(
+                        &state,
+                        &vault_id,
+                        &base,
+                        &view,
+                        WriteKey::Grant(&k),
                     )?;
                     {
                         let state = state.clone();
@@ -1595,10 +1590,12 @@ pub async fn approve_op(
                     }
                 }
                 tracing::info!(vault = %vault_id, conn = %conn, host = %host, removed, "host narrowed");
-                (
+                let resp = with_served(
                     json!({ "ok": true, "act": "narrow-host", "connection_id": conn, "host": host, "removed": removed }),
-                    None,
-                )
+                    installed,
+                );
+                let cached = Some(resp.to_string());
+                (resp, cached)
             }
             // Remove one vault service definition, or every definition of one
             // source (`target` = a service id, or a source identity such as
@@ -1624,7 +1621,13 @@ pub async fn approve_op(
                     &validated.op.act.scope,
                 )
                 .map_err(AppError::BadRequest)?;
-                crate::server::handlers::service_ops::persist(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::server::handlers::service_ops::persist(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1634,10 +1637,13 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, removed = card.ids.len(), "service definitions removed");
-                let resp = json!({
-                    "ok": true, "act": "service-rm",
-                    "removed": card.ids, "referencing_connections": card.connections,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "service-rm",
+                        "removed": card.ids, "referencing_connections": card.connections,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -1673,7 +1679,13 @@ pub async fn approve_op(
                     &state.services,
                 )
                 .map_err(AppError::BadRequest)?;
-                crate::server::handlers::service_ops::persist(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::server::handlers::service_ops::persist(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1683,10 +1695,13 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, stored = card.ids.len(), removed = card.removes.len(), "service definitions stored");
-                let resp = json!({
-                    "ok": true, "act": "service-add",
-                    "ids": card.ids, "removed": card.removes,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "service-add",
+                        "ids": card.ids, "removed": card.removes,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -1734,7 +1749,13 @@ pub async fn approve_op(
                     .remove(&key)
                     .unwrap_or_default();
                 view.native_secrets.remove(&key);
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1744,10 +1765,13 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, key = %key, "secret removed");
-                let resp = json!({
-                    "ok": true, "act": "secret-rm",
-                    "removed": key, "referenced_by": referenced_by,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "secret-rm",
+                        "removed": key, "referenced_by": referenced_by,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -1791,7 +1815,13 @@ pub async fn approve_op(
                     &state.services,
                 )
                 .map_err(AppError::BadRequest)?;
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1804,14 +1834,17 @@ pub async fn approve_op(
                 // `kept_secrets` keeps its original shape ([key, [conn, …]]:
                 // still bound elsewhere) for older CLIs; the two newer reasons
                 // ride their own fields.
-                let resp = json!({
-                    "ok": true, "act": "connection-rm",
-                    "removed": id,
-                    "removed_secrets": removed_secrets,
-                    "kept_secrets": plan.shared,
-                    "kept_referenced": plan.referenced,
-                    "kept_untracked": plan.untracked,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "connection-rm",
+                        "removed": id,
+                        "removed_secrets": removed_secrets,
+                        "kept_secrets": plan.shared,
+                        "kept_referenced": plan.referenced,
+                        "kept_untracked": plan.untracked,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -2037,7 +2070,13 @@ pub async fn approve_op(
                     }
                 }
                 view.aux.connections.insert(id.clone(), record);
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -2047,11 +2086,14 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, connection = %id, "connection added");
-                let resp = json!({
-                    "ok": true, "act": "connection-add",
-                    "id": id, "service": service,
-                    "written": written, "referenced": referenced,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "connection-add",
+                        "id": id, "service": service,
+                        "written": written, "referenced": referenced,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -2133,7 +2175,13 @@ pub async fn approve_op(
                     .connection_claims(&state.services, "")
                     .remove(&key)
                     .unwrap_or_default();
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -2143,13 +2191,16 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, key = %key, "secret set");
-                let resp = json!({
-                    "ok": true, "act": "secret-set", "key": key,
-                    "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
-                    "hosts": echo_hosts,
-                    "removed_prior_anchor": removed_prior_anchor,
-                    "existed": existed, "used_by": used_by,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "secret-set", "key": key,
+                        "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
+                        "hosts": echo_hosts,
+                        "removed_prior_anchor": removed_prior_anchor,
+                        "existed": existed, "used_by": used_by,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -2637,6 +2688,18 @@ fn cacheable_roles(svc: &crate::service::ServiceDef) -> Vec<String> {
         roles.extend(o.exposes.iter().map(|r| r.to_ascii_uppercase()));
     }
     roles
+}
+
+/// A write's result, saying when this device does not serve the change yet
+/// ([`crate::error::STORED_NOT_SERVED_MSG`]): the store took it (and the
+/// push carries it), so it is a result, never an error. An approved write
+/// stays approved; an error would make the relay record a reject.
+pub(crate) fn with_served(mut resp: Value, installed: crate::state::Installed) -> Value {
+    if !installed.served() {
+        resp["served"] = json!(false);
+        resp["served_message"] = json!(crate::error::STORED_NOT_SERVED_MSG);
+    }
+    resp
 }
 
 /// Build the per-service `secrets_cache` from a decrypted v3 view. The cache
@@ -5550,6 +5613,189 @@ mod tests {
         assert!(err.is_err(), "a wrong vault key applies nothing");
         let v = d.approve(&id, good()).await.unwrap();
         assert_eq!(v["value"], "foo-value");
+    }
+
+    // ── an approved write's install ─────────────────────────────────────────
+
+    impl BDaemon {
+        /// A write op (`custom` act) B's agent raised: (op, r, op id).
+        fn raise_write(
+            &self,
+            act: &str,
+            target: &str,
+            scope: Value,
+        ) -> (crate::protocol::operation::Operation, String, String) {
+            use crate::protocol::operation::{Act, Bind, Operation, Valid};
+            let op = Operation {
+                act: Act {
+                    kind: ActType::Custom(act.into()),
+                    target: target.into(),
+                    scope,
+                },
+                bind: Bind {
+                    redeemer: self.vault.into(),
+                    recipient: None,
+                },
+                valid: Valid::single_use(0, None),
+            };
+            let r = self
+                .state
+                .challenges
+                .lock()
+                .unwrap()
+                .issue("127.0.0.1".parse().unwrap())
+                .unwrap();
+            let id = self.state.approvals.lock().unwrap().create(
+                self.vault.into(),
+                op.clone(),
+                r.clone(),
+            );
+            self.ids.borrow_mut().insert(r.clone(), id.clone());
+            (op, r, id)
+        }
+
+        /// The admin approves `(op, r)` with the vault key.
+        async fn approve_as_admin(
+            &self,
+            (op, r, id): &(crate::protocol::operation::Operation, String, String),
+        ) -> Result<Value> {
+            let grant = self.k_grant((op, r.as_str()), ADMIN_CID, &self.admin, &VAULT_K, id);
+            self.approve(id, grant).await
+        }
+
+        /// Unlock the vault, as the vault-unlock op's install does.
+        fn unlock(&self) {
+            let key = zeroize::Zeroizing::new(VAULT_K.to_vec());
+            assert!(self
+                .state
+                .install(self.vault, crate::state::InstallKey::Unlock(key))
+                .served());
+        }
+
+        fn store_path(&self) -> std::path::PathBuf {
+            self.state.vaults.per_item_path(self.vault).unwrap()
+        }
+
+        /// Add a connection row to the store (a pull adopting it).
+        fn plant_connection(&self, name: &str, body: Value) {
+            use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+            let mut pv = read_per_item(&self.store_path()).unwrap().unwrap();
+            pv.plant::<sudp::primitives::StdPrimitives>(
+                VaultKeys::single(&VAULT_K),
+                self.vault,
+                ItemNs::Connection,
+                name,
+                1,
+                &ItemPayload::live(ItemNs::Connection, name, body),
+            )
+            .unwrap();
+            crate::storage::sealed_vault::write_per_item_atomic(&self.store_path(), &pv).unwrap();
+        }
+
+        /// Secret `name`'s row now reads only under a key this device lacks.
+        fn reseal_elsewhere(&self, name: &str) {
+            use crate::storage::item::{wire_id_for, ItemNs};
+            let id = wire_id_for::<sudp::primitives::StdPrimitives>(&VAULT_K, ItemNs::Secret, name)
+                .unwrap();
+            let mut pv = read_per_item(&self.store_path()).unwrap().unwrap();
+            let ct = &mut pv.items.get_mut(&id).unwrap().ct;
+            let last = ct.len() - 1;
+            ct[last] ^= 1;
+            crate::storage::sealed_vault::write_per_item_atomic(&self.store_path(), &pv).unwrap();
+        }
+
+        /// The secret names the served cache holds (`None`: locked).
+        fn served_names(&self) -> Option<BTreeSet<String>> {
+            let runtime = self.state.runtime_if_present(self.vault)?;
+            let st = runtime.state.lock().unwrap();
+            match &*st {
+                crate::state::VaultState::Unlocked { cache, .. } => {
+                    Some(cache.native_keys.iter().cloned().collect())
+                }
+                crate::state::VaultState::Locked => None,
+            }
+        }
+
+        fn approved(&self, id: &str) -> bool {
+            let store = self.state.approvals.lock().unwrap();
+            matches!(store.get_any(id).unwrap().status, ApprovalStatus::Approved)
+        }
+    }
+
+    /// A write op minted while unlocked and approved after a lock is stored
+    /// and approved, and the vault stays locked: an approval never unlocks.
+    /// The result says the change is served after `sprott unlock`.
+    #[tokio::test]
+    async fn an_approved_write_after_a_lock_leaves_the_vault_locked() {
+        let d = b_daemon("-wlocked");
+        d.unlock();
+        let raised = d.raise_write("secret-rm", "FOO", Value::Null);
+        d.state.lock_vault(d.vault);
+        let v = d.approve_as_admin(&raised).await.unwrap();
+        assert_eq!(v["removed"], "FOO");
+        assert_eq!(v["served"], false);
+        assert_eq!(v["served_message"], crate::error::STORED_NOT_SERVED_MSG);
+        assert!(d.approved(&raised.2));
+        assert!(d.state.is_vault_locked(d.vault));
+        assert!(d.state.cloned_state_key(d.vault).is_none(), "no K held");
+        // Stored: the next unlock serves it.
+        d.unlock();
+        assert_eq!(d.served_names(), Some(["BAR".to_string()].into()));
+    }
+
+    /// An approved write whose install is refused (a row the served cache
+    /// read no longer reads under the key): the change is stored, the op is
+    /// approved (never an error the relay would record as a reject), and the
+    /// result, the one the op-poll hands the CLI too, says it is served after
+    /// `sprott unlock`. The served cache stays.
+    #[tokio::test]
+    async fn an_approved_write_whose_install_is_refused_stays_approved() {
+        let d = b_daemon("-wrefused");
+        d.unlock();
+        d.reseal_elsewhere("BAR");
+        let raised = d.raise_write("secret-rm", "FOO", Value::Null);
+        let v = d.approve_as_admin(&raised).await.unwrap();
+        assert_eq!(v["removed"], "FOO");
+        assert_eq!(v["served"], false);
+        assert_eq!(v["served_message"], crate::error::STORED_NOT_SERVED_MSG);
+        assert!(d.approved(&raised.2));
+        let polled = op_poll_value(&d.state, &raised.2, None).unwrap();
+        assert_eq!(polled["status"], "ok");
+        assert_eq!(
+            crate::cli::approve::not_served(&crate::cli::approve::act_result(&polled)),
+            Some(crate::error::STORED_NOT_SERVED_MSG)
+        );
+        assert_eq!(
+            d.served_names(),
+            Some(["BAR".to_string(), "FOO".to_string()].into()),
+            "the served cache stays"
+        );
+        assert!(d.state.is_vault_key_changed(d.vault));
+        assert!(!d.state.is_vault_locked(d.vault));
+    }
+
+    /// A widen-host approval for a host that is not a bare domain is refused
+    /// before anything changes: the session's routing snapshot keeps the
+    /// connection's hosts.
+    #[tokio::test]
+    async fn a_widen_with_an_invalid_host_changes_nothing() {
+        let d = b_daemon("-widen");
+        d.plant_connection(
+            "rail",
+            json!({ "hosts": ["api.example.com"], "secrets": ["FOO"] }),
+        );
+        d.unlock();
+        let raised = d.raise_write(
+            "widen-host",
+            "",
+            json!({ "connection_id": "rail", "host": "https://evil.example/x" }),
+        );
+        let err = d.approve_as_admin(&raised).await.unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)), "{err}");
+        assert_eq!(
+            d.state.connection_snapshot(d.vault, "rail").unwrap().hosts,
+            Some(vec!["api.example.com".to_string()])
+        );
     }
 
     /// A grant delivers exactly one of the sealed secret (`wk_*`), the sealed

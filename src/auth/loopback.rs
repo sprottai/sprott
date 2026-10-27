@@ -191,10 +191,14 @@ async fn handle_callback(
 
     let page = if report.completed.iter().any(|c| *c == pending.conn_id) {
         tracing::info!(vault = %pending.vault_id, conn = %pending.conn_id, "oauth loopback: connect completed via auto-catch");
-        done_page(
-            "Connected",
-            "Sprott finished the connection. You can close this window.",
-        )
+        if report.not_served {
+            done_page("Connection stored", crate::error::STORED_NOT_SERVED_MSG)
+        } else {
+            done_page(
+                "Connected",
+                "Sprott finished the connection. You can close this window.",
+            )
+        }
     } else if report.failed.iter().any(|(c, _)| *c == pending.conn_id) {
         done_page(
             "Connection failed",

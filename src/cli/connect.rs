@@ -203,8 +203,8 @@ pub async fn run_add_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> 
         &opts,
     )
     .await?;
-    let _ = act_result(&body);
     println!("host '{}' added to connection '{}'", host, id);
+    crate::cli::approve::say_not_served(&act_result(&body));
     Ok(())
 }
 
@@ -241,7 +241,8 @@ pub async fn run_rm_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> R
         &opts,
     )
     .await?;
-    let removed = act_result(&body)
+    let result = act_result(&body);
+    let removed = result
         .get("removed")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -253,6 +254,7 @@ pub async fn run_rm_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> R
             host, id
         );
     }
+    crate::cli::approve::say_not_served(&result);
     Ok(())
 }
 
@@ -362,6 +364,7 @@ pub async fn run_rm(args: ConnectionRmArgs, approval: &ApprovalArgs) -> Result<(
             key, key
         );
     }
+    crate::cli::approve::say_not_served(&result);
     Ok(())
 }
 
@@ -442,7 +445,7 @@ async fn run_raw(
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    approve_op(
+    let body = approve_op(
         custodian,
         vault,
         &op,
@@ -452,6 +455,7 @@ async fn run_raw(
     .await?;
 
     report_phantoms(name, &hosts, &secret_keys);
+    crate::cli::approve::say_not_served(&act_result(&body));
     Ok(())
 }
 
@@ -579,7 +583,7 @@ async fn run_service_backed(
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    approve_op(
+    let body = approve_op(
         custodian,
         vault,
         &op,
@@ -606,6 +610,7 @@ async fn run_service_backed(
     if phantoms.is_empty() {
         eprintln!("  (no injectable phantom yet: fill the service's secret with `--set ROLE=VALUE` or `--use ROLE=KEY`)");
     }
+    crate::cli::approve::say_not_served(&act_result(&body));
     Ok(())
 }
 

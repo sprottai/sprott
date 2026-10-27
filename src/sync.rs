@@ -604,58 +604,23 @@ pub(crate) async fn pull_items_now(state: &Arc<AppState>, vault_id: &str) -> Res
     Ok(())
 }
 
-/// The per-item store of `vault` folded under `key` (`None`: no store, or
-/// it does not fold; logged).
-pub(crate) fn fold_with_key(
-    state: &AppState,
-    vault: &str,
-    key: &[u8],
-) -> Option<crate::storage::plaintext::VaultPlaintextView> {
-    let pv = read_per_item_store(&state.config.state_dir, vault)?;
-    match crate::server::handlers::metadata::decrypt_vault_view_peritem_complete_with_key(
-        key, &pv, vault,
-    ) {
-        Ok(view) => {
-            state.clear_vault_key_changed(vault);
-            Some(view)
-        }
-        Err(e) => {
-            state.mark_vault_key_changed(vault);
-            tracing::warn!(vault = %vault, "fold after the unlock pull failed (serving the view opened at unlock): {}", e);
-            None
-        }
-    }
-}
-
 /// After a per-item pull adopted new rows, refresh the in-memory cache for an
-/// UNLOCKED vault by folding the per-item store with the retained `K` — no
-/// passkey. Locked vault (no K) → no-op (the next unlock folds the new rows). A
-/// rotated `K` that can't unseal → log + leave the cache (graceful).
+/// UNLOCKED vault from the store, under the key it holds — no passkey
+/// ([`AppState::install`]). Locked vault → nothing (the next unlock folds the
+/// new rows). A fold that cannot read a row the served cache reads (a
+/// rotated `K`) leaves the cache and notes the key change.
 pub(crate) fn refresh_after_item_pull(state: &Arc<AppState>, vault: &str) {
-    let Some(k) = state.cloned_state_key(vault) else {
-        return;
-    };
-    let Some(pv) = read_per_item_store(&state.config.state_dir, vault) else {
-        return;
-    };
-    match crate::server::handlers::metadata::decrypt_vault_view_peritem_complete_with_key(
-        &k, &pv, vault,
-    ) {
-        Ok(view) => {
-            state.clear_vault_key_changed(vault);
-            let cache = crate::server::handlers::approve::bootstrap_cache_from_view(&view, state);
-            state.unlock_vault(vault.to_string(), cache, k);
+    match state.install(vault, crate::state::InstallKey::Held) {
+        crate::state::Installed::Served => {
             tracing::info!(vault = %vault, "per-item pull: cache refreshed from item rows");
             // The console's install requests, handled as `sc service add`.
             crate::server::handlers::service_ops::requests::after_sync(state, vault);
         }
-        Err(_) => {
-            state.mark_vault_key_changed(vault);
-            tracing::warn!(
-                vault = %vault,
-                "per-item pull: retained K can't unseal a row (rotated K?); lock+unlock to see new state"
-            );
-        }
+        crate::state::Installed::Refused => tracing::warn!(
+            vault = %vault,
+            "per-item pull: not served, the held key can't read rows the cache reads (rotated K?); lock+unlock to see new state"
+        ),
+        crate::state::Installed::NotUnlocked => {}
     }
 }
 
@@ -1690,46 +1655,18 @@ fn personal_tombstone_verified(
 }
 
 /// After a runtime pull wrote a new `vault.dat`, refresh the in-memory cache
-/// for an UNLOCKED vault using the retained state key `K` — no passkey. If the
-/// vault is Locked (no retained `K`), nothing is cached to refresh; the next
-/// unlock reads the new file. If the new ciphertext was sealed under a ROTATED
-/// `K`, `K` can't open it — leave the cache and log (graceful: lock+unlock to
-/// see new state), mirroring the post-write refresh path.
+/// for an UNLOCKED vault from the store, under the key it holds — no passkey
+/// ([`AppState::install`]). If the vault is Locked, nothing is cached to
+/// refresh; the next unlock reads the new file. If the new ciphertext was
+/// sealed under a ROTATED `K`, the held `K` can't open it — the cache stays
+/// and the key change is noted (lock+unlock to see new state), mirroring the
+/// post-write refresh path.
 fn refresh_after_pull(state: &Arc<AppState>, vault: &str) {
-    let Some(k) = state.cloned_state_key(vault) else {
-        return; // Locked — no retained K
-    };
-    let vault_path = state
-        .config
-        .state_dir
-        .join("vaults")
-        .join(vault)
-        .join("vault.dat");
-    let sealed = match sealed_vault::read(&vault_path) {
-        Ok(Some(v)) => v,
-        _ => return,
-    };
-    match crate::server::handlers::metadata::decrypt_vault_view_with_key(&k, &sealed) {
-        Ok(view) => {
-            let has_per_item = state
-                .vaults
-                .per_item_path(vault)
-                .ok()
-                .is_some_and(|p| p.exists());
-            if !has_per_item {
-                state.clear_vault_key_changed(vault);
-            }
-            let cache = crate::server::handlers::approve::bootstrap_cache_from_view(&view, state);
-            state.unlock_vault(vault.to_string(), cache, k);
-            tracing::info!(vault = %vault, "cloud sync: cache refreshed after pull (no re-unlock)");
-        }
-        Err(_) => {
-            state.mark_vault_key_changed(vault);
-            tracing::warn!(
-                vault = %vault,
-                "cloud sync: retained key can't open pulled ciphertext (rotated K?); lock+unlock to see new state"
-            );
-        }
+    if state
+        .install(vault, crate::state::InstallKey::Held)
+        .served()
+    {
+        tracing::info!(vault = %vault, "cloud sync: cache refreshed after pull (no re-unlock)");
     }
 }
 
@@ -7006,10 +6943,17 @@ mod peritem_tests {
         )
         .unwrap();
         write_per_item_store(dir.path(), vault, &pv).unwrap();
+        state.open_ledger_for_tests(&[]);
+        let unlock = |k: &[u8]| {
+            state.install(
+                vault,
+                crate::state::InstallKey::Unlock(zeroize::Zeroizing::new(k.to_vec())),
+            )
+        };
 
-        assert!(fold_with_key(&state, vault, &old).is_none());
+        assert!(unlock(&old).served());
         assert!(state.is_vault_key_changed(vault));
-        assert!(fold_with_key(&state, vault, &new).is_some());
+        assert!(unlock(&new).served());
         assert!(!state.is_vault_key_changed(vault));
     }
 

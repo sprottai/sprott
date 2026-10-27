@@ -47,6 +47,22 @@ pub(crate) fn act_result(body: &Value) -> Value {
     }
 }
 
+/// The daemon's line for a write the vault's store took that this device
+/// does not serve yet (`served: false`), if `result` is one.
+pub(crate) fn not_served(result: &Value) -> Option<&str> {
+    if result.get("served").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    result.get("served_message").and_then(|v| v.as_str())
+}
+
+/// Print [`not_served`]'s line, if any, after a write's own line.
+pub(crate) fn say_not_served(result: &Value) {
+    if let Some(line) = not_served(result) {
+        eprintln!("{}", line);
+    }
+}
+
 /// Browser-gesture knobs threaded from the calling command (the local arm
 /// uses them; the remote arm ignores them — the gesture is in the browser).
 pub struct ApproveOpts {

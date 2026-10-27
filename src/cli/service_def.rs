@@ -286,6 +286,7 @@ pub async fn run_add(args: ServiceAddArgs, approval: &ApprovalArgs) -> Result<()
     )
     .await?;
     println!("stored: {}", safe(&ids_of(&result, "ids").join(", ")));
+    crate::cli::approve::say_not_served(&result);
     Ok(())
 }
 
@@ -474,6 +475,7 @@ pub async fn run_update(args: ServiceUpdateArgs, approval: &ApprovalArgs) -> Res
         if !removed.is_empty() {
             println!("  removed: {}", safe(&removed.join(", ")));
         }
+        crate::cli::approve::say_not_served(&result);
     }
     Ok(())
 }
@@ -684,10 +686,9 @@ pub async fn run_rm(args: ServiceRmArgs, approval: &ApprovalArgs) -> Result<(), 
         &ApproveOpts::from_flags(approval),
     )
     .await?;
-    println!(
-        "removed: {}",
-        safe(&ids_of(&act_result(&body), "removed").join(", "))
-    );
+    let result = act_result(&body);
+    println!("removed: {}", safe(&ids_of(&result, "removed").join(", ")));
+    crate::cli::approve::say_not_served(&result);
     Ok(())
 }
 

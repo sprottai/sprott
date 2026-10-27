@@ -315,6 +315,8 @@ pub async fn sync_now(
                     "unreached": c.unreached.iter()
                         .map(|(conn, host)| json!({ "conn": conn, "host": host }))
                         .collect::<Vec<_>>(),
+                    // The completed connects are stored but not served here yet.
+                    "served_message": c.not_served.then_some(crate::error::STORED_NOT_SERVED_MSG),
                 },
                 // Records whose local change the push set aside (the cloud
                 // row changed elsewhere meanwhile): the user re-runs them.
@@ -595,24 +597,29 @@ pub fn decrypt_vault_view_peritem_with_key(
     vault.fold_view::<StdPrimitives>(VaultKeys::from_material(k), vault_id)
 }
 
-/// Retained-key fold for cache refresh and unlock confirmation. Unlike the
-/// ordinary item read, a partial view is not usable here because it would
-/// replace a complete older cache.
-pub(crate) fn decrypt_vault_view_peritem_complete_with_key(
-    k: &[u8],
-    vault: &crate::storage::sealed_vault::PerItemVault,
+/// What the vault's store folds to under the key material `k`, and the rows it
+/// read and could not: the store every read serves, the per-item store when
+/// one exists (each row on its own: a row `k` cannot read is skipped and
+/// listed), else `vault.dat`, one row ([`crate::storage::sealed_vault::WHOLE_BLOB_ROW`]).
+/// The install's read ([`crate::state::AppState::install`]). `Unauthorized`
+/// when `k` opens nothing (`vault.dat` sealed under another key, an
+/// unverified re-key); other errors: the store cannot be read.
+pub(crate) fn fold_store_with_key(
+    state: &AppState,
     vault_id: &str,
-) -> Result<VaultPlaintextView> {
-    let (view, unreadable) = vault
-        .fold_view_counted::<StdPrimitives>(VaultKeys::from_material(k), vault_id)?;
-    if unreadable > 0 {
-        return Err(AppError::Unauthorized(format!(
-            "retained key could not open {} current item{}",
-            unreadable,
-            if unreadable == 1 { "" } else { "s" }
-        )));
+    k: &[u8],
+) -> Result<(VaultPlaintextView, crate::storage::sealed_vault::FoldRows)> {
+    let path = state.vaults.per_item_path(vault_id)?;
+    if let Some(pv) = crate::storage::sealed_vault::read_per_item(&path)? {
+        return pv.fold_view_counted::<StdPrimitives>(VaultKeys::from_material(k), vault_id);
     }
-    Ok(view)
+    let vault = crate::storage::sealed_vault::read(&state.vaults.vault_path(vault_id)?)?
+        .ok_or_else(|| AppError::Conflict("vault not initialized".into()))?;
+    let view = decrypt_vault_view_with_key(whole_blob_k(k)?, &vault)?;
+    let mut rows = crate::storage::sealed_vault::FoldRows::default();
+    rows.readable
+        .insert(crate::storage::sealed_vault::WHOLE_BLOB_ROW.to_string());
+    Ok((view, rows))
 }
 
 /// THE per-item read seam for the live grant paths (Export / Use / unlock).

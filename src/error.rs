@@ -410,6 +410,11 @@ pub const VAULT_ACCESS_REVOKED_MSG: &str =
 
 pub const VAULT_KEY_CHANGED_MSG: &str = "This connection may have been added after the vault's members changed and its key was replaced. This device doesn't have the new key yet. Run `sprott unlock`.";
 
+/// A write the vault's store took that this device does not serve yet: the
+/// vault locked meanwhile, or its install is refused (the held key cannot
+/// read rows the served cache reads).
+pub const STORED_NOT_SERVED_MSG: &str = "stored; served on this device after `sprott unlock`";
+
 pub const VAULT_KEY_CHANGED_STATUS_MSG: &str = "key changed: this vault's members changed (someone was removed), so it has a new key. Run `sprott unlock` once to see what was added since; existing credentials keep working.";
 
 /// The ONE remediation line for [`ScCode::DeviceNotAdmitted`] (the console

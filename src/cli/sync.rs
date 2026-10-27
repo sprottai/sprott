@@ -96,7 +96,10 @@ fn report_connects(connects: Option<&serde_json::Value>) {
         })
         .unwrap_or_default();
     if !completed.is_empty() {
-        eprintln!("  connected: {}", completed.join(", "));
+        match c.get("served_message").and_then(|v| v.as_str()) {
+            Some(line) => eprintln!("  {}: {}", completed.join(", "), line),
+            None => eprintln!("  connected: {}", completed.join(", ")),
+        }
     }
 
     // Terminal: the console shows "Connect failed — reconnect"; echo the reason.

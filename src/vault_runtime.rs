@@ -116,6 +116,17 @@ pub struct VaultRuntime {
     pub oauth_reauth_needed: Mutex<HashSet<String>>,
     pub live_ceremony_ops: Mutex<HashMap<String, String>>,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Held across every cache install, from reading the store and the key to
+    /// the swap ([`AppState::install`]), and around the one in-place cache
+    /// edit (a rotated refresh token, [`AppState::cache_replace_value`]), so
+    /// an install that read the store earlier never swaps over a later one.
+    /// Lock order: `write_lock` → this → `state`. Only taken through
+    /// [`Self::with_build_lock`]; never held across an await.
+    build: Mutex<()>,
+    /// Tests: run once by the next install, under the build mutex, right
+    /// before its swap.
+    #[cfg(test)]
+    pub before_swap: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pub watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub watcher_cell: Mutex<Option<Arc<crate::sync_stream::WakeCell>>>,
     pub access_probe: AtomicBool,
@@ -143,6 +154,9 @@ impl VaultRuntime {
             oauth_reauth_needed: Mutex::new(HashSet::new()),
             live_ceremony_ops: Mutex::new(HashMap::new()),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            build: Mutex::new(()),
+            #[cfg(test)]
+            before_swap: Mutex::new(None),
             watcher: Mutex::new(None),
             watcher_cell: Mutex::new(None),
             access_probe: AtomicBool::new(false),
@@ -168,6 +182,22 @@ impl VaultRuntime {
             _runtime: self.clone(),
             _guard: guard,
         })
+    }
+
+    /// Run `f` holding the build mutex. The wait and `f` (a store read and
+    /// fold) are blocking work: on a multi-thread runtime's worker they run
+    /// off the async executor (`block_in_place`), elsewhere as they are.
+    pub fn with_build_lock<R>(&self, f: impl FnOnce() -> R) -> R {
+        let locked = || {
+            let _build = self.build.lock().unwrap_or_else(|e| e.into_inner());
+            f()
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(locked)
+            }
+            _ => locked(),
+        }
     }
 
     pub(crate) fn mark_closed(&self) {

@@ -567,7 +567,14 @@ fn services_are_data_records_on_a_vault_with_members() {
     let req = parse_add(&signed).unwrap();
     let snap = admit_add(&req).unwrap();
     apply_add(&mut view, req, &snap, &signed, &state.services).unwrap();
-    persist(&state, vault, &base, &view, &k).unwrap();
+    persist(
+        &state,
+        vault,
+        &base,
+        &view,
+        crate::auth::connect::WriteKey::Grant(&k),
+    )
+    .unwrap();
     let pv = stored(&state, vault);
     let a1 = crate::storage::item::wire_id_for::<S>(
         keys.id_seed,
@@ -596,7 +603,14 @@ fn services_are_data_records_on_a_vault_with_members() {
     let mut view = open(&state);
     let base = crate::storage::sealed_vault::ViewBase::of(&view).unwrap();
     apply_rm(&mut view, "a1", &rm.act.scope).unwrap();
-    persist(&state, vault, &base, &view, &k).unwrap();
+    persist(
+        &state,
+        vault,
+        &base,
+        &view,
+        crate::auth::connect::WriteKey::Grant(&k),
+    )
+    .unwrap();
     assert!(stored(&state, vault).items[&a1].tombstone);
     assert!(open(&state).aux.services.is_empty());
 }

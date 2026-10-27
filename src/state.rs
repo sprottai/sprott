@@ -268,7 +268,7 @@ pub struct SecretsCache {
     /// silently vanishing. Full error goes to the daemon log only (F-20).
     pub external_store_errors: Vec<(String, String)>,
     /// Key NAMES the external stores expose, enumerated in the background
-    /// right after unlock (`unlock_vault` spawns one `list()` sweep) and
+    /// right after each install (`AppState::install` spawns one `list()` sweep) and
     /// amended by every successful lazy fill. Registry `connected` and the
     /// `entries` listing read native ∪ THIS, so an external-backed
     /// connection looks connected to agents. Shared slot (`Arc<Mutex<…>>`)
@@ -344,7 +344,44 @@ pub enum VaultState {
         /// only today (no auto-lock); kept for future audit / debug.
         #[allow(dead_code)]
         unlocked_at: u64,
+        /// The store rows the served cache was folded from (wire ids). An
+        /// install whose fold cannot read one of them is not served
+        /// ([`AppState::install`]).
+        readable: std::collections::BTreeSet<String>,
     },
+}
+
+/// The key an install folds the store under ([`AppState::install`]).
+pub enum InstallKey {
+    /// The vault-unlock op's grant: the only install that may take a Locked
+    /// vault to Unlocked.
+    Unlock(zeroize::Zeroizing<Vec<u8>>),
+    /// An approved write's grant: served only while Unlocked, and then held
+    /// as the vault's key.
+    Grant(zeroize::Zeroizing<Vec<u8>>),
+    /// The key held while Unlocked (sync pulls, the daemon's own writes, the
+    /// connect exchange), read under the build mutex.
+    Held,
+}
+
+/// What an install did ([`AppState::install`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Installed {
+    /// The new cache is served.
+    Served,
+    /// The current cache is kept (the vault-unlock op unlocks nothing): the
+    /// new fold cannot read a row the served cache read, or the store could
+    /// not be folded at all. Noted as key-changed when the key is why.
+    Refused,
+    /// The vault is not Unlocked at the swap (locked, parked or gone), and
+    /// only the vault-unlock op unlocks it: nothing is served.
+    NotUnlocked,
+}
+
+impl Installed {
+    pub fn served(self) -> bool {
+        self == Installed::Served
+    }
 }
 
 /// A loopback OAuth connect awaiting its `?code&state` redirect. Points a
@@ -1134,52 +1171,134 @@ impl AppState {
             .any(|runtime| matches!(*runtime.state.lock().unwrap(), VaultState::Unlocked { .. }))
     }
 
-    /// Transition a vault to Unlocked with the given bootstrap cache and the
-    /// retained state key `K`. Overwrites any prior state (a fresh unlock
-    /// invalidates the previous cache + key).
-    pub fn unlock_vault(
-        &self,
-        vault_id: String,
-        mut cache: SecretsCache,
-        state_key: zeroize::Zeroizing<Vec<u8>>,
-    ) {
-        let Ok(runtime) = self.runtime(&vault_id) else {
-            tracing::warn!(vault = %vault_id, "unlock refused: vault access was revoked");
-            return;
+    /// Install the vault's cache from its store: the one way a cache is built
+    /// (the vault-unlock op, sync pulls, every write the daemon serves). Under
+    /// the vault's build mutex: read the key and the store, fold, build the
+    /// cache, swap. The caller may hold the vault write lock (lock order:
+    /// write lock → build mutex → state lock); the install never takes it.
+    ///
+    /// Only [`InstallKey::Unlock`] takes a Locked vault to Unlocked; every
+    /// other install replaces the cache only while the vault is Unlocked at
+    /// the swap. Every fold is tolerant (a row the key cannot read is
+    /// skipped), and every install but the vault-unlock op's is refused when
+    /// its fold cannot read a row the served cache read: the served cache
+    /// stays. A served install sets or clears key-changed from the rows it
+    /// could not read; a refused one sets it. The ledger gate and the
+    /// runtime's close are checked under the state lock, so no install undoes
+    /// a lock, park or close.
+    pub fn install(&self, vault_id: &str, key: InstallKey) -> Installed {
+        let runtime = match key {
+            InstallKey::Unlock(_) => self.runtime(vault_id).ok(),
+            _ => self.runtime_if_present(vault_id),
         };
+        let Some(runtime) = runtime else {
+            return Installed::NotUnlocked;
+        };
+        runtime.with_build_lock(|| self.install_under_build_lock(&runtime, vault_id, key))
+    }
+
+    fn install_under_build_lock(
+        &self,
+        runtime: &crate::vault_runtime::VaultRuntime,
+        vault_id: &str,
+        key: InstallKey,
+    ) -> Installed {
+        use std::sync::atomic::Ordering;
+        let unlock = matches!(key, InstallKey::Unlock(_));
+        let k = match key {
+            InstallKey::Unlock(k) | InstallKey::Grant(k) => k,
+            InstallKey::Held => match &*runtime.state.lock().unwrap() {
+                VaultState::Unlocked { state_key, .. } => state_key.clone(),
+                VaultState::Locked => return Installed::NotUnlocked,
+            },
+        };
+        let folded = crate::server::handlers::metadata::fold_store_with_key(self, vault_id, &k);
+        let (view, rows) = match folded {
+            Ok(folded) => folded,
+            Err(e) => {
+                tracing::warn!(vault = %vault_id, "install: the store could not be folded, the served cache stays: {}", e);
+                // A key that opens nothing reads no row the served cache
+                // read.
+                if !unlock && matches!(e, crate::error::AppError::Unauthorized(_)) {
+                    let state = runtime.state.lock().unwrap();
+                    if matches!(*state, VaultState::Unlocked { .. }) {
+                        runtime.key_changed.store(true, Ordering::Release);
+                    }
+                }
+                return Installed::Refused;
+            }
+        };
+        let mut cache = crate::server::handlers::approve::bootstrap_cache_from_view(&view, self);
+        drop(view);
         // Every cache is built from the store, which still holds the value a
         // pending rotation replaced: the session keeps using the rotated one
         // (the provider refuses the old one).
         for ((conn_id, _), p) in runtime.pending_rotations.lock().unwrap().iter() {
             cache.replace_value(conn_id, &p.old, p.new.as_bytes());
         }
-        // A parked or locked device holds no K (I3): a refresh or apply that
-        // cloned K before the park must not write it back.
-        if self.ledger.lock().unwrap().device != crate::principal_ledger::DeviceGate::Open {
-            tracing::warn!(vault = %vault_id, "unlock refused: this device is not admitted to serve");
-            return;
+        let adapters: Vec<(String, Arc<crate::store::Adapter>)> = cache
+            .external_stores
+            .iter()
+            .map(|(id, (_, a))| (id.clone(), a.clone()))
+            .collect();
+        let external_keys = cache.external_keys.clone();
+        #[cfg(test)]
+        {
+            let hook = runtime.before_swap.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
-        // Team lease clock starts at unlock (a human was just present).
-        self.record_cloud_contact(&vault_id);
-        let unlocked_at = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        {
+            // Checked under the state lock: close() marks the runtime closed,
+            // and a park publishes the ledger gate, before either stores
+            // Locked under this lock, so their Locked is always the last.
+            let mut state = runtime.state.lock().unwrap();
+            if runtime.is_closed() {
+                return Installed::NotUnlocked;
+            }
+            // A parked or locked device holds no K (I3).
+            if self.ledger.lock().unwrap().device != crate::principal_ledger::DeviceGate::Open {
+                tracing::warn!(vault = %vault_id, "install refused: this device is not admitted to serve");
+                return Installed::NotUnlocked;
+            }
+            let unlocked_at = match &*state {
+                VaultState::Locked if !unlock => return Installed::NotUnlocked,
+                VaultState::Unlocked { readable, .. }
+                    if !unlock && !readable.is_disjoint(&rows.unreadable) =>
+                {
+                    runtime.key_changed.store(true, Ordering::Release);
+                    tracing::warn!(vault = %vault_id, "install refused: the key cannot read rows the served cache reads (rotated K?); the served cache stays until `sprott unlock`");
+                    return Installed::Refused;
+                }
+                VaultState::Unlocked { unlocked_at, .. } if !unlock => *unlocked_at,
+                _ => now,
+            };
+            *state = VaultState::Unlocked {
+                cache,
+                state_key: k,
+                unlocked_at,
+                readable: rows.readable,
+            };
+            runtime
+                .key_changed
+                .store(!rows.unreadable.is_empty(), Ordering::Release);
+        }
+        // Team lease clock: a served install read the vault as it is now.
+        self.record_cloud_contact(vault_id);
         // Background external-key enumeration: one list() per store so the
         // registry/entries surfaces see the flat namespace without a network
         // call on their read path. The task holds only the shared adapters
-        // and the cache's keys slot — never AppState — so a re-unlock that
-        // replaces the cache simply orphans this task's slot harmlessly.
+        // and the cache's keys slot — never AppState — so a later install
+        // that replaces the cache simply orphans this task's slot harmlessly.
         // Handle::try_current keeps plain #[test] callers (no runtime) safe.
-        if !cache.external_stores.is_empty() {
+        if !adapters.is_empty() {
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                let adapters: Vec<(String, Arc<crate::store::Adapter>)> = cache
-                    .external_stores
-                    .iter()
-                    .map(|(id, (_, a))| (id.clone(), a.clone()))
-                    .collect();
-                let slot = cache.external_keys.clone();
-                let vid = vault_id.clone();
+                let vid = vault_id.to_string();
                 rt.spawn(async move {
                     let mut all = std::collections::HashSet::new();
                     for (store_id, adapter) in adapters {
@@ -1192,22 +1311,43 @@ impl AppState {
                     }
                     if !all.is_empty() {
                         tracing::info!(vault = %vid, keys = all.len(), "external store keys enumerated");
-                        *slot.lock().unwrap() = all;
+                        *external_keys.lock().unwrap() = all;
                     }
                 });
             }
         }
-        // Checked under the state lock: close() marks the runtime closed before it
-        // stores Locked under this lock, so its Locked store is always the last one.
-        let mut runtime_state = runtime.state.lock().unwrap();
-        if runtime.is_closed() {
+        Installed::Served
+    }
+
+    /// Tests: put a vault Unlocked with this cache and key, as an install
+    /// would (pending rotations applied; nothing while parked or closed).
+    /// Production builds every cache through [`Self::install`].
+    #[cfg(test)]
+    pub fn unlock_vault(
+        &self,
+        vault_id: String,
+        mut cache: SecretsCache,
+        state_key: zeroize::Zeroizing<Vec<u8>>,
+    ) {
+        let Ok(runtime) = self.runtime(&vault_id) else {
+            return;
+        };
+        for ((conn_id, _), p) in runtime.pending_rotations.lock().unwrap().iter() {
+            cache.replace_value(conn_id, &p.old, p.new.as_bytes());
+        }
+        self.record_cloud_contact(&vault_id);
+        let mut state = runtime.state.lock().unwrap();
+        if runtime.is_closed()
+            || self.ledger.lock().unwrap().device != crate::principal_ledger::DeviceGate::Open
+        {
             return;
         }
-        *runtime_state = VaultState::Unlocked {
-                cache,
-                state_key,
-                unlocked_at,
-            };
+        *state = VaultState::Unlocked {
+            cache,
+            state_key,
+            unlocked_at: 0,
+            readable: Default::default(),
+        };
     }
 
     /// Clone the retained state key `K` for an Unlocked vault, or `None` when
@@ -2078,15 +2218,19 @@ impl AppState {
 
     /// Replace a connection's cached credential value `old` with `new`
     /// wherever the unlocked session holds it (its entry, its named secrets).
-    /// A no-op when locked or not held.
+    /// A no-op when locked or not held. Under the build mutex: an install
+    /// that read the store before a rotation was stored swaps first, and this
+    /// edit then lands on its cache.
     pub fn cache_replace_value(&self, vault_id: &str, conn_id: &str, old: &[u8], new: &[u8]) {
         let Some(runtime) = self.runtime_if_present(vault_id) else {
             return;
         };
-        let mut state = runtime.state.lock().unwrap();
-        if let VaultState::Unlocked { cache, .. } = &mut *state {
-            cache.replace_value(conn_id, old, new);
-        }
+        runtime.with_build_lock(|| {
+            let mut state = runtime.state.lock().unwrap();
+            if let VaultState::Unlocked { cache, .. } = &mut *state {
+                cache.replace_value(conn_id, old, new);
+            }
+        });
     }
 
     /// The pull after unlock of `vault_id` landed (or the vault locked).
@@ -3608,5 +3752,325 @@ scope = ["amount"]
             AccessLevel::Ask,
             "a scoped path must never fast-path via the coarse window"
         );
+    }
+}
+
+/// [`AppState::install`]: who may unlock, what a refresh or write may swap,
+/// and the races a lock, park or newer refresh used to lose.
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+    use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+    use crate::storage::sealed_vault::{read_per_item, write_per_item_atomic, PerItemVault};
+    type S = sudp::primitives::StdPrimitives;
+
+    const V: &str = "v-install";
+    /// The vault's key on this device.
+    const K: [u8; 32] = [0x41; 32];
+    /// A key this device does not have.
+    const OTHER: [u8; 32] = [0x42; 32];
+
+    /// A state on its own temp dir, admitted to serve.
+    fn install_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            state_dir: dir.path().to_path_buf(),
+            port: 0,
+            proxy_port: 0,
+            listen: "127.0.0.1".into(),
+            origin: "http://localhost".into(),
+            relying_party: crate::passkey::webauthn::RelyingParty::exact(
+                "http://localhost",
+                "localhost",
+            ),
+            body_cap: crate::config::DEFAULT_BODY_CAP,
+        };
+        let state = AppState::new(cfg);
+        state.open_ledger_for_tests(&[]);
+        (dir, Arc::new(state))
+    }
+
+    /// Seal `payload` into `V`'s store under `key` at its next version (the
+    /// store is created on first use), as a pull adopting it would; its row.
+    fn put(state: &AppState, key: &[u8], payload: ItemPayload) -> String {
+        let path = state.vaults.per_item_path(V).unwrap();
+        let mut pv = read_per_item(&path).unwrap().unwrap_or_else(|| {
+            PerItemVault::build_initial(
+                b"c".to_vec(),
+                "x".into(),
+                "y".into(),
+                "Dev".into(),
+                vec![0u8; 32],
+                vec![0u8; 48],
+            )
+            .unwrap()
+        });
+        let (id, _) = pv
+            .seal_and_bump::<S>(
+                VaultKeys::single(key),
+                V,
+                payload.ns,
+                &payload.name.clone(),
+                &payload,
+            )
+            .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_per_item_atomic(&path, &pv).unwrap();
+        id
+    }
+
+    fn put_secret(state: &AppState, key: &[u8], name: &str, value: &str) -> String {
+        put(state, key, ItemPayload::secret_live(name, value))
+    }
+
+    /// FOO = `value`, served to agents through the raw connection `foo`.
+    fn vault_with_foo(state: &AppState, value: &str) -> String {
+        put(
+            state,
+            &K,
+            ItemPayload::live(
+                ItemNs::Connection,
+                "foo",
+                serde_json::json!({ "hosts": ["api.example.com"], "secrets": ["FOO"] }),
+            ),
+        );
+        put_secret(state, &K, "FOO", value)
+    }
+
+    /// Row `id` now reads only under a key this device does not have.
+    fn reseal_elsewhere(state: &AppState, id: &str) {
+        let path = state.vaults.per_item_path(V).unwrap();
+        let mut pv = read_per_item(&path).unwrap().unwrap();
+        let ct = &mut pv.items.get_mut(id).unwrap().ct;
+        let last = ct.len() - 1;
+        ct[last] ^= 1;
+        write_per_item_atomic(&path, &pv).unwrap();
+    }
+
+    fn unlock(state: &AppState, key: &[u8]) -> Installed {
+        state.install(V, InstallKey::Unlock(zeroize::Zeroizing::new(key.to_vec())))
+    }
+
+    /// The secret names the served cache holds (`None`: locked).
+    fn served_names(state: &AppState) -> Option<std::collections::BTreeSet<String>> {
+        let runtime = state.runtime_if_present(V)?;
+        let st = runtime.state.lock().unwrap();
+        match &*st {
+            VaultState::Unlocked { cache, .. } => Some(cache.native_keys.iter().cloned().collect()),
+            VaultState::Locked => None,
+        }
+    }
+
+    fn names(xs: &[&str]) -> Option<std::collections::BTreeSet<String>> {
+        Some(xs.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Run `f` once, inside the next install, right before its swap.
+    fn before_swap(state: &AppState, f: impl FnOnce() + Send + 'static) {
+        *state.runtime(V).unwrap().before_swap.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// The vault-unlock op folds tolerantly: one row its key cannot open is
+    /// skipped and noted as a key change; the vault unlocks and serves the
+    /// rest.
+    #[test]
+    fn an_unlock_with_one_unopenable_row_unlocks_and_notes_the_key_change() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        put_secret(&state, &OTHER, "ZED", "z");
+        assert_eq!(unlock(&state, &K), Installed::Served);
+        assert!(!state.is_vault_locked(V));
+        assert!(state.is_vault_key_changed(V));
+        assert_eq!(served_names(&state), names(&["FOO"]));
+        assert_eq!(state.cache_lookup(V, "foo"), Some(b"v1".to_vec()));
+    }
+
+    /// Only the vault-unlock op unlocks: a refresh or an approved write's
+    /// install on a Locked vault serves nothing.
+    #[test]
+    fn only_the_unlock_op_unlocks() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        assert_eq!(state.install(V, InstallKey::Held), Installed::NotUnlocked);
+        let grant = InstallKey::Grant(zeroize::Zeroizing::new(K.to_vec()));
+        assert_eq!(state.install(V, grant), Installed::NotUnlocked);
+        assert!(state.is_vault_locked(V));
+        assert_eq!(unlock(&state, &K), Installed::Served);
+        assert!(!state.is_vault_locked(V));
+    }
+
+    /// A park that lands while the vault-unlock install builds its cache wins:
+    /// the gate is checked under the state lock, at the swap.
+    #[test]
+    fn a_park_racing_an_unlock_leaves_the_vault_locked() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        let parking = state.clone();
+        before_swap(&state, move || {
+            parking.set_ledger(crate::principal_ledger::LedgerGate::default())
+        });
+        assert_eq!(unlock(&state, &K), Installed::NotUnlocked);
+        assert!(state.is_vault_locked(V));
+        assert!(state.cloned_state_key(V).is_none(), "no K held");
+    }
+
+    /// A lock that lands while a refresh builds its cache wins: the refresh
+    /// never re-unlocks the vault.
+    #[test]
+    fn a_refresh_racing_a_lock_leaves_the_vault_locked() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        assert!(unlock(&state, &K).served());
+        put_secret(&state, &K, "BAR", "b");
+        let locking = state.clone();
+        before_swap(&state, move || locking.lock_vault(V));
+        crate::sync::refresh_after_item_pull(&state, V);
+        assert!(state.is_vault_locked(V));
+        assert!(state.cloned_state_key(V).is_none(), "no K held");
+    }
+
+    /// Two refreshes: the one that read the store earlier swaps first, the
+    /// newer one waits for it on the build mutex and then serves the newer
+    /// store. An older refresh never swaps over a newer one.
+    #[test]
+    fn an_older_refresh_never_swaps_over_a_newer_one() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        assert!(unlock(&state, &K).served());
+        let newer: Arc<Mutex<Option<std::thread::JoinHandle<Installed>>>> = Default::default();
+        let (pulling, slot) = (state.clone(), newer.clone());
+        // Refresh A has read v1. Before it swaps, a pull lands v2 and starts
+        // refresh B, which waits for A on the build mutex (unserialized, it
+        // would swap v2 now and A's v1 would land over it).
+        before_swap(&state, move || {
+            put_secret(&pulling, &K, "FOO", "v2");
+            let (done, finished) = std::sync::mpsc::channel();
+            let b = pulling.clone();
+            *slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                let installed = b.install(V, InstallKey::Held);
+                let _ = done.send(());
+                installed
+            }));
+            let waited = finished.recv_timeout(std::time::Duration::from_millis(300));
+            assert!(waited.is_err(), "B swaps only after A");
+        });
+        assert!(state.install(V, InstallKey::Held).served());
+        let b = newer.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(b.served());
+        assert_eq!(state.cache_lookup(V, "foo"), Some(b"v2".to_vec()));
+    }
+
+    /// A rotated refresh token stored while an install that read the store
+    /// earlier builds its cache: the rotation's cache edit waits for that
+    /// install's swap and lands on its cache, so the new token is served.
+    #[test]
+    fn a_rotation_stored_during_an_install_is_served() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "rt-1");
+        assert!(unlock(&state, &K).served());
+        let rotation: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Default::default();
+        let (rotating, slot) = (state.clone(), rotation.clone());
+        // A refresh has read rt-1. Before it swaps, the provider rotates the
+        // token and the broker stores rt-2.
+        before_swap(&state, move || {
+            let (done, finished) = std::sync::mpsc::channel();
+            let r = rotating.clone();
+            *slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                let stored = crate::auth::connect::persist_rotated_refresh_locked(
+                    &r, V, "foo", "FOO", b"rt-1", "rt-2", false,
+                );
+                assert_eq!(stored, Ok(crate::auth::connect::RotationStored::Written));
+                let _ = done.send(());
+            }));
+            let waited = finished.recv_timeout(std::time::Duration::from_millis(300));
+            assert!(waited.is_err(), "the cache edit waits for the swap");
+        });
+        assert!(state.install(V, InstallKey::Held).served());
+        rotation.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(state.cache_lookup(V, "foo"), Some(b"rt-2".to_vec()));
+    }
+
+    /// A pull that adds a row this key cannot read (a newer member's, a
+    /// re-key not caught up with) is served: no row the served cache read
+    /// is lost. The new row is noted as a key change.
+    #[test]
+    fn a_pull_adding_an_unreadable_row_is_served() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        assert!(unlock(&state, &K).served());
+        assert!(!state.is_vault_key_changed(V));
+        put_secret(&state, &K, "BAR", "b");
+        put_secret(&state, &OTHER, "ZED", "z");
+        crate::sync::refresh_after_item_pull(&state, V);
+        assert_eq!(served_names(&state), names(&["BAR", "FOO"]));
+        assert!(state.is_vault_key_changed(V));
+    }
+
+    /// `sprott set` on a vault holding a row from a newer client (a body this
+    /// build cannot parse): the write lands and is served.
+    #[tokio::test]
+    async fn a_write_beside_a_newer_clients_row_is_served() {
+        let (_dir, state) = install_state();
+        vault_with_foo(&state, "v1");
+        put(
+            &state,
+            &K,
+            ItemPayload::live(
+                ItemNs::Connection,
+                "newer",
+                serde_json::json!({ "hosts": 5 }),
+            ),
+        );
+        assert!(unlock(&state, &K).served());
+        assert!(state.is_vault_key_changed(V));
+        let resp = set_secret(&state, "BAR", "b").await;
+        assert_eq!(resp["written"], true);
+        assert!(resp.get("served").is_none(), "{resp}");
+        assert_eq!(served_names(&state), names(&["BAR", "FOO"]));
+    }
+
+    /// A row the served cache read that no longer reads under the held key
+    /// (re-sealed under a key this device lacks): the install is refused and
+    /// the served cache stays; the write is stored and says it is served
+    /// after `sprott unlock`.
+    #[tokio::test]
+    async fn a_readable_row_turning_unreadable_refuses_the_install() {
+        let (_dir, state) = install_state();
+        let foo = vault_with_foo(&state, "v1");
+        assert!(unlock(&state, &K).served());
+        reseal_elsewhere(&state, &foo);
+        let resp = set_secret(&state, "BAR", "b").await;
+        assert_eq!(resp["written"], true);
+        assert_eq!(resp["served"], false);
+        assert_eq!(resp["served_message"], crate::error::STORED_NOT_SERVED_MSG);
+        assert_eq!(
+            served_names(&state),
+            names(&["FOO"]),
+            "the served cache stays"
+        );
+        assert_eq!(state.cache_lookup(V, "foo"), Some(b"v1".to_vec()));
+        assert!(state.is_vault_key_changed(V));
+        let stored = crate::server::handlers::metadata::fold_store_with_key(&state, V, &K)
+            .unwrap()
+            .0;
+        assert_eq!(stored.native_secrets["BAR"], b"b", "stored");
+        // A sync's refresh is refused the same way; a re-unlock serves what
+        // the key reads.
+        crate::sync::refresh_after_item_pull(&state, V);
+        assert_eq!(served_names(&state), names(&["FOO"]));
+        assert!(unlock(&state, &K).served());
+        assert_eq!(served_names(&state), names(&["BAR"]));
+    }
+
+    /// `POST /v/{vid}/secret` (the unlocked `sprott set`).
+    async fn set_secret(state: &Arc<AppState>, key: &str, value: &str) -> serde_json::Value {
+        let axum::Json(v) = crate::server::handlers::secret_set_local::create(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(V.to_string()),
+            axum::Json(serde_json::json!({ "key": key, "value": value })),
+        )
+        .await
+        .unwrap();
+        v
     }
 }

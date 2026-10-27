@@ -361,9 +361,9 @@ pub(crate) fn persist(
     vault_id: &str,
     base: &crate::storage::sealed_vault::ViewBase,
     view: &crate::storage::plaintext::VaultPlaintextView,
-    k: &[u8],
-) -> Result<()> {
-    crate::auth::connect::persist_mutated_view(state, vault_id, base, view, k)
+    key: crate::auth::connect::WriteKey<'_>,
+) -> Result<crate::state::Installed> {
+    crate::auth::connect::persist_mutated_view(state, vault_id, base, view, key)
 }
 
 /// Apply a `service-add`: the stored definitions of the source become exactly
