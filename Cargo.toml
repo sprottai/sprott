@@ -1,6 +1,6 @@
 [package]
 name = "sprott"
-version = "2.0.1"
+version = "2.0.2-rc.1"
 edition = "2021"
 description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
 # Functional Source License 1.1 (Apache-2.0 future). FSL is not an SPDX id,
