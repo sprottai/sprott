@@ -27,6 +27,41 @@ use crate::state::AppState;
 use crate::storage::sealed_vault::{self, SealedVault};
 use crate::sync_stream::{Mode, StreamHealth, WakeCell, Work};
 
+/// Tests that point `HOME` at a temp dir: the variable is process-wide and
+/// the CLI config lives under it, so they run one at a time.
+#[cfg(test)]
+mod test_home {
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `HOME` set to `dir` until dropped (then restored), holding the lock.
+    pub(super) struct HomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        pub(super) fn set(dir: &std::path::Path) -> HomeGuard {
+            // A test that panicked while holding it left HOME restored.
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", dir);
+            HomeGuard {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 const REVOKED_REASON: &str =
     "this device can no longer use this vault: its account was removed from it";
@@ -6649,8 +6684,7 @@ mod peritem_tests {
         use base64::Engine as _;
 
         let home = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
+        let _home = super::test_home::HomeGuard::set(home.path());
         let state_dir = home.path().join("state");
         let state = Arc::new(AppState::new(test_config(&state_dir)));
         state.open_ledger_for_tests(&[]);
@@ -6843,11 +6877,6 @@ mod peritem_tests {
         assert!(attached_membership_excludes_us(&state, removed, Some(&membership)));
         revoke_vault_access(&state, removed, Some(membership)).await;
         assert!(!state.vaults.dir_for(removed).unwrap().exists(), "a creator-signed remove deletes the local copy");
-
-        match previous_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     /// §15 W1: a vault with a keyset drops only on a VERIFIED owner tombstone.
@@ -10026,8 +10055,7 @@ mod tests {
         use crate::cli::active::{self, CliConfig, KnownVault};
         let home = tempdir().unwrap();
         // active.rs resolves config via dirs::home_dir() → $HOME.
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
+        let _home = super::test_home::HomeGuard::set(home.path());
 
         let cfg = CliConfig {
             daemon: Some("http://localhost:1".into()),
@@ -10082,10 +10110,5 @@ mod tests {
         // The next successful pairing/selection clears the breadcrumb.
         active::put_active("http://localhost:1", "vid-C").unwrap();
         assert!(active::load().unwrap().vault_deleted_upstream.is_none());
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
     }
 }
