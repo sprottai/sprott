@@ -1,34 +1,119 @@
 //! `sprott passkey ...` — manage the active vault's enrolled passkeys.
 //!
-//! `ls` lists; `add` prints the console page (passkeys are enrolled in the
-//! browser, where the identity key lives). `rm` / `rename` are not built yet
-//! and say so.
+//! `ls` lists; `add`, `rm` and `rename` print the console page where that is
+//! done (in the browser, where the identity key lives). `rm` / `rename` first
+//! resolve their PASSKEY argument against the vault's list, so a typo or an
+//! ambiguous name fails here instead of on the page.
 
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::cli::active::resolve_active;
-use crate::config::{PasskeyRemoveArgs, PasskeyRenameArgs, PasskeySubcommand};
+use crate::config::PasskeySubcommand;
+
+/// The console page where passkeys are added, renamed and removed.
+const PASSKEYS_PAGE: &str = "/account/passkeys";
 
 pub async fn run(sub: PasskeySubcommand, json: bool) -> Result<(), String> {
     match sub {
         PasskeySubcommand::Ls(_a) => run_ls(json).await,
         PasskeySubcommand::Add(_) => {
-            let url = crate::cli::vault::console_page("/account/passkeys")?;
+            let url = crate::cli::vault::console_page(PASSKEYS_PAGE)?;
             eprintln!("Add a passkey in the Sprott console:");
             eprintln!("  {}", url);
             Ok(())
         }
-        PasskeySubcommand::Rm(a) => Err(format!(
-            "passkey rm {}, not yet implemented (needs passkey-signed Custom op)",
-            a.credential_id
-        )),
-        PasskeySubcommand::Rename(a) => Err(format!(
-            "passkey rename {} -> {}, not yet implemented (daemon has no metadata-update endpoint)",
-            a.credential_id, a.new_name
-        )),
+        PasskeySubcommand::Rm(a) => {
+            let name = resolve_listed(&a.passkey).await?;
+            let url = crate::cli::vault::console_page(PASSKEYS_PAGE)?;
+            eprintln!("Remove the passkey {} in the Sprott console:", name);
+            eprintln!("  {}", url);
+            Ok(())
+        }
+        PasskeySubcommand::Rename(a) => {
+            let name = resolve_listed(&a.passkey).await?;
+            let url = crate::cli::vault::console_page(PASSKEYS_PAGE)?;
+            eprintln!(
+                "Rename the passkey {} to \"{}\" in the Sprott console:",
+                name, a.new_name
+            );
+            eprintln!("  {}", url);
+            Ok(())
+        }
     }
+}
+
+/// Resolve a PASSKEY argument against the active vault's passkeys and
+/// render the match for a message: `"name" (credential id)`.
+async fn resolve_listed(token: &str) -> Result<String, String> {
+    let (custodian, vault) = resolve_active(None)?;
+    let body = fetch(&custodian, &vault).await?;
+    let p = resolve_passkey(token, &body.passkeys)?;
+    Ok(match p.device_name.as_deref() {
+        Some(n) => format!("\"{}\" ({})", n, p.credential_id),
+        None => p.credential_id.clone(),
+    })
+}
+
+/// Resolve a PASSKEY argument the way the vault resolver does, first match
+/// wins: an exact credential id, an exact name (case-insensitive), or a
+/// unique credential id prefix of 4+ chars. Ambiguity is an error listing the
+/// candidates, never a guess.
+fn resolve_passkey<'a>(token: &str, keys: &'a [PasskeyMeta]) -> Result<&'a PasskeyMeta, String> {
+    let token = token.trim();
+    if let Some(p) = keys.iter().find(|p| p.credential_id == token) {
+        return Ok(p);
+    }
+    let by_name: Vec<&PasskeyMeta> = keys
+        .iter()
+        .filter(|p| {
+            p.device_name
+                .as_deref()
+                .is_some_and(|n| n.trim().eq_ignore_ascii_case(token))
+        })
+        .collect();
+    match by_name.as_slice() {
+        [p] => return Ok(*p),
+        [] => {}
+        many => return Err(ambiguous_passkey_err(token, "name", many)),
+    }
+    if token.len() >= 4 {
+        let by_prefix: Vec<&PasskeyMeta> = keys
+            .iter()
+            .filter(|p| p.credential_id.starts_with(token))
+            .collect();
+        match by_prefix.as_slice() {
+            [p] => return Ok(*p),
+            [] => {}
+            many => return Err(ambiguous_passkey_err(token, "id prefix", many)),
+        }
+    }
+    Err(format!(
+        "no passkey matches '{}'. Run `sprott passkey ls` and pass its exact name, its credential id, or a unique id prefix",
+        token
+    ))
+}
+
+fn ambiguous_passkey_err(token: &str, by: &str, cands: &[&PasskeyMeta]) -> String {
+    let list = cands
+        .iter()
+        .map(|p| {
+            let short = p.credential_id.get(..12).unwrap_or(&p.credential_id);
+            match p.device_name.as_deref() {
+                Some(n) => format!("  {} ({})", n, short),
+                None => format!("  {}", p.credential_id),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "'{}' matches {} passkeys by {}. Be specific (use the credential id or a unique prefix):\n{}",
+        token,
+        cands.len(),
+        by,
+        list
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,12 +137,11 @@ struct PasskeyMeta {
     created_at: Option<String>,
 }
 
-async fn run_ls(json: bool) -> Result<(), String> {
-    let (custodian, vault) = resolve_active(None)?;
+async fn fetch(custodian: &str, vault: &str) -> Result<PasskeysBody, String> {
     let url = format!(
         "{}/v/{}/passkeys",
         custodian.trim_end_matches('/'),
-        urlencoding::encode(&vault)
+        urlencoding::encode(vault)
     );
     let client = crate::util::http_builder()
         .timeout(Duration::from_secs(8))
@@ -75,7 +159,12 @@ async fn run_ls(json: bool) -> Result<(), String> {
             resp.text().await.unwrap_or_default()
         ));
     }
-    let body: PasskeysBody = resp.json().await.map_err(|e| format!("parse: {}", e))?;
+    resp.json().await.map_err(|e| format!("parse: {}", e))
+}
+
+async fn run_ls(json: bool) -> Result<(), String> {
+    let (custodian, vault) = resolve_active(None)?;
+    let body = fetch(&custodian, &vault).await?;
     if json {
         // Machine-readable mirror of the human table: one object per enrolled
         // passkey (public metadata only). A not-yet-enrolled or empty vault
@@ -156,5 +245,48 @@ async fn run_ls(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn _silence_unused(_a: PasskeyRemoveArgs, _b: PasskeyRenameArgs) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pk(id: &str, name: Option<&str>) -> PasskeyMeta {
+        PasskeyMeta {
+            credential_id: id.into(),
+            device_name: name.map(str::to_string),
+            transports: Vec::new(),
+            last_used_at: None,
+            created_at: None,
+        }
+    }
+
+    /// Exact credential id, then exact name (case-insensitive), then a
+    /// unique id prefix of 4+ chars; ambiguity lists the candidates.
+    #[test]
+    fn passkey_token_id_name_prefix() {
+        let keys = [
+            pk("AbCd1234-xyz", Some("MacBook")),
+            pk("AbCd9876_uvw", Some("iPhone")),
+            pk("Zz00", Some("AbCd1234-xyz")),
+            pk("Yy11", None),
+        ];
+        let id = |t: &str| resolve_passkey(t, &keys).map(|p| p.credential_id.clone());
+        assert_eq!(
+            id("AbCd1234-xyz").unwrap(),
+            "AbCd1234-xyz",
+            "id beats a name"
+        );
+        assert_eq!(id("macbook").unwrap(), "AbCd1234-xyz");
+        assert_eq!(id("IPHONE").unwrap(), "AbCd9876_uvw");
+        assert_eq!(id("AbCd98").unwrap(), "AbCd9876_uvw");
+        assert_eq!(id("Yy11").unwrap(), "Yy11");
+        let amb = id("AbCd").unwrap_err();
+        assert!(amb.contains("MacBook") && amb.contains("iPhone"), "{amb}");
+        assert!(id("abcd98").is_err(), "an id prefix is case-sensitive");
+        assert!(id("Yy1").is_err(), "a prefix needs 4+ chars");
+        assert!(id("nope").is_err());
+
+        let twins = [pk("Aaaa1", Some("Laptop")), pk("Bbbb2", Some("laptop"))];
+        let err = resolve_passkey("Laptop", &twins).unwrap_err();
+        assert!(err.contains("2 passkeys by name"), "{err}");
+    }
+}

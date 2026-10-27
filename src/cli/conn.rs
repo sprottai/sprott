@@ -203,7 +203,7 @@ pub fn insert_service_connection(
 }
 
 /// Remove a connection from `aux.connections`, preserving every other aux key.
-/// Returns true if an entry was present. Used by `sc set --no-broker` and
+/// Returns true if an entry was present. Used by `sc set --no-host` and
 /// `sc rm` to un-broker / clean up the connection tied to a key.
 pub fn remove_connection(aux: &mut Value, conn_id: &str) -> bool {
     let Some(obj) = aux.as_object_mut() else {

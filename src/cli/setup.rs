@@ -35,7 +35,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
     }
 
     let name = args
-        .name
+        .agent_name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -47,7 +47,7 @@ pub async fn run(args: SetupArgs, json_output: bool) -> Result<(), i32> {
             emit_error(
                 json_output,
                 "A short agent name is required.",
-                "sprott setup --name <a short name for this agent, e.g. claude-code>",
+                "sprott setup --agent-name <a short name for this agent, e.g. claude-code>",
             );
             return Err(2);
         }
@@ -496,7 +496,7 @@ fn spawn_background(context: &Context, phase: SetupPhase) -> Result<u32, String>
         .arg("--background")
         .arg("--phase")
         .arg(phase_name(phase))
-        .arg("--name")
+        .arg("--agent-name")
         .arg(&context.name)
         .env(human_action::STATUS_ENV, &status_path)
         .stdin(Stdio::null())
@@ -676,7 +676,7 @@ async fn pair_missing_and_persist(name: &str, profile: Option<&str>) -> Result<(
         crate::identity_file::write(&agent.path, crate::identity::IdKind::Agent, &agent.seed)?;
     }
     if device.is_some() {
-        crate::cli::login::bring_up(false).await?;
+        crate::cli::login::bring_up(None).await?;
     }
     Ok(())
 }
@@ -686,7 +686,7 @@ async fn run_background(args: SetupArgs) -> Result<(), i32> {
         Some(phase) => phase,
         None => return Err(2),
     };
-    let name = match args.name.as_deref().filter(|s| !s.trim().is_empty()) {
+    let name = match args.agent_name.as_deref().filter(|s| !s.trim().is_empty()) {
         Some(name) => name.to_string(),
         None => return Err(2),
     };
@@ -832,7 +832,7 @@ fn base_command(context: &Context) -> String {
 }
 
 fn setup_command(name: &str, profile: Option<&str>) -> String {
-    let mut command = format!("sprott setup --name {}", shell_word(name));
+    let mut command = format!("sprott setup --agent-name {}", shell_word(name));
     if let Some(profile) = profile {
         command.push_str(&format!(" --profile {}", shell_word(profile)));
     }
@@ -1127,7 +1127,7 @@ mod setup_tests {
         );
         let (message, fix) = name_mismatch_details("codex", &status).unwrap();
         assert_eq!(message, "Setup for agent 'other' is in progress.");
-        assert_eq!(fix, "sprott setup --name other --profile dev --wait");
+        assert_eq!(fix, "sprott setup --agent-name other --profile dev --wait");
     }
 
     #[test]
@@ -1157,7 +1157,7 @@ mod setup_tests {
         assert_eq!(effective_profile(&explicit, &status), Some("prod"));
         assert_eq!(
             next_command(&context, effective_profile(&context, &status)),
-            "sprott setup --name codex --profile dev --wait"
+            "sprott setup --agent-name codex --profile dev --wait"
         );
     }
 

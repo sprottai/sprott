@@ -48,8 +48,8 @@ Sprott reports them because it saw them happen.
 | Code | Status | What it means | What to do |
 |---|---|---|---|
 | `unauthorized` | 401 | The request carries no valid agent identity or credential. | Run the agent through `sprott run`, or set it up with `sprott agent add`. |
-| `agent_key` | 407 | A request with a phantom has no verified agent identity. | Run the agent through `sprott run`; set it up with `sprott setup --name <name>`. |
-| `agent_not_admitted` | 403 | The agent proved who it is, but your account does not admit it (never approved, or removed). It is refused on every vault. | Run `sprott setup --name <name>` or `sprott agent add`. |
+| `agent_key` | 407 | A request with a phantom has no verified agent identity. | Run the agent through `sprott run`; set it up with `sprott setup --agent-name <name>`. |
+| `agent_not_admitted` | 403 | The agent proved who it is, but your account does not admit it (never approved, or removed). It is refused on every vault. | Run `sprott setup --agent-name <name>` or `sprott agent add`. |
 | `agent_not_in_account` | 403 | The agent is not registered to the account this machine is signed in to. | Run `sprott agent add` on this machine. |
 | `agent_not_authorized` | 403 | The agent is not turned on for this vault. | Turn it on in the vault's Agent access page; the message has the link. |
 | `mask_not_enabled` | 403 | The connection exists, but is not turned on for this agent. | The responsible member turns it on in the vault's Agent access page. |
@@ -100,7 +100,7 @@ Sprott reports them because it saw them happen.
 
 | Code | Status | What it means | What to do |
 |---|---|---|---|
-| `egress_unreachable` | 502 | The daemon could not connect onward. Not a credential problem. | Check the network, or `sprott proxy set` behind a corporate proxy. |
+| `egress_unreachable` | 502 | The daemon could not connect onward. Not a credential problem. | Check the network, or `sprott config set proxy <url>` behind a corporate proxy. |
 | `upstream_error` | 502 | The service answered, but the exchange failed. Not a credential problem. | Retry. |
 | `upstream_body` | 502 | The request body could not be read. | Retry. |
 | `oauth_mint` | 502 | The provider refused to issue a token. | Retry; reconnect the account in the console if it keeps failing. |

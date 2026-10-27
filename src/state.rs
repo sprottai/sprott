@@ -125,6 +125,43 @@ impl OpGrantKey {
     }
 }
 
+impl SecretsCache {
+    /// Replace connection `conn_id`'s credential value `old` with `new`
+    /// wherever this cache holds it (its entry, its named secrets).
+    pub fn replace_value(&mut self, conn_id: &str, old: &[u8], new: &[u8]) {
+        if let Some(e) = self.entries.get_mut(conn_id) {
+            if e.value.as_slice() == old {
+                e.value = new.to_vec();
+            }
+        }
+        if let Some(secrets) = self.allow_secrets.get_mut(conn_id) {
+            for v in secrets.values_mut() {
+                if v.as_slice() == old {
+                    *v = new.to_vec();
+                }
+            }
+        }
+    }
+}
+
+/// `sha256(token)` hex: how a refresh token is keyed in memory.
+fn refresh_token_hash(token: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// A provider-rotated refresh token not stored in the vault yet: `new` is the
+/// only valid copy (the provider refuses `old` now), `old` is the value the
+/// store still holds at its slot.
+#[derive(Debug, Clone)]
+pub struct PendingRotation {
+    pub old: zeroize::Zeroizing<Vec<u8>>,
+    pub new: zeroize::Zeroizing<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SecretsCache {
     /// service_id → cached auth value with per-entry expiry. Filled by:
@@ -353,7 +390,7 @@ impl SyncNote {
 }
 
 /// The key a pending rotation's note is kept under in the sync notes.
-fn rotation_note_key(conn_id: &str) -> String {
+pub(crate) fn rotation_note_key(conn_id: &str) -> String {
     format!("rotation {}", conn_id)
 }
 
@@ -418,13 +455,22 @@ pub struct AppState {
     /// (a restart empties it, by which point the cloud has converged). Entries
     /// self-reap after `REDEEMED_CODE_TTL` (codes expire ~10min upstream).
     pub oauth_redeemed_codes: Mutex<HashMap<String, std::time::Instant>>,
+    /// sha256(authorization code) → when this daemon first tried to exchange
+    /// it and failed transiently (the retry window counts from it).
+    pub oauth_code_first_tried: Mutex<HashMap<String, std::time::Instant>>,
+    /// (vault, sha256(refresh token)) → the token a refresh in this process
+    /// rotated it to, and when: a mint that read the replaced token (before
+    /// it waited for the vault write lock, or from a fresh decrypt) follows
+    /// it instead of sending a token the provider refuses (some revoke the
+    /// whole token family on such a reuse). Entries self-reap.
+    pub oauth_rotated_to: Mutex<HashMap<(String, String), (zeroize::Zeroizing<String>, std::time::Instant)>>,
     /// Random per daemon PROCESS (hex). Rides every op-relay register so the
     /// backend can cancel a previous process's pending rows: the op store is
     /// in-memory and poll tasks spawn only at mint, so a pre-restart row can
     /// never apply (design/approvals-inbox.md D1, restart zombies).
     pub boot_id: String,
     /// The device egress proxy the resident proxy's forward hop tunnels through,
-    /// in a swappable cell so `sc proxy set/clear` HOT-reloads it via
+    /// in a swappable cell so `sprott config set/unset proxy` HOT-reloads it via
     /// `/proxy/reload` — no daemon restart, no vault re-unlock. Shared with the
     /// hudsucker forward connector (see `proxy::upstream`); the reqwest side
     /// swaps via `core::forward::reload_egress_proxy`.
@@ -569,6 +615,8 @@ impl AppState {
             ledger_sync: tokio::sync::Mutex::new(None),
             external_fill_lock: tokio::sync::Mutex::new(()),
             oauth_redeemed_codes: Mutex::new(HashMap::new()),
+            oauth_code_first_tried: Mutex::new(HashMap::new()),
+            oauth_rotated_to: Mutex::new(HashMap::new()),
             boot_id: {
                 use rand::RngCore as _;
                 let mut b = [0u8; 16];
@@ -948,6 +996,15 @@ impl AppState {
         m.contains_key(&crate::api_key::sha256_hex(code))
     }
 
+    /// When this daemon first tried `code` (now, on the first ask). Entries
+    /// self-reap like the redeemed ledger: a code is dead long before.
+    pub fn code_first_tried(&self, code: &str) -> std::time::Instant {
+        let mut m = self.oauth_code_first_tried.lock().unwrap();
+        Self::reap_redeemed(&mut m);
+        *m.entry(crate::api_key::sha256_hex(code))
+            .or_insert_with(std::time::Instant::now)
+    }
+
     fn reap_redeemed(m: &mut HashMap<String, std::time::Instant>) {
         let now = std::time::Instant::now();
         m.retain(|_, t| now.duration_since(*t) < Self::REDEEMED_CODE_TTL);
@@ -1083,13 +1140,19 @@ impl AppState {
     pub fn unlock_vault(
         &self,
         vault_id: String,
-        cache: SecretsCache,
+        mut cache: SecretsCache,
         state_key: zeroize::Zeroizing<Vec<u8>>,
     ) {
         let Ok(runtime) = self.runtime(&vault_id) else {
             tracing::warn!(vault = %vault_id, "unlock refused: vault access was revoked");
             return;
         };
+        // Every cache is built from the store, which still holds the value a
+        // pending rotation replaced: the session keeps using the rotated one
+        // (the provider refuses the old one).
+        for ((conn_id, _), p) in runtime.pending_rotations.lock().unwrap().iter() {
+            cache.replace_value(conn_id, &p.old, p.new.as_bytes());
+        }
         // A parked or locked device holds no K (I3): a refresh or apply that
         // cloned K before the park must not write it back.
         if self.ledger.lock().unwrap().device != crate::principal_ledger::DeviceGate::Open {
@@ -1886,34 +1949,126 @@ impl AppState {
         vault_id: &str,
         conn_id: &str,
         role: &str,
+        old: &[u8],
         token: &str,
         why: &str,
     ) {
         if let Ok(runtime) = self.runtime(vault_id) {
-            runtime.pending_rotations.lock().unwrap().insert(
-                (conn_id.to_string(), role.to_string()),
-                zeroize::Zeroizing::new(token.to_string()),
+            let mut pending = runtime.pending_rotations.lock().unwrap();
+            let slot = (conn_id.to_string(), role.to_string());
+            // A rotation of a token that was itself still pending (the store
+            // failed twice in a row): the store still holds the FIRST
+            // replaced value, so the chain keeps it as `old`, or the retry
+            // would find the slot "changed" and drop the only valid token.
+            let old = match pending.get(&slot) {
+                Some(p) if p.new.as_bytes() == old => p.old.clone(),
+                _ => zeroize::Zeroizing::new(old.to_vec()),
+            };
+            pending.insert(
+                slot,
+                PendingRotation {
+                    old,
+                    new: zeroize::Zeroizing::new(token.to_string()),
+                },
             );
         }
         self.note_sync(
             vault_id,
             &rotation_note_key(conn_id),
             SyncNote::Refused(format!(
-                "connection {}: the provider's new refresh token could not be stored in the vault ({}); this device uses it, and the next sync stores it again",
+                "connection {}: the provider's new refresh token could not be stored in the vault ({}); this device uses it, and it is stored as soon as the vault can be written",
                 conn_id, why
             )),
         );
     }
 
     /// The rotated refresh tokens of `vault_id` not stored yet, taken.
-    pub fn take_pending_rotations(
-        &self,
-        vault_id: &str,
-    ) -> Vec<((String, String), zeroize::Zeroizing<String>)> {
+    pub fn take_pending_rotations(&self, vault_id: &str) -> Vec<((String, String), PendingRotation)> {
         self.runtime_if_present(vault_id)
             .map(|runtime| std::mem::take(&mut *runtime.pending_rotations.lock().unwrap()))
             .map(|m| m.into_iter().collect())
             .unwrap_or_default()
+    }
+
+    /// The rotated refresh token of `(conn_id, role)` was stored (or a newer
+    /// one was): nothing is pending for that slot any more, and its note is
+    /// settled.
+    pub fn drop_pending_rotation(&self, vault_id: &str, conn_id: &str, role: &str) {
+        if let Some(runtime) = self.runtime_if_present(vault_id) {
+            runtime
+                .pending_rotations
+                .lock()
+                .unwrap()
+                .remove(&(conn_id.to_string(), role.to_string()));
+        }
+        self.clear_rotation_note(vault_id, conn_id);
+    }
+
+    /// The rotated refresh token pending for connection `conn_id` that
+    /// replaced `value`, if any (`value` as the store still holds it, or as a
+    /// fresh decrypt read it).
+    pub fn pending_rotation_of(
+        &self,
+        vault_id: &str,
+        conn_id: &str,
+        value: &[u8],
+    ) -> Option<zeroize::Zeroizing<String>> {
+        let runtime = self.runtime_if_present(vault_id)?;
+        let pending = runtime.pending_rotations.lock().unwrap();
+        pending
+            .iter()
+            .find(|((c, _), p)| c == conn_id && p.old.as_slice() == value)
+            .map(|(_, p)| p.new.clone())
+    }
+
+    /// How long a rotation is remembered for [`Self::current_refresh_token`]:
+    /// past it every reader holds the rotated token anyway.
+    const ROTATED_TO_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// A refresh in this process rotated `old` to `new` (`vault_id`).
+    pub fn note_rotated_to(&self, vault_id: &str, old: &[u8], new: &str) {
+        let mut m = self.oauth_rotated_to.lock().unwrap();
+        let now = std::time::Instant::now();
+        m.retain(|_, (_, at)| now.duration_since(*at) < Self::ROTATED_TO_TTL);
+        m.insert(
+            (vault_id.to_string(), refresh_token_hash(old)),
+            (zeroize::Zeroizing::new(new.to_string()), now),
+        );
+    }
+
+    /// The refresh token connection `conn_id` holds NOW, given a `value` read
+    /// earlier: `value` followed through the rotations made since (by this
+    /// process, then any still pending a store). `None` when `value` is
+    /// current.
+    pub fn current_refresh_token(
+        &self,
+        vault_id: &str,
+        conn_id: &str,
+        value: &[u8],
+    ) -> Option<zeroize::Zeroizing<String>> {
+        let mut current: Option<zeroize::Zeroizing<String>> = None;
+        // Bounded: a chain is a handful of rotations; never loop on a cycle.
+        for _ in 0..16 {
+            let at = current.as_ref().map(|c| c.as_bytes()).unwrap_or(value);
+            let next = {
+                let m = self.oauth_rotated_to.lock().unwrap();
+                m.get(&(vault_id.to_string(), refresh_token_hash(at)))
+                    .filter(|(_, when)| when.elapsed() < Self::ROTATED_TO_TTL)
+                    .map(|(t, _)| t.clone())
+            }
+            .or_else(|| self.pending_rotation_of(vault_id, conn_id, at));
+            match next {
+                Some(n) if n.as_bytes() != at => current = Some(n),
+                _ => break,
+            }
+        }
+        current
+    }
+
+    /// Any rotated refresh token of `vault_id` not stored yet?
+    pub fn has_pending_rotations(&self, vault_id: &str) -> bool {
+        self.runtime_if_present(vault_id)
+            .is_some_and(|runtime| !runtime.pending_rotations.lock().unwrap().is_empty())
     }
 
     /// A pending rotation of `conn_id` was stored: its note is settled.
@@ -1930,18 +2085,7 @@ impl AppState {
         };
         let mut state = runtime.state.lock().unwrap();
         if let VaultState::Unlocked { cache, .. } = &mut *state {
-            if let Some(e) = cache.entries.get_mut(conn_id) {
-                if e.value.as_slice() == old {
-                    e.value = new.to_vec();
-                }
-            }
-            if let Some(secrets) = cache.allow_secrets.get_mut(conn_id) {
-                for v in secrets.values_mut() {
-                    if v.as_slice() == old {
-                        *v = new.to_vec();
-                    }
-                }
-            }
+            cache.replace_value(conn_id, old, new);
         }
     }
 
@@ -2364,8 +2508,6 @@ mod tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         {

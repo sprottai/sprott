@@ -4,20 +4,20 @@
 //!
 //! Every secret SLOT is filled from one of two sources, two flags of the same
 //! shape (the flag names the source):
-//!   - `--from-literal SLOT=VALUE` — a NEW value, written to the vault on
+//!   - `--set SLOT=VALUE` — a NEW value, written to the vault on
 //!     approval (the value rides the local deposit, never the op);
-//!   - `--from-secret SLOT=KEY` — a secret ALREADY in the vault, bound by KEY
+//!   - `--use SLOT=KEY` — a secret ALREADY in the vault, bound by KEY
 //!     (no plaintext anywhere).
 //!
 //! Two shapes (§9):
 //!   - RAW (default): `--host <domain>` (repeatable). A raw connection's SLOT is
-//!     the vault KEY itself, so `--from-secret KEY` is its short form. Anchors
+//!     the vault KEY itself, so `--use KEY` is its short form. Anchors
 //!     its own hosts; stores new values at their BARE uppercase KEY (the vault
 //!     is a flat env namespace). Reachable via `__sprott__<name>__` (sole) or
 //!     `__sprott__<name>__<role>__` (several).
 //!   - SERVICE-backed: `--service <id>` binds a catalog service — its hosts and
 //!     declared secret roles. SLOT is a role (case-insensitive), and
-//!     `--from-secret` needs the `ROLE=KEY` form. Every role must be filled: a
+//!     `--use` needs the `ROLE=KEY` form. Every role must be filled: a
 //!     role named by neither flag is prompted for (hidden) on a terminal and is
 //!     an error off one. `--host` is optional and only PINS an exact FQDN
 //!     inside the service's `*.suffix` wildcards. A new value is stored at a
@@ -42,11 +42,11 @@ use crate::cli::active::resolve_active;
 use crate::cli::approve::{act_result, approve_op, deposit_values, ApproveOpts};
 use crate::cli::conn::{slugify_conn_id, valid_role, validate_raw_host};
 use crate::cli::webauthn::now_unix;
-use crate::config::{ConnectArgs, ConnectionHostArgs, ConnectionRmArgs};
+use crate::config::{ApprovalArgs, ConnectArgs, ConnectionHostArgs, ConnectionRmArgs};
 use crate::service::ServiceRegistry;
 use crate::storage::plaintext::suggested_secret_key;
 
-pub async fn run(mut args: ConnectArgs) -> Result<(), String> {
+pub async fn run(mut args: ConnectArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
 
     // Resolve the connection id: slugify a provided handle, or (no id given) run
@@ -54,8 +54,10 @@ pub async fn run(mut args: ConnectArgs) -> Result<(), String> {
     let name = resolve_conn_id(&mut args)?;
 
     match args.service.clone() {
-        Some(service) => run_service_backed(&custodian, &vault, &name, &service, &args).await,
-        None => run_raw(&custodian, &vault, &name, &args).await,
+        Some(service) => {
+            run_service_backed(&custodian, &vault, &name, &service, &args, approval).await
+        }
+        None => run_raw(&custodian, &vault, &name, &args, approval).await,
     }
 }
 
@@ -80,7 +82,7 @@ fn resolve_conn_id(args: &mut ConnectArgs) -> Result<String, String> {
 
     if !std::io::stdin().is_terminal() {
         return Err(
-            "provide a connection id: `sprott connection add <id> --host <domain> --from-literal KEY=VALUE` (or `--service <id>`)".into(),
+            "provide a connection id: `sprott connection add <id> --host <domain> --set KEY=VALUE` (or `--service <id>`)".into(),
         );
     }
 
@@ -142,7 +144,7 @@ pub async fn run_ls(json: bool) -> Result<(), String> {
 
     if conns.is_empty() {
         println!(
-            "no connections; add one with `sprott connection add <id> --host <domain> --from-literal KEY=VALUE`"
+            "no connections; add one with `sprott connection add <id> --host <domain> --set KEY=VALUE`"
         );
         return Ok(());
     }
@@ -174,7 +176,7 @@ pub async fn run_ls(json: bool) -> Result<(), String> {
 /// SAME `widen-host` op the proxy's one-tap widen uses (approve.rs dispatch), so
 /// reactive and proactive widening share one code path + one consent card. The
 /// host may be an exact FQDN or a leftmost `*.domain` wildcard.
-pub async fn run_add_host(args: ConnectionHostArgs) -> Result<(), String> {
+pub async fn run_add_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let id = slugify_conn_id(&args.id);
     if id.is_empty() {
@@ -192,12 +194,7 @@ pub async fn run_add_host(args: ConnectionHostArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -215,7 +212,7 @@ pub async fn run_add_host(args: ConnectionHostArgs) -> Result<(), String> {
 /// REMOVING a host from a connection's anchor (tighten access). Same passkey
 /// approval; mints the `narrow-host` op the dispatch removes durably. Idempotent
 /// — a host not on the anchor reports nothing removed (no error).
-pub async fn run_rm_host(args: ConnectionHostArgs) -> Result<(), String> {
+pub async fn run_rm_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let id = slugify_conn_id(&args.id);
     if id.is_empty() {
@@ -235,12 +232,7 @@ pub async fn run_rm_host(args: ConnectionHostArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -264,7 +256,7 @@ pub async fn run_rm_host(args: ConnectionHostArgs) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_rm(args: ConnectionRmArgs) -> Result<(), String> {
+pub async fn run_rm(args: ConnectionRmArgs, approval: &ApprovalArgs) -> Result<(), String> {
     let (custodian, vault) = resolve_active(None)?;
     let id = slugify_conn_id(&args.id);
     if id.is_empty() {
@@ -302,12 +294,7 @@ pub async fn run_rm(args: ConnectionRmArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     let body = approve_op(
         &custodian,
         &vault,
@@ -385,6 +372,7 @@ async fn run_raw(
     vault: &str,
     name: &str,
     args: &ConnectArgs,
+    approval: &ApprovalArgs,
 ) -> Result<(), String> {
     // Hosts: anchor our own exact FQDNs.
     let hosts = if !args.host.is_empty() {
@@ -405,19 +393,19 @@ async fn run_raw(
     // connections referencing the same KEY share it).
     let gathered = gather_raw_slots(
         name,
-        &args.from_literal,
-        &args.from_secret,
+        &args.set_slots,
+        &args.use_slots,
         std::io::stdin().is_terminal(),
     )?;
     if gathered.new_values.is_empty() && gathered.existing.is_empty() {
         return Err(
-            "a raw connection needs at least one secret: `--from-literal KEY=VALUE` (a new value) or `--from-secret KEY` (a secret already in the vault)"
+            "a raw connection needs at least one secret: `--set KEY=VALUE` (a new value) or `--use KEY` (a secret already in the vault)"
                 .into(),
         );
     }
 
     // `secret_keys` = every KEY the connection binds (new + existing); the
-    // daemon verifies each `--from-secret` KEY actually exists.
+    // daemon verifies each `--use` KEY actually exists.
     let mut secret_keys: Vec<String> = gathered
         .new_values
         .iter()
@@ -453,12 +441,7 @@ async fn run_raw(
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     approve_op(
         custodian,
         vault,
@@ -480,6 +463,7 @@ async fn run_service_backed(
     name: &str,
     service: &str,
     args: &ConnectArgs,
+    approval: &ApprovalArgs,
 ) -> Result<(), String> {
     // Resolve the service from the compiled catalog (built-ins). A per-vault
     // custom service (aux.services) is connected via the console, not here.
@@ -538,8 +522,8 @@ async fn run_service_backed(
         service,
         &service_secrets,
         &required,
-        &args.from_literal,
-        &args.from_secret,
+        &args.set_slots,
+        &args.use_slots,
         std::io::stdin().is_terminal(),
     )?;
 
@@ -594,12 +578,7 @@ async fn run_service_backed(
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = ApproveOpts::from_flags(approval);
     approve_op(
         custodian,
         vault,
@@ -625,57 +604,71 @@ async fn run_service_backed(
         eprintln!("  phantom: {}", ph);
     }
     if phantoms.is_empty() {
-        eprintln!("  (no injectable phantom yet: fill the service's secret with `--from-literal ROLE=VALUE` or `--from-secret ROLE=KEY`)");
+        eprintln!("  (no injectable phantom yet: fill the service's secret with `--set ROLE=VALUE` or `--use ROLE=KEY`)");
     }
     Ok(())
 }
 
 // ── slot filling ─────────────────────────────────────────────────────────────
 
-/// One `--from-literal` / `--from-secret` argument, split.
+/// One `--set` / `--use` argument, split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlotArg {
-    /// `--from-literal SLOT=VALUE`.
+    /// `--set SLOT=VALUE`.
     Literal { slot: String, value: String },
-    /// `--from-literal SLOT`: prompt for the value (hidden) on a terminal.
+    /// `--set SLOT`: prompt for the value (hidden) on a terminal.
     Prompt { slot: String },
-    /// `--from-secret SLOT=KEY`.
+    /// `--use SLOT=KEY`.
     Secret { slot: String, key: String },
-    /// `--from-secret KEY` (raw connections only: the slot IS the key).
+    /// `--use KEY` (raw connections only: the slot IS the key).
     SecretShort { key: String },
 }
 
-/// Split the two flags into slot arguments, checking only their shape.
+/// Split the two flags into slot arguments, checking their shape. A literal
+/// `SLOT=-` reads its value from stdin here (at most one slot can).
 fn parse_slot_args(
-    from_literal: &[String],
-    from_secret: &[String],
+    set_slots: &[String],
+    use_slots: &[String],
 ) -> Result<Vec<SlotArg>, String> {
     let mut out = Vec::new();
-    for a in from_literal {
+    let mut stdin_slot: Option<String> = None;
+    for a in set_slots {
         match a.split_once('=') {
             Some((slot, value)) => {
                 let slot = slot.trim();
                 if slot.is_empty() {
                     return Err(format!(
-                        "--from-literal '{}': SLOT is empty (expected SLOT=VALUE)",
+                        "--set '{}': SLOT is empty (expected SLOT=VALUE)",
                         a
                     ));
                 }
                 if value.is_empty() {
                     return Err(format!(
-                        "--from-literal {}: the value is empty; pass `--from-literal {}=<value>`, or `--from-literal {}` on a terminal to type it hidden",
-                        slot, slot, slot
+                        "--set {}: the value is empty; pass `--set {}=<value>`, `{}=-` to read it from stdin, or `--set {}` on a terminal to type it hidden",
+                        slot, slot, slot, slot
                     ));
                 }
+                let value = if value == "-" {
+                    if let Some(first) = &stdin_slot {
+                        return Err(format!(
+                            "--set {}=- and {}=-: stdin holds one value; give the other one as SLOT=VALUE",
+                            first, slot
+                        ));
+                    }
+                    stdin_slot = Some(slot.to_string());
+                    crate::cli::secret::read_value_arg(slot)?
+                } else {
+                    value.to_string()
+                };
                 out.push(SlotArg::Literal {
                     slot: slot.to_string(),
-                    value: value.to_string(),
+                    value,
                 });
             }
             None => {
                 let slot = a.trim();
                 if slot.is_empty() {
-                    return Err("--from-literal needs SLOT=VALUE".into());
+                    return Err("--set needs SLOT=VALUE".into());
                 }
                 out.push(SlotArg::Prompt {
                     slot: slot.to_string(),
@@ -683,21 +676,21 @@ fn parse_slot_args(
             }
         }
     }
-    for a in from_secret {
+    for a in use_slots {
         let (slot, key) = match a.split_once('=') {
             Some((slot, key)) => (Some(slot.trim()), key.trim()),
             None => (None, a.trim()),
         };
         if !crate::cli::conn::valid_secret_ref(key) {
             return Err(format!(
-                "--from-secret '{}': '{}' is not a valid secret key (ASCII letters/digits/_/-, no '__')",
+                "--use '{}': '{}' is not a valid secret key (ASCII letters/digits/_/-, no '__')",
                 a, key
             ));
         }
         match slot {
             Some("") => {
                 return Err(format!(
-                    "--from-secret '{}': SLOT is empty (expected SLOT=KEY)",
+                    "--use '{}': SLOT is empty (expected SLOT=KEY)",
                     a
                 ))
             }
@@ -742,7 +735,7 @@ fn claim_slot(
         let both = matches!(prev, Pending::Secret(_)) != matches!(pending, Pending::Secret(_));
         return Err(if both {
             format!(
-                "slot '{}' is filled by both --from-literal and --from-secret; use one",
+                "slot '{}' is filled by both --set and --use; pick one",
                 slot
             )
         } else {
@@ -776,11 +769,11 @@ struct RawSlots {
 
 fn gather_raw_slots(
     name: &str,
-    from_literal: &[String],
-    from_secret: &[String],
+    set_slots: &[String],
+    use_slots: &[String],
     tty: bool,
 ) -> Result<RawSlots, String> {
-    let args = parse_slot_args(from_literal, from_secret)?;
+    let args = parse_slot_args(set_slots, use_slots)?;
     let mut seen: Vec<(String, Pending)> = Vec::new();
     for a in args {
         match a {
@@ -794,7 +787,7 @@ fn gather_raw_slots(
             SlotArg::Secret { slot, key } => {
                 if !slot.eq_ignore_ascii_case(&key) {
                     return Err(format!(
-                        "--from-secret {}={}: a raw connection's slot is the key itself; use `--from-secret {}`",
+                        "--use {}={}: a raw connection's slot is the key itself; write `--use {}`",
                         slot, key, key
                     ));
                 }
@@ -838,8 +831,8 @@ fn gather_raw_slots(
             }
             Pending::Prompt => {
                 return Err(format!(
-                    "--from-literal {}: provide the value as `--from-literal {}=<value>` (no terminal to prompt on)",
-                    slot, slot
+                    "--set {}: provide the value as `--set {}=<value>`, or `{}=-` to read it from stdin (no terminal to prompt on)",
+                    slot, slot, slot
                 ))
             }
         }
@@ -869,8 +862,8 @@ fn fill_service_slots(
     service: &str,
     roles: &[String],
     required: &[String],
-    from_literal: &[String],
-    from_secret: &[String],
+    set_slots: &[String],
+    use_slots: &[String],
     tty: bool,
 ) -> Result<Vec<(String, Option<Filled>)>, String> {
     let declared = |slot: &str| -> Result<String, String> {
@@ -892,7 +885,7 @@ fn fill_service_slots(
             })
     };
     let mut seen: Vec<(String, Pending)> = Vec::new();
-    for a in parse_slot_args(from_literal, from_secret)? {
+    for a in parse_slot_args(set_slots, use_slots)? {
         match a {
             SlotArg::Literal { slot, value } => {
                 claim_slot(&mut seen, declared(&slot)?, Pending::Value(value))?
@@ -903,7 +896,7 @@ fn fill_service_slots(
             }
             SlotArg::SecretShort { key } => {
                 return Err(format!(
-                    "--from-secret {}: with --service, name the slot it fills: `--from-secret ROLE={}` (roles of '{}': {}). A key name alone does not say which of the service's secrets it is.",
+                    "--use {}: with --service, name the slot it fills: `--use ROLE={}` (roles of '{}': {}). A key name alone does not say which of the service's secrets it is.",
                     key,
                     key,
                     service,
@@ -925,7 +918,7 @@ fn fill_service_slots(
     if !missing.is_empty() && !tty {
         let first = missing[0];
         return Err(format!(
-            "service '{}' needs a value for: {}. Fill each slot with a new value (`--from-literal {}=<value>`) or with a secret already in the vault (`--from-secret {}=<KEY>`).",
+            "service '{}' needs a value for: {}. Fill each slot with a new value (`--set {}=<value>`) or with a secret already in the vault (`--use {}=<KEY>`).",
             service,
             missing
                 .iter()
@@ -942,7 +935,7 @@ fn fill_service_slots(
         let filled = match seen.iter().find(|(s, _)| s == role).map(|(_, p)| p.clone()) {
             Some(Pending::Value(v)) => Some(Filled::Value(v)),
             Some(Pending::Secret(k)) => Some(Filled::Secret(k)),
-            // A bare `--from-literal ROLE`, or a required role no flag named:
+            // A bare `--set ROLE`, or a required role no flag named:
             // hidden prompt (only reached on a terminal).
             Some(Pending::Prompt) => Some(Filled::Value(prompt_or_fail(role, tty)?)),
             None if is_required(role) => Some(Filled::Value(prompt_or_fail(role, tty)?)),
@@ -960,8 +953,8 @@ fn fill_service_slots(
 fn prompt_or_fail(role: &str, tty: bool) -> Result<String, String> {
     if !tty {
         return Err(format!(
-            "--from-literal {}: provide the value as `--from-literal {}=<value>` (no terminal to prompt on)",
-            role, role
+            "--set {}: provide the value as `--set {}=<value>`, or `{}=-` to read it from stdin (no terminal to prompt on)",
+            role, role, role
         ));
     }
     prompt_value(role)
@@ -1206,7 +1199,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("with --service, name the slot"), "{e}");
-        assert!(e.contains("--from-secret ROLE=CF_TOKEN"), "{e}");
+        assert!(e.contains("--use ROLE=CF_TOKEN"), "{e}");
         // Both flags on one slot.
         let e = fill_service_slots(
             "cloudflare",
@@ -1217,7 +1210,7 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(e.contains("both --from-literal and --from-secret"), "{e}");
+        assert!(e.contains("both --set and --use"), "{e}");
         // Same flag twice.
         let e = fill_service_slots(
             "cloudflare",
@@ -1235,18 +1228,18 @@ mod tests {
             fill_service_slots("cloudflare", &roles(), &required(), &[], &[], false).unwrap_err();
         assert!(e.contains("needs a value for: CLOUDFLARE_API_TOKEN"), "{e}");
         assert!(
-            e.contains("--from-literal CLOUDFLARE_API_TOKEN=<value>"),
+            e.contains("--set CLOUDFLARE_API_TOKEN=<value>"),
             "{e}"
         );
         assert!(
-            e.contains("--from-secret CLOUDFLARE_API_TOKEN=<KEY>"),
+            e.contains("--use CLOUDFLARE_API_TOKEN=<KEY>"),
             "{e}"
         );
         assert!(
             !e.contains("CLOUDFLARE_ACCOUNT_ID"),
             "optional roles are not listed: {e}"
         );
-        // A bare --from-literal off a terminal can't prompt.
+        // A bare --set off a terminal can't prompt.
         let e = fill_service_slots(
             "cloudflare",
             &roles(),
@@ -1272,11 +1265,11 @@ mod tests {
         assert_eq!(r.existing, v(&["xh-gcp-test", "old_key"]));
         // SLOT=KEY with a different slot is refused for raw: the slot IS the key.
         let e = gather_raw_slots("myapi", &[], &v(&["TOKEN=OTHER_KEY"]), false).unwrap_err();
-        assert!(e.contains("use `--from-secret OTHER_KEY`"), "{e}");
+        assert!(e.contains("write `--use OTHER_KEY`"), "{e}");
         // Same KEY from both flags.
         let e =
             gather_raw_slots("myapi", &v(&["API_TOKEN=x"]), &v(&["api_token"]), false).unwrap_err();
-        assert!(e.contains("both --from-literal and --from-secret"), "{e}");
+        assert!(e.contains("both --set and --use"), "{e}");
         // Literal KEYs must be env keys.
         let e = gather_raw_slots("myapi", &v(&["bad-key=x"]), &[], false).unwrap_err();
         assert!(e.contains("isn't a valid env key"), "{e}");

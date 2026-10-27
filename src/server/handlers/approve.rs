@@ -1345,6 +1345,11 @@ pub async fn approve_op(
             // attacker with the user's session token can't DOS-lock without
             // a passkey gesture.
             "vault-lock" => {
+                // K is evicted below: store any rotated refresh token still
+                // pending first (this handler holds the vault write lock). One
+                // that still cannot be stored stays in memory as the only
+                // copy until the next unlock (see the function).
+                crate::auth::connect::store_pending_rotations_before_lock(&state, &vault_id);
                 state.lock_vault(&vault_id);
                 tracing::info!(vault = %vault_id, "vault locked");
                 (json!({ "ok": true, "act": "vault-lock" }), None)
@@ -1749,7 +1754,7 @@ pub async fn approve_op(
             // Delete a connection record. Unless `scope.keep_secrets`, also
             // deletes the secret(s) this connection WROTE that no other
             // connection binds (`connection_removal`): a key it only bound
-            // (`--from-secret`), a key another connection still claims, and
+            // (`--use`), a key another connection still claims, and
             // every key of a record that predates write tracking are kept.
             // Returns the removed list and each kept key with its reason so
             // the CLI can report them.
@@ -1875,7 +1880,7 @@ pub async fn approve_op(
                     }
                 }
                 // The committed value deposit (absent = no new values, e.g. a
-                // pure `--from-secret` connection). Single-use; expiry or a
+                // pure `--use` connection). Single-use; expiry or a
                 // daemon restart between create and approve fails closed.
                 let values = match scope.get("values_digest").and_then(|v| v.as_str()) {
                     Some(d) => Some(state.op_payload_take(d).ok_or_else(|| {
@@ -2103,6 +2108,7 @@ pub async fn approve_op(
                         existing_vault.as_ref(),
                     )?;
                 let base = crate::storage::sealed_vault::ViewBase::of(&view)?;
+                let existed = view.native_secrets.contains_key(&key);
                 let removed_prior_anchor = apply_secret_set_to_view(
                     &mut view,
                     &key,
@@ -2122,6 +2128,11 @@ pub async fn approve_op(
                 } else {
                     hosts.clone()
                 };
+                let used_by = view
+                    .aux
+                    .connection_claims(&state.services, "")
+                    .remove(&key)
+                    .unwrap_or_default();
                 crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
                 {
                     let state = state.clone();
@@ -2137,6 +2148,7 @@ pub async fn approve_op(
                     "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
                     "hosts": echo_hosts,
                     "removed_prior_anchor": removed_prior_anchor,
+                    "existed": existed, "used_by": used_by,
                 });
                 let cached = Some(resp.to_string());
                 (resp, cached)
@@ -3152,8 +3164,6 @@ mod tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         {

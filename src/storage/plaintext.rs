@@ -116,7 +116,7 @@ pub struct Connection {
     pub keys: Option<BTreeMap<String, String>>,
     /// The vault KEYs whose value this connection WROTE (created or
     /// overwrote) when it was added, as opposed to keys it binds that already
-    /// held a value (`sc connection add --from-secret`, a console reuse). Only
+    /// held a value (`sc connection add --use`, a console reuse). Only
     /// these may be deleted with the connection (`connection_removal`), and
     /// never one another connection still binds. `Some(empty)` = it wrote
     /// nothing. `None` = unknown: a record from before this field existed, or

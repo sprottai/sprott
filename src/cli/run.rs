@@ -11,7 +11,6 @@ use std::path::Path;
 use crate::agent_pop::AgentProxyPopSigner;
 use crate::cli::active::{api_face_root, load as load_config, resolve_active};
 use crate::cli::agent_shim::{self, ShimConfig};
-use crate::cli::env::shell_quote;
 use crate::cli::proxy_env::{
     build_bundle, control_plane_up, proxy_url_for_vault, resident_ca_bundle_path, resident_ca_path,
 };
@@ -33,7 +32,7 @@ pub async fn run(args: RunArgs) -> Result<(), String> {
     // Report our live shell proxy to the daemon so its OWN egress (the forward
     // hop + any OAuth refresh this run triggers) follows the operator's current
     // proxy state — the daemon, under systemd/launchd, can't inherit our shell.
-    // In-memory on the daemon side (no persisted `sc proxy set`); best-effort.
+    // In-memory on the daemon side (no persisted `sprott config set proxy`); best-effort.
     report_ambient_proxy(&control).await;
 
     let proxy_url = agent_proxy_url(&vid);
@@ -288,10 +287,10 @@ async fn preflight(ca: &Path, control_root: &str) -> Result<(), String> {
 
 /// Tell the LOCAL daemon our live shell egress proxy (`POST /proxy/ambient`) so
 /// its own egress follows the operator's current proxy state — the daemon can't
-/// inherit our shell. In-memory on the daemon side (no persisted `sc proxy set`).
+/// inherit our shell. In-memory on the daemon side (no persisted `sprott config set proxy`).
 /// Best-effort: a failure never blocks the run. LOOPBACK-ONLY: the value is a
 /// proxy URL that may carry userinfo credentials, so we never send it to a remote
-/// daemon (which manages egress with its own `sc proxy set`).
+/// daemon (which manages egress with its own `sprott config set proxy`).
 async fn report_ambient_proxy(control_root: &str) {
     if !is_loopback_authority(&authority_of(control_root)) {
         return;
@@ -358,9 +357,35 @@ fn exec_child(cmd: &[String], bundle: &[(String, String)]) -> Result<(), String>
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// POSIX-safe single-quote escaping. Wraps the value in `'...'` and
+/// turns inner `'` into the canonical `'\''` close-escape-reopen
+/// sequence. Empty strings stay as `''`. Single-quoting also makes git's
+/// `!sc git-credential` helper marker literal (no history expansion).
+pub(crate) fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoting() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("abc"), "'abc'");
+        assert_eq!(shell_quote("ab c"), "'ab c'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
 
     #[test]
     fn the_note_names_the_agent_env_file() {

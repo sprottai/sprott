@@ -292,7 +292,7 @@ pub(crate) fn requested_slots(
             for n in &named {
                 if !slots.iter().any(|s| s.key.eq_ignore_ascii_case(n)) {
                     return Err(format!(
-                        "'{}' is not bound to any secret of service '{}' (bind it with `--from-secret <ROLE>={}`; its secrets: {})",
+                        "'{}' is not bound to any secret of service '{}' (bind it with `--use <ROLE>={}`; its secrets: {})",
                         n,
                         def.service.id,
                         n,
@@ -405,7 +405,7 @@ pub(crate) async fn resolve_slots(
             }
             (true, true) => {
                 return Err(AppError::BadRequest(format!(
-                    "slot '{}' was left unfilled, but an external store holds '{}', which this connection would then use; name it explicitly (`--from-secret {}={}`) so the approval shows it",
+                    "slot '{}' was left unfilled, but an external store holds '{}', which this connection would then use; name it explicitly (`--use {}={}`) so the approval shows it",
                     slot, canon, slot, canon
                 )))
             }
@@ -934,8 +934,6 @@ secrets = ["MIXED_KEY"]
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         {

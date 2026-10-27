@@ -163,10 +163,23 @@ pub async fn resolve_auth_value(
         )));
     };
 
+    // The connection's CURRENT refresh token: whatever path produced `raw`
+    // (the session cache, or a ceremony's fresh decrypt from the store, which
+    // may still hold a replaced value), it is followed through every rotation
+    // made since (stored or still pending), because the provider honors only
+    // the newest. This is the one place every mint input passes through.
+    let current = state.current_refresh_token(vault_id, conn_id, raw);
+    let mut input: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(
+        current
+            .as_ref()
+            .map(|t| t.as_bytes().to_vec())
+            .unwrap_or_else(|| raw.to_vec()),
+    );
+
     // §5: mint cache keyed by sha256(mint input). The input is read LOCALLY
     // only to compute the key; on a hit nothing is minted and the input never
     // leaves the daemon.
-    let refresh_hash = sha256_hex(raw);
+    let mut refresh_hash = sha256_hex(&input);
     if let Some(cached) = state.oauth_access_lookup(vault_id, &refresh_hash) {
         return Ok(cached);
     }
@@ -181,9 +194,21 @@ pub async fn resolve_auth_value(
         .vault_write_guard(vault_id)
         .await
         .map_err(|error| error.app_error())?;
+    // Single-flight per connection: a refresh that won the lock while we
+    // waited rotated the token we read, and cached its access token under the
+    // rotated one. Follow it: reuse that access token, and never send the
+    // replaced refresh token (a rotating provider refuses it, and some revoke
+    // the whole token family on such a reuse).
+    if let Some(now_current) = state.current_refresh_token(vault_id, conn_id, raw) {
+        if now_current.as_bytes() != input.as_slice() {
+            input = zeroize::Zeroizing::new(now_current.as_bytes().to_vec());
+            refresh_hash = sha256_hex(&input);
+        }
+    }
     if let Some(cached) = state.oauth_access_lookup(vault_id, &refresh_hash) {
         return Ok(cached);
     }
+    let raw: &[u8] = &input;
 
     let oauth = match auth {
         crate::service::AuthDef::Oauth2(o) => o,
@@ -274,7 +299,7 @@ pub async fn resolve_auth_value(
             AppError::Internal(format!(
                 "couldn't reach {}'s token endpoint to refresh the access token ({}). \
                  If this machine needs a proxy for outbound HTTPS, set one with \
-                 `sprott proxy set <url>`.",
+                 `sprott config set proxy <url>`.",
                 service_id, transport
             ))
         } else {
@@ -292,19 +317,24 @@ pub async fn resolve_auth_value(
     // miss. We hold the write lock; the persist helper must NOT re-acquire it.
     let cache_key = match rotated_refresh.as_deref() {
         Some(new_rt) if new_rt.as_bytes() != raw => {
+            // Every reader of the replaced token follows it from now on.
+            state.note_rotated_to(vault_id, raw, new_rt);
             match crate::auth::connect::persist_rotated_refresh_locked(
                 state,
                 vault_id,
                 conn_id,
                 &oauth.refresh_token,
+                raw,
                 new_rt,
-            )
-            .await
-            {
-                // Landed: sent to the cloud once this lock drops.
-                Ok(()) => crate::auth::connect::spawn_push(state, vault_id),
+                false,
+            ) {
+                // Landed durably in the store (the session cache now holds
+                // it, nothing is pending for the slot): sent to the cloud once
+                // this lock drops.
+                Ok(_) => crate::auth::connect::spawn_push(state, vault_id),
                 // Not stored: the session still uses the new token, which is
-                // stored again on the next sync; the user is told.
+                // stored again on its own retry timer, after a sync round and
+                // at unlock; the user is told.
                 Err(why) => crate::auth::connect::rotation_not_stored(
                     state,
                     vault_id,

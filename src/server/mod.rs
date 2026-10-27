@@ -82,12 +82,12 @@ pub fn app_router(state: Arc<AppState>) -> Router {
         // (`sc service ls`): unlocked session only, no passkey, no network.
         .route("/v/{vid}/services", get(handlers::service_ops::list))
         .route("/v/{vid}/usage", get(handlers::usage::usage))
-        // Device egress-proxy hot-reload (after `sc proxy set/clear`) — no vault
+        // Device egress-proxy hot-reload (after `sprott config set/unset proxy`) — no vault
         // context, no params: re-reads the local stored value into the live
         // clients so the daemon re-points egress without a restart/re-unlock.
         .route("/proxy/reload", post(handlers::proxy::reload))
         // Live ambient egress-proxy report (from `sc run`) — the daemon follows
-        // the operator's current shell proxy without a persisted `sc proxy set`.
+        // the operator's current shell proxy without a persisted `sprott config set proxy`.
         // In-memory only; LOOPBACK-ONLY (it takes a caller-chosen proxy value).
         .route("/proxy/ambient", post(handlers::proxy::ambient))
         // Browser-fired sync hint (a `no-cors` POST from the console right

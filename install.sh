@@ -112,4 +112,4 @@ if [ "${SPROTT_NO_SETUP:-0}" != "1" ] &&
   echo "Setting up Sprott for this agent:"
   exec "${DEST}/sprott" setup${PROFILE_ARG}
 fi
-echo "Next: sprott setup --name <a name for this agent>${PROFILE_ARG}"
+echo "Next: sprott setup --agent-name <a name for this agent>${PROFILE_ARG}"

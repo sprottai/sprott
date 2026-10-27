@@ -33,7 +33,8 @@ Cache-Control: no-cache, no-transform
 X-Accel-Buffering: no
 
 event: hello
-data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted"}, ...}}
+data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted"}, ...}, "caps":[...]}
+                                     (v1.2 adds cursor and contact fields; see v1.2)
 
 event: vault
 data: {"vid":"...","version":N,"status":"live|deleted"}
@@ -99,7 +100,8 @@ data: {"vid":"..."}                   writes; they ride other wakes / reconcile.
   saw, no seq bump), handleRenameVault:895 (label only, invisible to daemons
   today), handleCreateVault:857 (daemon picks up new vaults on restart),
   admin-demo-cleanup hard-delete via auth-user FK cascade (demo-only; vanished
-  row → hello omits vid → fallback long-poll owns it). pg_cron touches none of
+  row → hello omits vid → fallback long-poll owns it). v1.2: vault creation is
+  now announced by the account `vaults` event (see v1.2). pg_cron touches none of
   the three tables (verified).
 - At the vault/items sites also `wakeNow` the existing long-poll waiters —
   fallback and old daemons get faster wakes for free (keys have no waiter today).
@@ -292,11 +294,107 @@ loop's armed sleep re-sizes on a health flip (stream_health_edge) instead
 of riding a 600s timer across an Up→Down transition; mid-stream hellos
 fire the resync notify exactly like connect hellos.
 
+## v1.2: idle traffic (2026-10-21)
+
+Goal: an idle daemon (vault unlocked, no agent activity, console closed) costs
+the cloud a few requests an hour, with no change in how fast approvals,
+revocations, new secrets and roster changes arrive (they still ride stream
+events). Every relaxation below is gated on a hello cap or field, so an older
+backend gets the v1.1 cadences unchanged.
+
+**Backend (additive):**
+
+```
+event: hello
+data: {"vaults":{"<vid>":{"version":N,"status":"live|deleted",
+                          "items_seq":N,"keyset_seq":N,          (cap cursors)
+                          "contact_token":{account_id,issued_at,nonce,sig}}},  (shared vaults)
+       "ledger_seq":N,"vaults_unlisted":bool,                     (cap account_cursors)
+       "caps":["op","agent_hashes","access","vaults","cursors","account_cursors"]}
+
+event: vaults   data: {}                                          (cap vaults)
+```
+
+- `cursors`: each vault cell carries `items_seq` (max `vault_items.seq`) and
+  `keyset_seq` (`vault_membership.keyset_seq`, omitted when the vault has no
+  membership row). Declared only when both cursor reads succeeded.
+- `contact_token` on a shared vault's cell: the same signed token a `/blob` 200
+  body carries, same shape.
+- `account_cursors`: top-level `ledger_seq` (the account's principal ledger
+  head seq) and `vaults_unlisted` (the account has a vault the request did not
+  list).
+- `vaults`: account event when the account gains a vault: a vault create
+  (private or shared), the first membership triple write of a new shared vault,
+  and a member being seated.
+- Shared vaults the account is a member of are in hello like owned ones.
+
+**Core:**
+
+| path | cap / condition | behaviour |
+|---|---|---|
+| hello, per vault | `cursors` | blob only if `version` > local; items only if `items_seq` > local items cursor; keyset only if `keyset_seq` > local keyset cursor. A field the cell lacks counts as unknown and pulls. |
+| hello, per vault | no `cursors` | v1.1: blob version-gated, items + keyset always |
+| hello, shared vault | `contact_token` present | verified by the same check as the `/blob` body; on success it advances the lease contact clock |
+| hello, ledger | `account_cursors` | pull only if `ledger_seq` differs from the local verified head seq (or either is unknown); without the cap, every hello pulls |
+| hello, discovery | `account_cursors` | run only if `vaults_unlisted` is true (or absent); without the cap, every hello runs it |
+| Sse-shape safety reconcile | `cursors` | 1800s counted from the later of the last reconcile and the last hello, so it fires only when no hello has come for 1800s (else 300s from the last reconcile) |
+| shared vault blob probe | Sse shape | only when hellos do not carry its verified contact token: 600s; with the token, only if the contact clock passes 1200s (hellos late) |
+| principal ledger | healthy stream + `agent_hashes` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last pull and the last `account_cursors` hello, but a verified pull at least every 6h (the lease runs on pulls); events spaced ≥2s |
+| vault discovery | healthy stream + `vaults` | on the event and on hellos (above), safety timer 1800s (else 120s) counted from the later of the last run and the last `account_cursors` hello; events spaced ≥5s |
+| fallback (long-poll) shape | any | unchanged |
+
+- The local keyset cursor is compared with hello's `keyset_seq` only once a
+  `/membership` pull has set it for a vault known to be format 2. A format-1
+  vault's cursor counts `/keys` rows on another sequence, whatever its keyset
+  shape, so it always pulls.
+- Format-2 vaults: once a vault is known to use the membership triple (a `/keys`
+  409 or a verified envelope with `format >= 2`, remembered for the process; the
+  format only ratchets up), keyset pulls go straight to `/membership`.
+- Ledger pulls are incremental: the daemon keeps the last accepted event list in
+  memory and asks `GET /api/vault/principals?since=<max seq>`. The cached events
+  plus the served ones must hash to the freshly signed head, exactly as a full
+  pull; a mismatch retries once as a full pull. A restart starts with a full pull.
+- Dynamic vault subscribe: every watcher registers its cell with the
+  dispatcher's vault set (weak refs). A vault adopted after startup (discovery,
+  restored access) makes a live stream close on purpose and re-dial with the new
+  `?vids` (like a rotation: health stays Up), capped at 32 vids in registration
+  order; the rest stay on long-poll. A re-subscribe to the same vid set as the
+  last one (within 15 min) waits 5s, doubling to 5 min, while the old stream
+  keeps serving. With no vault the dispatcher waits for the first one.
+- Health flips re-size the ledger and discovery timers instead of riding a
+  1800s sleep into a Down stream.
+- Connect work a run leaves behind is not sync's job and never stretches a
+  sync cadence: a code exchange that failed transiently and a rotated refresh
+  token the store could not take each own a per-vault retry timer (5s, 15s,
+  45s, 2 min, then every 5 min; `src/auth/retry.rs`) that does not pull. A
+  code still failing after 10 min (RFC 6749 §4.1.2) marks the connection
+  failed. A rotated refresh token is written on receipt as one fsynced row of
+  the vault's store; the timer covers what is left (a store that cannot be
+  read or written, or a slot row this key cannot read until the keyset is
+  pulled). A retry writes only while the slot still holds the value the
+  rotation replaced, and a pending token is kept in every cache rebuilt from
+  the store until it lands. Locking first tries to store pending tokens; one
+  that still cannot be stored stays in memory until the next unlock.
+
+**Idle cost per hour, healthy stream, Railway rotation every ~15 min:**
+- before (v1.1): per vault, hello pull round 4 × 3 (`/keys` 409, `/membership`,
+  `/items`) + 300s reconcile 12 × 4 (`/blob`, `/keys`, `/membership`, `/items`)
+  = 60; per daemon, ledger ~30 (120s timer, re-armed by each hello pull) +
+  discovery 30 + stream connect 4 ≈ 64.
+- after (v1.2, all caps): per format-2 vault, private or shared, 0 while hellos
+  arrive (one catch-up pull after a restart); a format-1 vault has no
+  `keyset_seq`, so each hello pulls `/keys` + `/items`: 8. Per daemon, stream
+  connect 4; ledger and discovery 0 while hellos report nothing changed (their
+  timers count from those hellos), plus one ledger pull every 6h for the
+  lease ≈ 4.2.
+- after, older backend without `account_cursors` / `contact_token`: ledger and
+  discovery 4 each (one per hello); a shared vault probes its blob 6 times.
+
 ## Non-goals (v1)
 
 No WebSocket / Socket.IO / Centrifugo / NATS / Redis. No multi-instance fan-out
-(single Railway instance; long-poll fallback stays correct if that changes). No
-dynamic vault subscribe (restart picks up new vaults, as today). No exactly-once —
+(single Railway instance; long-poll fallback stays correct if that changes).
+(v1 had no dynamic vault subscribe; v1.2 adds it.) No exactly-once:
 cursors + idempotent pulls + reconcile ARE the delivery semantics. op_relay +
 agent-hash eventing = v1.1.
 

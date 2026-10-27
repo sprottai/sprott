@@ -1,7 +1,7 @@
 //! The resident proxy's UPSTREAM (forward-hop) connector.
 //!
 //! hudsucker's built-in `with_rustls_connector` dials every intercepted host
-//! DIRECTLY, ignoring the device egress proxy (`sc proxy set`) that reqwest
+//! DIRECTLY, ignoring the device egress proxy (`sprott config set proxy`) that reqwest
 //! honours natively via `*_PROXY` env. On a host whose only outbound route is a
 //! corporate / on-demand HTTP proxy (direct egress firewalled), the MITM
 //! forward hop then hangs/times out even though the OAuth mint (reqwest) reached
@@ -17,12 +17,12 @@
 //! transport path moves.
 //!
 //! The proxy lives in a shared, swappable [`EgressProxyCell`] (also held by
-//! `AppState`) that the connector reads PER-CONNECTION, so `sc proxy set/clear`
+//! `AppState`) that the connector reads PER-CONNECTION, so `sprott config set/unset proxy`
 //! HOT-reloads it via `/proxy/reload` ([`reload_cell`]) — the forward hop
 //! re-points on its next connection with NO daemon restart, and so no vault
 //! re-unlock.
 //!
-//! Scope: HTTP proxies (the corporate / local norm, and what `sc proxy set`
+//! Scope: HTTP proxies (the corporate / local norm, and what `sprott config set proxy`
 //! documents). A non-HTTP proxy URL (https/socks) is logged and ignored — the
 //! forward hop then dials direct, i.e. exactly the pre-change behaviour, never
 //! worse. Loopback and any `NO_PROXY` host always dial direct.
@@ -53,7 +53,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A live, swappable egress-proxy cell shared by `AppState` and the resident
 /// proxy's forward connector. `None` inside = dial upstream directly. Swapped in
-/// place by [`reload_cell`] on `/proxy/reload` (after `sc proxy set/clear`), so
+/// place by [`reload_cell`] on `/proxy/reload` (after `sprott config set/unset proxy`), so
 /// the forward hop re-points on its next connection with NO daemon restart (and
 /// so no vault re-unlock).
 pub type EgressProxyCell = Arc<RwLock<Option<Arc<ProxyCfg>>>>;
@@ -117,7 +117,7 @@ pub fn forward_connector(cell: EgressProxyCell) -> HttpsConnector<TunnelConnecto
 /// A base connector (`Service<Uri>`) that dials the target directly or through
 /// the configured HTTP egress proxy via `CONNECT`. Wrapped by hyper-rustls,
 /// which then layers TLS to the original host over whichever stream this
-/// returns. Reads the proxy from a shared live cell, so a runtime `sc proxy set`
+/// returns. Reads the proxy from a shared live cell, so a runtime `sprott config set proxy`
 /// re-points the forward hop on the NEXT connection — no restart.
 #[derive(Clone)]
 pub struct TunnelConnector {
@@ -433,7 +433,7 @@ mod tests {
         };
         // Starts direct.
         assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
-        // A `sc proxy set` reload swaps the cell…
+        // A `sprott config set proxy` reload swaps the cell…
         *shared.write().unwrap() = Some(Arc::new(ProxyCfg {
             host: "127.0.0.1".into(),
             port: 7778,
@@ -444,7 +444,7 @@ mod tests {
             .use_proxy_for("gmail.googleapis.com")
             .expect("now proxied");
         assert_eq!((p.host.as_str(), p.port), ("127.0.0.1", 7778));
-        // …and a `sc proxy clear` reload swaps it back to direct.
+        // …and a `sprott config unset proxy` reload swaps it back to direct.
         *shared.write().unwrap() = None;
         assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
     }

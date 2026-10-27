@@ -31,7 +31,8 @@
 //!     and the CLI falls back to the passkey ceremony (which unlocks + writes).
 //!
 //! Body: `{ "key": "FOO", "value": "…", "hosts": ["api.x.com"]?, "no_broker": bool? }`.
-//! Response: `{ "written": true, "key", "conn", "hosts", "removed_prior_anchor" }`,
+//! Response: `{ "written": true, "key", "conn", "hosts", "removed_prior_anchor",
+//! "existed", "used_by" }`,
 //! `{ "written": false, "locked": true }`, or
 //! `{ "written": false, "needs_approval": true, "new_hosts": [...] }`.
 
@@ -114,7 +115,7 @@ pub async fn create(
 
     // Serialize with every other writer that reseals this vault body (connect
     // exchange, oauth rotation, grant-approve writes) — same lock those use.
-    let (removed_prior_anchor, current_anchors) = {
+    let (removed_prior_anchor, current_anchors, existed, used_by) = {
         let _guard = state
             .vault_write_guard(&vault_id)
             .await
@@ -136,6 +137,7 @@ pub async fn create(
                 })));
             }
         }
+        let existed = view.native_secrets.contains_key(&key);
         let removed = crate::server::handlers::approve::apply_secret_set_to_view(
             &mut view,
             &key,
@@ -153,8 +155,15 @@ pub async fn create(
         } else {
             Vec::new()
         };
+        // Connections that resolve this key: the CLI says "used by …" instead
+        // of judging usability from the key's own anchor alone.
+        let used_by = view
+            .aux
+            .connection_claims(&state.services, "")
+            .remove(&key)
+            .unwrap_or_default();
         crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
-        (removed, anchors)
+        (removed, anchors, existed, used_by)
     };
 
     // Push AFTER the write guard drops — the push path re-takes the (non-
@@ -177,6 +186,8 @@ pub async fn create(
         // anchors so the CLI can show what the key still routes to.
         "hosts": if hosts.is_empty() { current_anchors } else { hosts },
         "removed_prior_anchor": removed_prior_anchor,
+        "existed": existed,
+        "used_by": used_by,
     })))
 }
 

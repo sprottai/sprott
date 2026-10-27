@@ -164,8 +164,6 @@ fn test_state() -> AppState {
             "http://localhost",
             "localhost",
         ),
-        admin_key: None,
-        relay_url: None,
         body_cap: crate::config::DEFAULT_BODY_CAP,
     };
     {

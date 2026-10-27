@@ -43,7 +43,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         std::process::exit(1);
     }
 
-    // Apply the device's configured EGRESS proxy (`sc proxy set`) to this
+    // Apply the device's configured EGRESS proxy (`sprott config set proxy`) to this
     // process's env before any client is built — the launchd/systemd daemon does
     // not inherit the operator's shell `HTTPS_PROXY`, so this is how the daemon's
     // backend sync, OAuth exchange, and MITM forward reach a corporate/on-demand
@@ -59,6 +59,9 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
     // handlers that have a machine-readable form. Commands with no JSON output
     // simply ignore it.
     let json = cli.json;
+    // The global `--no-browser` / `--cb-port` / `--timeout`, threaded into the
+    // handlers that open an approval.
+    let approval = &cli.approval;
     // `serve` installs its own subscriber below (long-running, different
     // defaults); every other (short-lived) verb gets a stderr subscriber only
     // when `-v` was asked, so a command's normal output stays clean.
@@ -95,12 +98,14 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         // `sc restart` = bounce the daemon AND converge back to ready (re-unlock).
         // A process restart wipes the in-memory keys, so it routes through the
         // same `ensure_unlocked` chokepoint as `sc up` (see cli/up.rs::restart).
-        Command::Restart => cli::up::restart()
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("sprott restart: {}", e);
-                e.into()
-            }),
+        Command::Restart => {
+            cli::up::restart(approval)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    eprintln!("sprott restart: {}", e);
+                    e.into()
+                })
+        }
         Command::Sync(args) => {
             cli::sync::run(args)
                 .await
@@ -117,15 +122,15 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             // ensure the vault is unlocked (the single auto-unlock chokepoint;
             // see cli/up.rs). login / upgrade-restart / agent lazy-start all
             // route through here, so the user never runs a bare "unlock".
-            cli::up::run()
+            cli::up::run(approval)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     eprintln!("sprott up: {}", e);
                     e.into()
                 })
         }
-        Command::Unlock(args) => cli::unlock::run_unlock(args).await.map_err(daemon_err),
-        Command::Lock(args) => cli::unlock::run_lock(args).await.map_err(daemon_err),
+        Command::Unlock => cli::unlock::run_unlock(approval).await.map_err(daemon_err),
+        Command::Lock => cli::unlock::run_lock(approval).await.map_err(daemon_err),
         Command::Ls(args) => cli::ls::run(args)
             .await
             .map_err(|e| -> Box<dyn std::error::Error> {
@@ -133,7 +138,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 e.into()
             }),
         Command::Get(args) => {
-            cli::secret::run_get(args)
+            cli::secret::run_get(args, approval)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     eprintln!("sprott get: {}", e);
@@ -148,25 +153,17 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                     e.into()
                 })
         }
-        Command::Vault(args) => {
-            cli::vault::run(args.sub, json)
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("sprott vault: {}", e);
-                    e.into()
-                })
-        }
-        Command::Config(args) => {
-            cli::config::run(args.sub).map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("sprott config: {}", e);
+        Command::Vault(args) => cli::vault::run(args.sub, approval, json).await.map_err(
+            |e| -> Box<dyn std::error::Error> {
+                eprintln!("sprott vault: {}", e);
                 e.into()
-            })
-        }
-        Command::Proxy(args) => {
-            cli::proxy::run(args.sub)
+            },
+        ),
+        Command::Config(args) => {
+            cli::config::run(args.sub)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("sprott proxy: {}", e);
+                    eprintln!("sprott config: {}", e);
                     e.into()
                 })
         }
@@ -194,10 +191,6 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                     e.into()
                 })
         }
-        Command::Env => cli::env::run().map_err(|e| -> Box<dyn std::error::Error> {
-            eprintln!("sprott env: {}", e);
-            e.into()
-        }),
         Command::GitCredential(args) => {
             // Invoked by git, not users. Never print to stderr on the happy path
             // (git reads stdout); surface only hard errors.
@@ -216,23 +209,14 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                     e.into()
                 })
         }
-        // `sc connect …` is the hidden back-compat spelling of `sc connection add`.
-        Command::Connect(args) => {
-            cli::connect::run(args)
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    eprintln!("sprott connect: {}", e);
-                    e.into()
-                })
-        }
         Command::Connection(args) => {
             use crate::config::ConnectionSubcommand;
             let r = match args.sub {
-                ConnectionSubcommand::Add(a) => cli::connect::run(a).await,
+                ConnectionSubcommand::Add(a) => cli::connect::run(a, approval).await,
                 ConnectionSubcommand::Ls(_a) => cli::connect::run_ls(json).await,
-                ConnectionSubcommand::Rm(a) => cli::connect::run_rm(a).await,
-                ConnectionSubcommand::AddHost(a) => cli::connect::run_add_host(a).await,
-                ConnectionSubcommand::RmHost(a) => cli::connect::run_rm_host(a).await,
+                ConnectionSubcommand::Rm(a) => cli::connect::run_rm(a, approval).await,
+                ConnectionSubcommand::AddHost(a) => cli::connect::run_add_host(a, approval).await,
+                ConnectionSubcommand::RmHost(a) => cli::connect::run_rm_host(a, approval).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
                 eprintln!("sprott connection: {}", e);
@@ -248,7 +232,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 })
         }
         Command::Login(args) => {
-            cli::login::run(args)
+            cli::login::run(args, approval)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     eprintln!("sprott login: {}", e);
@@ -263,23 +247,12 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                     e.into()
                 })
         }
-        Command::Device(args) => {
-            use crate::config::DeviceSubcommand;
-            let r = match args.sub {
-                DeviceSubcommand::Login(a) => cli::login::run(a).await,
-                DeviceSubcommand::Logout(a) => cli::logout::run(a).await,
-            };
-            r.map_err(|e| -> Box<dyn std::error::Error> {
-                eprintln!("sprott device: {}", e);
-                e.into()
-            })
-        }
         Command::Secret(args) => {
             use crate::config::SecretSubcommand;
             let r = match args.sub {
-                SecretSubcommand::Set(a) => cli::secret::run_set(a).await,
-                SecretSubcommand::Get(a) => cli::secret::run_get(a).await,
-                SecretSubcommand::Rm(a) => cli::secret::run_rm(a).await,
+                SecretSubcommand::Set(a) => cli::secret::run_set(a, approval).await,
+                SecretSubcommand::Get(a) => cli::secret::run_get(a, approval).await,
+                SecretSubcommand::Rm(a) => cli::secret::run_rm(a, approval).await,
                 SecretSubcommand::Ls(a) => cli::ls::run(a).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
@@ -288,7 +261,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             })
         }
         Command::Set(args) => {
-            cli::secret::run_set(args)
+            cli::secret::run_set(args, approval)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     eprintln!("sprott set: {}", e);
@@ -296,7 +269,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
                 })
         }
         Command::Rm(args) => {
-            cli::secret::run_rm(args)
+            cli::secret::run_rm(args, approval)
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     eprintln!("sprott rm: {}", e);
@@ -307,10 +280,10 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
             use crate::config::ServiceSubcommand;
             let r = match args.sub {
                 ServiceSubcommand::Validate(a) => cli::service_def::run_validate(a, json).await,
-                ServiceSubcommand::Add(a) => cli::service_def::run_add(a).await,
-                ServiceSubcommand::Update(a) => cli::service_def::run_update(a).await,
+                ServiceSubcommand::Add(a) => cli::service_def::run_add(a, approval).await,
+                ServiceSubcommand::Update(a) => cli::service_def::run_update(a, approval).await,
                 ServiceSubcommand::Ls(a) => cli::service_def::run_ls(a, json).await,
-                ServiceSubcommand::Rm(a) => cli::service_def::run_rm(a).await,
+                ServiceSubcommand::Rm(a) => cli::service_def::run_rm(a, approval).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
                 eprintln!("sprott service: {}", e);
@@ -320,7 +293,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
         Command::Op(args) => {
             use crate::config::OpSubcommand;
             let r = match args.sub {
-                OpSubcommand::Wait(a) => cli::op::run_wait(a, json).await,
+                OpSubcommand::Wait(a) => cli::op::run_wait(a, approval, json).await,
             };
             r.map_err(|e| -> Box<dyn std::error::Error> {
                 eprintln!("sprott op: {}", e);

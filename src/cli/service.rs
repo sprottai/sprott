@@ -325,7 +325,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     }
     std::fs::write(&unit_path, &unit)
         .map_err(|e| format!("write {}: {}", unit_path.display(), e))?;
-    // Unit may embed SPROTT_ADMIN_KEY and other secrets via
+    // Unit may embed secrets from the caller's SPROTT_* env via
     // Environment= lines. Tighten to user-only so other accounts on a
     // multi-user host can't read them.
     #[cfg(unix)]

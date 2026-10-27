@@ -25,7 +25,7 @@ curl -fsSL https://sprott.ai/install.sh | sh
 Puts the `sprott` command in `~/.local/bin` (override with `$SPROTT_BIN_DIR`),
 with `sc` and `safeclaw` as links to it,
 verifies the download's SHA256, installs the agent skill, and prints
-`sprott setup --name <name>` as the next step. Run on a machine set up before
+`sprott setup --agent-name <name>` as the next step. Run on a machine set up before
 2.0, it also moves `~/.safeclaw` to `~/.sprott` and the daemon to the 2.0
 service name below ([Upgrading](../upgrade.md)). No sudo, no system changes, no
 telemetry. Linux binaries are statically linked (musl), so there is no glibc or

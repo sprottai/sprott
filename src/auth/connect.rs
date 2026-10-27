@@ -324,8 +324,8 @@ fn inject_codes(m: &mut ProtectedState, codes: &std::collections::BTreeMap<Strin
 /// - `failed`: TERMINALLY rejected (`invalid_grant` / other 4xx) — an `error` was
 ///   stamped so the console renders "reconnect"; carries the provider's reason.
 /// - `unreached`: a TRANSIENT failure (couldn't reach the provider — network /
-///   proxy / 5xx) — left pending, NO error stamped, retried next sync; carries the
-///   provider host so the user can tell "my egress is broken" from "the code died".
+///   proxy / 5xx): left pending, NO error stamped, retried on its own timer
+///   ([`crate::auth::retry`]); carries the provider host so the user can tell "my egress is broken" from "the code died".
 #[derive(Debug, Default, Clone)]
 pub struct ConnectReport {
     pub completed: Vec<String>,
@@ -361,6 +361,20 @@ fn provider_host(token_url: &str) -> String {
 /// stamp NO error — a re-`invalid_grant` on an already-consumed code must never
 /// clobber the live connection.
 const ALREADY_REDEEMED: &str = "__sc_already_redeemed__";
+
+/// Sentinel the exchange closure returns when a code still fails transiently
+/// past [`CODE_EXCHANGE_WINDOW`]: `run_pending` marks the connection failed.
+const CODE_EXPIRED: &str = "__sc_code_expired__";
+
+/// How long a transiently failing code exchange is retried: RFC 6749 §4.1.2
+/// recommends a maximum authorization code lifetime of 10 minutes, so past
+/// that the code is presumed dead and only a fresh consent recovers.
+pub(crate) const CODE_EXCHANGE_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Has a code first tried at `first_tried` outlived its exchange window (pure)?
+pub(crate) fn code_exchange_expired(first_tried: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(first_tried) > CODE_EXCHANGE_WINDOW
+}
 
 /// Drive the connecting→refresh→move state machine over an open `ProtectedState`,
 /// given an async `exchange` closure (injected so tests can avoid real network
@@ -433,6 +447,13 @@ where
                     );
                     continue;
                 }
+                if e == CODE_EXPIRED {
+                    let reason = "the authorization code expired before the provider could be reached; reconnect".to_string();
+                    mark_connecting_failed(m, &conn, &reason);
+                    report.failed.push((conn.clone(), reason));
+                    tracing::warn!(conn = %conn, "oauth connect: exchange still failing past the code's lifetime; marked failed");
+                    continue;
+                }
                 if let Some(reason) = terminal_exchange_reason(&e) {
                     // Terminal: retrying the SAME code/config can never succeed.
                     // Stamp the connecting entry so the console shows
@@ -446,7 +467,7 @@ where
                     tracing::warn!(conn = %conn, "oauth connect: terminal exchange rejection — marked failed: {}", e);
                 } else {
                     // Transient (network / provider 5xx / rate limit) — leave
-                    // connecting + retry on the next sync. Report it so `sc sync`
+                    // connecting; its retry timer tries again (backoff). Report it so `sc sync`
                     // can say "couldn't reach <host>" instead of a silent spin.
                     report.unreached.push((conn.clone(), host));
                     tracing::warn!(conn = %conn, "oauth connect: exchange failed (transient), will retry: {}", e);
@@ -564,6 +585,24 @@ pub(crate) async fn apply_pending_connects(
     vault_id: &str,
     injected: Option<std::collections::BTreeMap<String, String>>,
 ) -> ConnectReport {
+    let report = apply_pending_connects_inner(state, vault_id, injected).await;
+    // A transient exchange failure writes nothing, so no event or sync would
+    // bring it back: it owns a retry timer with backoff until a run leaves
+    // none (every pending entry is tried each run, so this run's report is the
+    // whole answer; a locked or unreadable vault is retried at unlock).
+    if report.unreached.is_empty() {
+        crate::auth::retry::settle(state, vault_id, crate::auth::retry::Job::CodeExchange);
+    } else {
+        crate::auth::retry::schedule(state, vault_id, crate::auth::retry::Job::CodeExchange);
+    }
+    report
+}
+
+async fn apply_pending_connects_inner(
+    state: &Arc<AppState>,
+    vault_id: &str,
+    injected: Option<std::collections::BTreeMap<String, String>>,
+) -> ConnectReport {
     let Some(k) = state.cloned_state_key(vault_id) else {
         return ConnectReport::default(); // Locked — no retained K; next unlock retries.
     };
@@ -573,7 +612,7 @@ pub(crate) async fn apply_pending_connects(
     };
 
     // Rotated refresh tokens not stored yet: stored again now.
-    retry_pending_rotations_locked(state, vault_id).await;
+    retry_pending_rotations_locked(state, vault_id);
 
     let vault_dat = match crate::storage::sealed_vault::read(&vault_dat_path(state, vault_id)) {
         Ok(v) => v,
@@ -690,8 +729,17 @@ pub(crate) async fn apply_pending_connects(
                 &extra,
             )
             .await;
-            if out.is_ok() {
-                state.note_code_redeemed(&p.oauth2.code);
+            match &out {
+                Ok(_) => state.note_code_redeemed(&p.oauth2.code),
+                // Retried transient failures stop once the code can no longer
+                // be valid: the connection is marked failed ("reconnect")
+                // instead of staying "connecting" for good.
+                Err(e) if terminal_exchange_reason(e).is_none()
+                    && code_exchange_expired(state.code_first_tried(&p.oauth2.code), std::time::Instant::now()) =>
+                {
+                    return Err(CODE_EXPIRED.to_string());
+                }
+                Err(_) => {}
             }
             out
         }
@@ -783,31 +831,121 @@ fn fail_refused_connects(
     }
 }
 
+/// What a rotation store did (all three leave nothing pending for the slot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RotationStored {
+    /// The vault's store now holds the new token.
+    Written,
+    /// It already did.
+    AlreadyStored,
+    /// The slot no longer holds the value the rotation replaced (a newer
+    /// value was stored since, or the secret is gone): the pending token is
+    /// stale and dropped.
+    Superseded,
+}
+
 /// Persist a ROTATED refresh_token back into the sealed vault at its bound BARE
 /// key (`secret_key_for` over the established connection record — the SAME slot
-/// the connect exchange wrote). A rotating provider (OpenAI) hands back a fresh refresh_token on every
-/// refresh and invalidates the one we sent, so the broker calls this after a
-/// mint; otherwise the NEXT refresh would present a dead token and force a
-/// spurious reconnect.
+/// the connect exchange wrote). A rotating provider (OpenAI) hands back a fresh
+/// refresh_token on every refresh and invalidates the one we sent (RFC 9700
+/// §4.14.2), so the broker calls this right after the mint: the new token is
+/// made durable on receipt, in the vault's one store, before it is used again.
 ///
-/// Mirrors the read → mutate → reseal → reconcile tail of [`apply_pending_connects`]
-/// but writes ONE secret and runs no exchange. The caller (the broker mint path)
-/// ALREADY HOLDS the per-vault write lock ([`AppState::vault_write_lock`]) — this
-/// does NOT re-acquire it (that lock is what serializes this against a concurrent
-/// connect exchange). `Err` (why) when the token was not stored; the caller
-/// keeps it in use and pending ([`rotation_not_stored`]), never a corrupt
-/// write.
-pub(crate) async fn persist_rotated_refresh_locked(
+/// One sealed row, written durably ([`PerItemVault::write_rotated_secret`] +
+/// an fsynced atomic replace): no fold of the rest of the store and no merge,
+/// so nothing about OTHER rows can make it fail. What is left: the vault
+/// locked meanwhile, a store that cannot be read or written, or the slot's
+/// row unreadable with this session's key (a keyset not caught up with; it is
+/// never written over). A vault with no per-item store (legacy whole-blob)
+/// keeps the full rewrite.
+///
+/// `old` is the value the rotation replaced. With `if_current`, the token is
+/// written only while the slot still holds `old` (a delayed retry must never
+/// put an older token over a newer one). On success the session cache points
+/// at `new` and nothing stays pending for the slot.
+///
+/// The caller ALREADY HOLDS the per-vault write lock
+/// ([`AppState::vault_write_lock`]); this does NOT take it. `Err` (why) when
+/// the token was not stored; the caller keeps it in use and pending
+/// ([`rotation_not_stored`]), never a corrupt write.
+pub(crate) fn persist_rotated_refresh_locked(
+    state: &Arc<AppState>,
+    vault_id: &str,
+    conn_id: &str,
+    role: &str,
+    old: &[u8],
+    new_refresh_token: &str,
+    if_current: bool,
+) -> Result<RotationStored, String> {
+    type S = sudp::primitives::StdPrimitives;
+    let Some(k) = state.cloned_state_key(vault_id) else {
+        return Err("the vault is locked".into());
+    };
+    let store = state
+        .vaults
+        .per_item_path(vault_id)
+        .ok()
+        .map(|path| (crate::storage::sealed_vault::read_per_item(&path), path));
+    let stored = match store {
+        Some((Ok(Some(mut pv)), path)) => {
+            // The slot the refresh token was read from: the session's record
+            // of the connection (identity key for a default connection).
+            let rec = state.connection_snapshot(vault_id, conn_id);
+            let key = secret_key_for(rec.as_ref(), role);
+            let keys = crate::storage::item::VaultKeys::from_material(&k);
+            let replaces = if_current
+                .then(|| std::str::from_utf8(old).ok())
+                .flatten();
+            if if_current && replaces.is_none() {
+                return Ok(RotationStored::Superseded);
+            }
+            match pv
+                .write_rotated_secret::<S>(keys, vault_id, &key, new_refresh_token, replaces)
+                .map_err(|e| e.to_string())?
+            {
+                crate::storage::sealed_vault::RotatedWrite::Written(id) => {
+                    crate::storage::sealed_vault::write_per_item_atomic(&path, &pv)
+                        .map_err(|e| format!("the vault's store could not be written: {}", e))?;
+                    state.clear_sync_conflict(vault_id, &id);
+                    RotationStored::Written
+                }
+                crate::storage::sealed_vault::RotatedWrite::AlreadyStored => {
+                    RotationStored::AlreadyStored
+                }
+                crate::storage::sealed_vault::RotatedWrite::Superseded => {
+                    RotationStored::Superseded
+                }
+            }
+        }
+        Some((Err(e), _)) => return Err(format!("the vault's store cannot be read: {}", e)),
+        _ => {
+            persist_rotated_refresh_whole_blob(state, vault_id, conn_id, role, new_refresh_token, &k)?;
+            RotationStored::Written
+        }
+    };
+    match stored {
+        RotationStored::Written | RotationStored::AlreadyStored => {
+            state.cache_replace_value(vault_id, conn_id, old, new_refresh_token.as_bytes());
+            tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: rotated refresh_token persisted");
+        }
+        RotationStored::Superseded => {
+            tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: a newer refresh_token was stored since; the pending one is dropped");
+        }
+    }
+    state.drop_pending_rotation(vault_id, conn_id, role);
+    Ok(stored)
+}
+
+/// [`persist_rotated_refresh_locked`] for a vault with no per-item store: the
+/// whole body is rewritten (and re-sealed into `vault.dat`).
+fn persist_rotated_refresh_whole_blob(
     state: &Arc<AppState>,
     vault_id: &str,
     conn_id: &str,
     role: &str,
     new_refresh_token: &str,
+    k: &[u8],
 ) -> Result<(), String> {
-    let Some(k) = state.cloned_state_key(vault_id) else {
-        return Err("the vault is locked".into());
-    };
-
     let vault_dat = match crate::storage::sealed_vault::read(&vault_dat_path(state, vault_id)) {
         Ok(v) => v,
         Err(e) => {
@@ -815,30 +953,26 @@ pub(crate) async fn persist_rotated_refresh_locked(
             None
         }
     };
-    let (mut m, base) = open_m_for_write(state, vault_id, &k, vault_dat.as_ref())?;
-
-    // Resolve the role's bound key from the established record — the map the
-    // exchange wrote (or identity for a default connection).
+    let (mut m, base) = open_m_for_write(state, vault_id, k, vault_dat.as_ref())?;
     let rec = aux_map::<Connection>(&m, "connections").remove(conn_id);
     m.put_secret(
         secret_key_for(rec.as_ref(), role),
         new_refresh_token.as_bytes().to_vec(),
     );
-
     let view = crate::storage::plaintext::VaultPlaintextView::from_protected_state(&m)
         .map_err(|e| format!("view rebuild failed: {}", e))?;
-    let not_applied = write_view(state, vault_id, vault_dat, &m, &view, &k, &base)?;
+    let not_applied = write_view(state, vault_id, vault_dat, &m, &view, k, &base)?;
     if !not_applied.is_empty() {
         return Err(sentences(&not_applied));
     }
-    tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: rotated refresh_token persisted");
     Ok(())
 }
 
 /// A rotated refresh token this device could not store (`why`): the provider
 /// now honors only the new one, so the session uses it (`old` → `new` in the
-/// cache), the store is tried again on the next sync
-/// ([`retry_pending_rotations_locked`]), and the user is told.
+/// cache, and in every cache rebuilt from the store until it is stored), the
+/// store is retried on its own timer with backoff ([`crate::auth::retry`]),
+/// after every sync round and at unlock, and the user is told.
 pub(crate) fn rotation_not_stored(
     state: &Arc<AppState>,
     vault_id: &str,
@@ -850,21 +984,64 @@ pub(crate) fn rotation_not_stored(
 ) {
     tracing::warn!(vault = %vault_id, conn = %conn_id, "oauth rotate: not stored: {}", why);
     state.cache_replace_value(vault_id, conn_id, old, new.as_bytes());
-    state.note_rotation_pending(vault_id, conn_id, role, new, why);
+    state.note_rotation_pending(vault_id, conn_id, role, old, new, why);
+    crate::auth::retry::schedule(state, vault_id, crate::auth::retry::Job::RotationStore);
 }
 
 /// Store again the rotated refresh tokens not stored yet. The caller holds
-/// the vault write lock. One that lands is pushed; one that does not stays
-/// pending, still reported.
-async fn retry_pending_rotations_locked(state: &Arc<AppState>, vault_id: &str) {
-    for ((conn_id, role), token) in state.take_pending_rotations(vault_id) {
-        match persist_rotated_refresh_locked(state, vault_id, &conn_id, &role, &token).await {
-            Ok(()) => {
-                state.clear_rotation_note(vault_id, &conn_id);
-                spawn_push(state, vault_id);
+/// the vault write lock. Each is written only while its slot still holds the
+/// value it replaced (an older token never goes over a newer one). One that
+/// lands is pushed; one that does not stays pending, still reported, and
+/// keeps its retry timer. A locked vault is not attempted: it cannot be
+/// sealed until unlock, which runs this again.
+pub(crate) fn retry_pending_rotations_locked(state: &Arc<AppState>, vault_id: &str) {
+    if state.cloned_state_key(vault_id).is_none() {
+        crate::auth::retry::settle(state, vault_id, crate::auth::retry::Job::RotationStore);
+        return;
+    }
+    let mut left = false;
+    for ((conn_id, role), p) in state.take_pending_rotations(vault_id) {
+        match persist_rotated_refresh_locked(state, vault_id, &conn_id, &role, &p.old, &p.new, true) {
+            Ok(RotationStored::Written) => spawn_push(state, vault_id),
+            Ok(_) => {}
+            Err(why) => {
+                left = true;
+                state.note_rotation_pending(vault_id, &conn_id, &role, &p.old, &p.new, &why);
             }
-            Err(why) => state.note_rotation_pending(vault_id, &conn_id, &role, &token, &why),
         }
+    }
+    if left {
+        crate::auth::retry::schedule(state, vault_id, crate::auth::retry::Job::RotationStore);
+    } else {
+        crate::auth::retry::settle(state, vault_id, crate::auth::retry::Job::RotationStore);
+    }
+}
+
+/// The rotation retry timer's job: take the vault write lock and store again.
+pub(crate) async fn retry_pending_rotations(state: &Arc<AppState>, vault_id: &str) {
+    let Ok(_guard) = state.vault_write_guard(vault_id).await else {
+        return;
+    };
+    retry_pending_rotations_locked(state, vault_id);
+}
+
+/// Before a vault locks (the caller holds its write lock, K still in hand):
+/// one attempt to store every rotated refresh token still pending, since
+/// sealing needs K and the lock evicts it. A token that still cannot be
+/// stored stays in memory in plaintext (on the vault runtime, which the lock
+/// keeps): it is the ONLY valid copy, so dropping it would force a
+/// reconnect. It is stored at the next unlock, or lost if the daemon exits
+/// first, which is logged.
+pub(crate) fn store_pending_rotations_before_lock(state: &Arc<AppState>, vault_id: &str) {
+    if !state.has_pending_rotations(vault_id) {
+        return;
+    }
+    retry_pending_rotations_locked(state, vault_id);
+    if state.has_pending_rotations(vault_id) {
+        tracing::warn!(
+            vault = %vault_id,
+            "vault locking with a rotated refresh token not stored yet: kept in memory until the next unlock stores it (lost if the daemon exits first)"
+        );
     }
 }
 
@@ -1610,7 +1787,7 @@ mod tests {
             entry.oauth2.error
         );
 
-        // A 5xx stays pending with NO error (retried next sync), but IS surfaced
+        // A 5xx stays pending with NO error (retried on its own timer), but IS surfaced
         // as `unreached` so `sc sync` can say "couldn't reach the provider".
         let mut m = with_connecting("gmail", "gmail", "code-B");
         let report = run_pending(
@@ -1840,8 +2017,6 @@ refresh_token = "REFRESH_TOKEN"
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let state = Arc::new(AppState::new(cfg));
@@ -1975,8 +2150,6 @@ refresh_token = "REFRESH_TOKEN"
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let mut state = AppState::new(cfg);
@@ -2103,9 +2276,387 @@ refresh_token = "REFRESH_TOKEN"
         assert!(state.is_vault_locked(vid), "nothing served from memory");
     }
 
+    /// A code exchange that still fails transiently past the code's
+    /// lifetime marks the connection failed ("reconnect") instead of leaving
+    /// it "connecting" for good; inside the window it stays pending.
+    #[tokio::test]
+    async fn a_code_still_failing_past_its_lifetime_is_marked_failed() {
+        let t0 = std::time::Instant::now();
+        assert!(!code_exchange_expired(t0, t0 + std::time::Duration::from_secs(599)));
+        assert!(code_exchange_expired(t0, t0 + std::time::Duration::from_secs(601)));
+
+        let services = gmail_registry();
+        let mut m = with_connecting("gmail", "gmail", "code-late");
+        let report = run_pending(&services, &no_custom(), &mut m, |_conn, _cfg, _p| async move {
+            Err(CODE_EXPIRED.to_string())
+        })
+        .await;
+        assert_eq!((report.failed.len(), report.unreached.len()), (1, 0));
+        assert!(report.changed(), "the failure is written so the console shows it");
+        let entry = &aux_map::<Connecting>(&m, "connecting")["gmail"];
+        assert!(entry
+            .oauth2
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("expired before the provider could be reached"));
+    }
+
+    /// The first transient failure of a code starts its window, and later
+    /// asks return the same instant.
+    #[test]
+    fn a_code_window_counts_from_its_first_try() {
+        let (_dir, state) = temp_state();
+        let first = state.code_first_tried("code-1");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(state.code_first_tried("code-1"), first);
+        assert!(state.code_first_tried("code-2") > first);
+    }
+
+    /// A store on the re-keyed fixture whose `refresh_token` slot holds
+    /// `value`, the vault unlocked with a cache that holds it too.
+    fn rotation_fixture(
+        value: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        &'static str,
+        Vec<u8>,
+        std::path::PathBuf,
+        String,
+    ) {
+        rotation_fixture_at("refresh_token", value, cache_holding(value))
+    }
+
+    /// [`rotation_fixture`] with the slot `slot` and the session `cache`.
+    fn rotation_fixture_at(
+        slot: &str,
+        value: &str,
+        cache: crate::state::SecretsCache,
+    ) -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        &'static str,
+        Vec<u8>,
+        std::path::PathBuf,
+        String,
+    ) {
+        use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+        use crate::storage::sealed_vault::write_per_item_atomic;
+        type S = sudp::primitives::StdPrimitives;
+        let fx = crate::storage::sealed_vault::tests::rekeyed_fixture();
+        let vid = fx.vault;
+        let material = fx.material();
+        let keys = VaultKeys::from_material(&material);
+        let (dir, state) = temp_state();
+        state.open_ledger_for_tests(&[]);
+        let mut pv = fx.pv.clone();
+        let id = pv
+            .seal_and_upsert::<S>(
+                keys,
+                vid,
+                ItemNs::Secret,
+                slot,
+                1,
+                &ItemPayload::secret_live(slot, value),
+            )
+            .unwrap();
+        pv.items.get_mut(&id).unwrap().synced_version = 1;
+        let path = state.vaults.per_item_path(vid).unwrap();
+        write_per_item_atomic(&path, &pv).unwrap();
+        state.unlock_vault(vid.into(), cache, zeroize::Zeroizing::new(material.clone()));
+        (dir, state, vid, material, path, id)
+    }
+
+    /// A session cache whose `codex` connection holds `value`.
+    fn cache_holding(value: &str) -> crate::state::SecretsCache {
+        let mut cache = crate::state::SecretsCache::default();
+        cache.entries.insert(
+            "codex".into(),
+            crate::state::CacheEntry {
+                value: value.as_bytes().to_vec(),
+                expires_at: None,
+                from_bootstrap: true,
+                agent_prefix: None,
+            },
+        );
+        cache
+    }
+
+    fn stored_refresh_token(path: &std::path::Path, material: &[u8], vid: &str) -> Vec<u8> {
+        type S = sudp::primitives::StdPrimitives;
+        crate::storage::sealed_vault::read_per_item(path)
+            .unwrap()
+            .unwrap()
+            .fold_view::<S>(crate::storage::item::VaultKeys::from_material(material), vid)
+            .unwrap()
+            .native_secrets["refresh_token"]
+            .clone()
+    }
+
+    /// A rotated refresh token lands as ONE durable row of the vault's store,
+    /// at the slot the connection reads it from; the session cache follows,
+    /// and whatever was pending for that slot is dropped.
+    #[test]
+    fn a_rotated_refresh_token_is_one_row_and_settles_the_slot() {
+        let (_dir, state, vid, material, path, id) = rotation_fixture("rt-1");
+        // An earlier rotation of the same slot was left pending.
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "earlier");
+        let stored =
+            persist_rotated_refresh_locked(&state, vid, "codex", "refresh_token", b"rt-1", "rt-3", false)
+                .unwrap();
+        assert_eq!(stored, RotationStored::Written);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-3");
+        let pv = crate::storage::sealed_vault::read_per_item(&path).unwrap().unwrap();
+        assert_eq!(pv.items[&id].version, 2);
+        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-3");
+        assert!(state.take_pending_rotations(vid).is_empty(), "the slot settled");
+        assert!(state.sync_note_lines(vid).is_empty());
+    }
+
+    /// A delayed retry never puts an older token over a newer one: the store
+    /// holds rt-3 now, the pending rt-2 (which replaced rt-1) is dropped.
+    #[test]
+    fn a_stale_pending_rotation_is_dropped_not_written() {
+        let (_dir, state, vid, material, path, _) = rotation_fixture("rt-3");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "earlier");
+        retry_pending_rotations_locked(&state, vid);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-3");
+        assert!(state.take_pending_rotations(vid).is_empty());
+        assert!(state.sync_note_lines(vid).is_empty());
+        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-3");
+    }
+
+    /// While a rotation is pending, every cache rebuilt from the store (a
+    /// pull, an unlock) serves the rotated token, not the dead one; the retry
+    /// that stores it leaves the cache on it.
+    #[test]
+    fn a_rebuilt_cache_keeps_serving_the_pending_rotation() {
+        let (_dir, state, vid, material, path, _) = rotation_fixture("rt-1");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "disk");
+        // A rebuild from the store, which still holds rt-1.
+        state.unlock_vault(vid.into(), cache_holding("rt-1"), zeroize::Zeroizing::new(material.clone()));
+        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-2");
+        retry_pending_rotations_locked(&state, vid);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
+        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-2");
+        assert!(state.take_pending_rotations(vid).is_empty());
+    }
+
+    /// Two rotations failing in a row chain: the store still holds the first
+    /// replaced value, so the pending entry keeps it, and the retry stores
+    /// the newest token instead of finding the slot "changed" and dropping it.
+    #[test]
+    fn chained_failed_rotations_keep_the_first_replaced_value() {
+        let (_dir, state, vid, material, path, _) = rotation_fixture("rt-0");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-0", "rt-1", "disk");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "disk");
+        assert_eq!(state.pending_rotation_of(vid, "codex", b"rt-0").unwrap().as_str(), "rt-2");
+        retry_pending_rotations_locked(&state, vid);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
+        assert!(!state.has_pending_rotations(vid));
+        // An unrelated value for the slot replaces the entry as before.
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-2", "rt-3", "disk");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"other", "rt-9", "disk");
+        assert!(state.pending_rotation_of(vid, "codex", b"rt-2").is_none());
+        assert_eq!(state.pending_rotation_of(vid, "codex", b"other").unwrap().as_str(), "rt-9");
+    }
+
+    /// Every mint input passes through the pending rotations: a ceremony that
+    /// fresh-decrypted the replaced token from the store mints with (here:
+    /// finds the access token cached under) the rotated one, never the dead
+    /// one.
+    #[tokio::test]
+    async fn a_mint_from_the_replaced_token_uses_the_pending_rotation() {
+        use sha2::{Digest, Sha256};
+        let (_dir, state, vid, _material, _path, _) = rotation_fixture("rt-0");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-0", "rt-1", "disk");
+        let hash: String = Sha256::digest(b"rt-1").iter().map(|b| format!("{:02x}", b)).collect();
+        state.oauth_access_insert(vid, &hash, b"at-1".to_vec(), u64::MAX);
+        let minted = crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "gmail", b"rt-0")
+            .await
+            .unwrap();
+        assert_eq!(minted, b"at-1");
+    }
+
+    /// Two mints that read the same refresh token at once, on a provider that
+    /// rotates it: exactly one refresh reaches the token endpoint (the other
+    /// would send a token the provider already replaced), and both get the
+    /// same access token.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_mints_on_a_rotating_provider_refresh_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        // A rotating token endpoint: rt-0 → rt-1 (+ at-1); a replaced token
+        // is refused, as a provider with reuse detection would.
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |body: String| {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    // Hold the response so the second mint is waiting meanwhile.
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if body.contains("refresh_token=rt-0") {
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "access_token": "at-1", "expires_in": 3600, "refresh_token": "rt-1"
+                            })),
+                        )
+                    } else {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({ "error": "invalid_grant" })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut def = crate::service::gate::admit_toml(
+            r#"
+[service]
+id = "acme"
+name = "Acme"
+hosts = ["api.acme.dev"]
+secrets = ["ACME_REFRESH_TOKEN"]
+[auth]
+type = "oauth2"
+authorization_url = "https://auth.acme.dev/authorize"
+token_url = "https://auth.acme.dev/token"
+client_id = "acme-public"
+refresh_token = "ACME_REFRESH_TOKEN"
+"#,
+        )
+        .unwrap();
+        match def.auth.as_mut() {
+            Some(crate::service::AuthDef::Oauth2(o)) => {
+                o.token_url = Some(format!("http://{}/token", addr));
+            }
+            _ => panic!("an oauth2 def"),
+        }
+        let mut cache = cache_holding("rt-0");
+        cache.custom_services.insert("acme".into(), def);
+        let (_dir, state, vid, material, path, _) =
+            rotation_fixture_at("ACME_REFRESH_TOKEN", "rt-0", cache);
+
+        let (a, b) = tokio::join!(
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0"),
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0"),
+        );
+        assert_eq!(a.unwrap(), b"at-1");
+        assert_eq!(b.unwrap(), b"at-1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one refresh");
+        // The rotation was stored, and a later mint reading the replaced
+        // token (a stale fresh decrypt) still needs no refresh.
+        type S = sudp::primitives::StdPrimitives;
+        let stored = crate::storage::sealed_vault::read_per_item(&path)
+            .unwrap()
+            .unwrap()
+            .fold_view::<S>(crate::storage::item::VaultKeys::from_material(&material), vid)
+            .unwrap();
+        assert_eq!(stored.native_secrets["ACME_REFRESH_TOKEN"], b"rt-1");
+        let again = crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0")
+            .await
+            .unwrap();
+        assert_eq!(again, b"at-1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A slot row this session's key cannot open is never written over: the
+    /// store refuses (the token stays pending, retried after the keyset pull
+    /// or at unlock), nothing is written.
+    #[test]
+    fn a_slot_row_the_key_cannot_read_is_an_error_not_a_copy() {
+        use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+        type S = sudp::primitives::StdPrimitives;
+        let (_dir, state, vid, material, path, id) = rotation_fixture("rt-1");
+        let mut pv = crate::storage::sealed_vault::read_per_item(&path).unwrap().unwrap();
+        let other = VaultKeys {
+            id_seed: VaultKeys::from_material(&material).id_seed,
+            content: &[0x99u8; 32],
+            prev: &[],
+        };
+        pv.plant::<S>(other, vid, ItemNs::Secret, "refresh_token", 7, &ItemPayload::secret_live("refresh_token", "theirs"))
+            .unwrap();
+        crate::storage::sealed_vault::write_per_item_atomic(&path, &pv).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let err =
+            persist_rotated_refresh_locked(&state, vid, "codex", "refresh_token", b"rt-1", "rt-2", false)
+                .unwrap_err();
+        assert!(err.contains("vault key this device does not have"), "{}", err);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "nothing written");
+        let pv = crate::storage::sealed_vault::read_per_item(&path).unwrap().unwrap();
+        assert_eq!(pv.items[&id].version, 7);
+    }
+
+    /// Locking: one attempt to store what is pending while K is in hand; a
+    /// token that still cannot be stored stays in memory (the only copy) and
+    /// is stored by the retry after the next unlock. A locked vault arms no
+    /// timer.
+    #[tokio::test]
+    async fn pending_rotations_are_stored_before_the_lock_or_kept_for_unlock() {
+        let (_dir, state, vid, material, path, _) = rotation_fixture("rt-1");
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "disk");
+        store_pending_rotations_before_lock(&state, vid);
+        state.lock_vault(vid);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
+        assert!(state.take_pending_rotations(vid).is_empty());
+
+        // The store cannot be written at lock time: kept in memory.
+        let (_dir, state, vid, material, path, _) = rotation_fixture("rt-1");
+        let good = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "disk");
+        store_pending_rotations_before_lock(&state, vid);
+        state.lock_vault(vid);
+        assert!(state.has_pending_rotations(vid), "kept: the only copy");
+        retry_pending_rotations_locked(&state, vid);
+        assert!(state.has_pending_rotations(vid), "locked: not attempted");
+        assert!(!state
+            .runtime_if_present(vid)
+            .unwrap()
+            .retries
+            .lock()
+            .unwrap()
+            .armed(crate::auth::retry::Job::RotationStore));
+        // The store is back and the vault unlocks: the retry stores it.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, good).unwrap();
+        state.unlock_vault(vid.into(), cache_holding("rt-1"), zeroize::Zeroizing::new(material.clone()));
+        retry_pending_rotations_locked(&state, vid);
+        assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
+        assert!(!state.has_pending_rotations(vid));
+    }
+
+    /// A store that cannot be written keeps the token pending in the session
+    /// and arms its own retry timer (no sync involved).
+    #[tokio::test]
+    async fn a_store_that_cannot_be_written_arms_the_rotation_retry() {
+        let (_dir, state, vid, _material, path, _) = rotation_fixture("rt-1");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "first try");
+        retry_pending_rotations_locked(&state, vid);
+        assert_eq!(state.take_pending_rotations(vid).len(), 1, "still pending");
+        let runtime = state.runtime_if_present(vid).unwrap();
+        assert!(runtime
+            .retries
+            .lock()
+            .unwrap()
+            .armed(crate::auth::retry::Job::RotationStore));
+    }
+
     /// A rotated refresh token whose store failed stays in use: the session
     /// holds the new token in place of the old, it is kept to store again on
-    /// the next sync, and the user is told; once stored, the note settles.
+    /// its own retry timer, and the user is told; once stored, the note
+    /// settles.
     #[test]
     fn a_rotated_token_not_stored_stays_in_use_and_pending() {
         let (_dir, state) = temp_state();
@@ -2149,7 +2700,8 @@ refresh_token = "REFRESH_TOKEN"
             pending[0].0,
             ("codex".to_string(), "refresh_token".to_string())
         );
-        assert_eq!(pending[0].1.as_str(), "new-rt");
+        assert_eq!(pending[0].1.new.as_str(), "new-rt");
+        assert_eq!(pending[0].1.old.as_slice(), b"old-rt");
         state.clear_rotation_note(vid, "codex");
         assert!(state.sync_note_lines(vid).is_empty());
     }

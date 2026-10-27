@@ -576,17 +576,6 @@ pub(crate) fn derive_frontend_from_backend(backend: &str) -> String {
     }
 }
 
-/// Split a combined URL like `http://host:port/v/<vid>` into
-/// `(root, vid)`. Returns None if the URL doesn't carry `/v/<vid>`.
-pub fn split_vault_url(url: &str) -> Option<(String, String)> {
-    let trimmed = url.trim_end_matches('/');
-    let (root, tail) = trimmed.rsplit_once("/v/")?;
-    if tail.is_empty() || tail.contains('/') {
-        return None;
-    }
-    Some((root.to_string(), tail.to_string()))
-}
-
 pub fn join_vault_url(daemon: &str, vault: &str) -> String {
     format!("{}/v/{}", daemon.trim_end_matches('/'), vault)
 }
@@ -624,8 +613,8 @@ fn env_daemon_host() -> Option<String> {
 
 /// The DEVICE's daemon-host atom (`scheme://host`): config's `daemon` with its
 /// port stripped, else loopback. This is what the device-side projections
-/// (`sc env`, the `sc agent add` minter) derive from — deliberately NOT the
-/// process env: a tool that re-read its own output would freeze stale values.
+/// (the `sc agent add` minter) derive from — deliberately NOT the process env:
+/// a tool that re-read its own output would freeze stale values.
 pub fn device_daemon_host(cfg: &CliConfig) -> String {
     cfg.daemon
         .as_deref()
@@ -705,8 +694,8 @@ fn api_face_root_with(env_url: Option<String>, cfg: &CliConfig) -> String {
 
 /// The device-default vault (config default, else the single known vault) —
 /// the chain WITHOUT the env pin, for projections that mint fresh env output
-/// (`sc env`, `sc agent add`): reading the pin there would freeze a stale pin
-/// into new output.
+/// (`sc agent add`): reading the pin there would freeze a stale pin into new
+/// output.
 pub fn device_default_vault(cfg: &CliConfig) -> Option<String> {
     cfg.vault.clone().or_else(single_known_vault)
 }
@@ -798,16 +787,31 @@ fn validate_vault_id_arg(v: &str) -> Result<(), String> {
     }
 }
 
-/// Resolve a user/agent `--vault` token to `(daemon, vault_id)` the
-/// git/docker/kubectl way: an exact id, an exact label (case-insensitive), or a
-/// unique id-prefix — whichever is UNAMBIGUOUS. Ambiguity is an error listing
-/// the candidates, never a guess (the failure mode this exists to kill: an agent
-/// told "the team vault" picking one at random). A syntactically-valid id not
-/// yet in the catalog (a just-created vault) is accepted verbatim. Spaces belong
-/// to a label: quote it, or pass a short id-prefix (no spaces, no quoting).
+/// Resolve a user/agent vault token (`--vault`, `vault use|forget|rm`) to
+/// `(daemon, vault_id)` the git/docker/kubectl way, first match wins:
+///
+/// 1. an exact id;
+/// 2. an exact label (case-insensitive);
+/// 3. 1-3 digits: the 1-based number `sprott vault ls` shows (git's
+///    `stash@{n}` shorthand), out of range is an error;
+/// 4. a unique id prefix of 4+ chars (git's floor for an abbreviated id, so
+///    a number can never be read as a prefix);
+/// 5. a full-length id not yet in the catalog (a just-created vault).
+///
+/// Ambiguity is an error listing the candidates, never a guess (the failure
+/// mode this exists to kill: an agent told "the team vault" picking one at
+/// random). Spaces belong to a label: quote it, or pass its number or a short
+/// id prefix.
 pub fn resolve_vault_token(token: &str, cfg: &CliConfig) -> Result<(String, String), String> {
+    resolve_vault_token_in(token, &known_vaults(), cfg)
+}
+
+fn resolve_vault_token_in(
+    token: &str,
+    known: &[KnownVault],
+    cfg: &CliConfig,
+) -> Result<(String, String), String> {
     let token = token.trim();
-    let known = known_vaults();
     // 1. exact id — the canonical handle always wins.
     if let Some(kv) = known.iter().find(|kv| kv.vault == token) {
         return Ok((kv.daemon.clone(), kv.vault.clone()));
@@ -827,7 +831,24 @@ pub fn resolve_vault_token(token: &str, cfg: &CliConfig) -> Result<(String, Stri
         [] => {}
         many => return Err(ambiguous_vault_err(token, "name", many)),
     }
-    // 3. unique id-prefix (docker/git style); >=4 chars so a stray word can't sweep.
+    // 3. the number `sprott vault ls` shows. 1-3 digits only: a 4+ char token
+    //    is an id prefix, so the two can't overlap.
+    if (1..=3).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_digit()) {
+        let n: usize = token.parse().unwrap_or(0);
+        return match n.checked_sub(1).and_then(|i| known.get(i)) {
+            Some(kv) => Ok((kv.daemon.clone(), kv.vault.clone())),
+            None if known.is_empty() => Err(format!(
+                "no vault {}: this machine knows no vaults yet",
+                token
+            )),
+            None => Err(format!(
+                "no vault {}: `sprott vault ls` numbers them 1 to {}",
+                token,
+                known.len()
+            )),
+        };
+    }
+    // 4. unique id-prefix (docker/git style); >=4 chars so a stray word can't sweep.
     if token.len() >= 4
         && token
             .chars()
@@ -841,7 +862,7 @@ pub fn resolve_vault_token(token: &str, cfg: &CliConfig) -> Result<(String, Stri
             many => return Err(ambiguous_vault_err(token, "id prefix", many)),
         }
     }
-    // 4. a full-length valid id the catalog hasn't recorded yet (just created /
+    // 5. a full-length valid id the catalog hasn't recorded yet (just created /
     //    catalog lag) — accept verbatim against the default daemon.
     if validate_vault_id_arg(token).is_ok() && token.len() >= 20 {
         let daemon = cfg
@@ -852,7 +873,7 @@ pub fn resolve_vault_token(token: &str, cfg: &CliConfig) -> Result<(String, Stri
         return Ok((daemon, token.to_string()));
     }
     Err(format!(
-        "no vault matches '{}'. Run `sprott vault ls` and pass its id, a unique id prefix, or its exact name (quote a name with spaces)",
+        "no vault matches '{}'. Run `sprott vault ls` and pass its exact name (quote a name with spaces), its number, its id, or a unique id prefix",
         token
     ))
 }
@@ -916,18 +937,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn split_vault_url_basic() {
-        assert_eq!(
-            split_vault_url("http://localhost:23295/v/abc"),
-            Some(("http://localhost:23295".to_string(), "abc".to_string()))
-        );
+    fn kv(vault: &str, label: Option<&str>) -> KnownVault {
+        KnownVault {
+            daemon: "http://127.0.0.1:23293".into(),
+            vault: vault.into(),
+            label: label.map(str::to_string),
+            kind: None,
+        }
     }
 
+    fn resolve(token: &str, known: &[KnownVault]) -> Result<String, String> {
+        resolve_vault_token_in(token, known, &CliConfig::default()).map(|(_, v)| v)
+    }
+
+    /// The order is exact id, exact name, `vault ls` number, id prefix (4+),
+    /// full-length unknown id. A vault literally named "2" wins over the
+    /// second row; a number never reads as an id prefix.
     #[test]
-    fn split_vault_url_no_vid_returns_none() {
-        assert_eq!(split_vault_url("http://localhost:23295"), None);
-        assert_eq!(split_vault_url("http://localhost:23295/v/"), None);
+    fn vault_token_order_id_name_number_prefix() {
+        let known = [
+            kv("aaaa1111bbbb2222cccc", Some("Work")),
+            kv("aaaa9999dddd8888eeee", Some("Personal")),
+            kv("1234ffff0000ffff0000", Some("Team")),
+        ];
+        assert_eq!(
+            resolve("aaaa9999dddd8888eeee", &known).unwrap(),
+            known[1].vault
+        );
+        assert_eq!(resolve("personal", &known).unwrap(), known[1].vault);
+        assert_eq!(resolve("1", &known).unwrap(), known[0].vault);
+        assert_eq!(resolve("3", &known).unwrap(), known[2].vault);
+        assert_eq!(resolve("003", &known).unwrap(), known[2].vault);
+        assert_eq!(
+            resolve("1234", &known).unwrap(),
+            known[2].vault,
+            "4 digits = prefix"
+        );
+        assert_eq!(resolve("aaaa1", &known).unwrap(), known[0].vault);
+        let amb = resolve("aaaa", &known).unwrap_err();
+        assert!(amb.contains("Work") && amb.contains("Personal"), "{amb}");
+        let out = resolve("4", &known).unwrap_err();
+        assert!(out.contains("1 to 3"), "{out}");
+        assert!(resolve("0", &known).is_err());
+        assert!(resolve("1", &[]).unwrap_err().contains("no vaults yet"));
+        assert_eq!(
+            resolve("zzzz0000zzzz0000zzzz", &known).unwrap(),
+            "zzzz0000zzzz0000zzzz",
+            "a full-length id not yet in the catalog"
+        );
+        assert!(resolve("nope", &known).is_err());
+
+        // A vault NAMED "2" is the name match, not the second row.
+        let named = [
+            kv("aaaa1111bbbb2222cccc", Some("Work")),
+            kv("bbbb1111bbbb2222cccc", Some("Personal")),
+            kv("cccc1111bbbb2222cccc", Some("2")),
+        ];
+        assert_eq!(resolve("2", &named).unwrap(), named[2].vault);
+        assert_eq!(resolve("1", &named).unwrap(), named[0].vault);
+        // An exact id still beats a name that spells another vault's id.
+        let shadow = [
+            kv("aaaa1111bbbb2222cccc", Some("bbbb1111bbbb2222cccc")),
+            kv("bbbb1111bbbb2222cccc", None),
+        ];
+        assert_eq!(
+            resolve("bbbb1111bbbb2222cccc", &shadow).unwrap(),
+            shadow[1].vault
+        );
     }
 
     #[test]

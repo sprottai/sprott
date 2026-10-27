@@ -41,7 +41,7 @@ anything, and the command to run next:
 To pair this machine, open this link on a device with your passkey and enter the code:
   https://app.sprott.ai/pair
   Code: 4821-0937-5563 (expires in about 15 minutes)
-Next: sprott setup --name codex --wait
+Next: sprott setup --agent-name codex --wait
 ```
 
 Run each `Next:` until a run prints none. After an error, run the printed

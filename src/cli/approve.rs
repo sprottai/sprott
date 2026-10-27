@@ -58,6 +58,20 @@ pub struct ApproveOpts {
     pub return_after_remote_link: bool,
 }
 
+impl ApproveOpts {
+    /// The global `--no-browser` / `--cb-port` / `--timeout` for one approval.
+    pub fn from_flags(flags: &crate::config::ApprovalArgs) -> Self {
+        Self {
+            no_browser: flags.no_browser,
+            cb_port: flags.cb_port,
+            timeout: flags
+                .timeout
+                .unwrap_or(crate::config::APPROVAL_TIMEOUT_SECS),
+            return_after_remote_link: false,
+        }
+    }
+}
+
 /// Fallback remote-approval wait, used only until the first successful poll
 /// reveals the op's REAL `expires_at` — from then on the CLI waits out exactly
 /// the window the grant page shows the user. (A fixed 280s here once had the

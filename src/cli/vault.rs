@@ -1,21 +1,17 @@
 //! `sprott vault ...` — vault lifecycle ops.
 
 use serde_json::json;
-use std::io::{self, Write as _};
+use std::io::{self, IsTerminal as _, Write as _};
 
 use crate::cli::active::{
     forget as forget_vault, join_vault_url, known_vaults, load as load_config, put_active,
-    resolve_active, split_vault_url,
+    resolve_active, resolve_vault_token, KnownVault,
 };
 use crate::cli::status::{fetch_status, print_status, VaultState};
 use crate::cli::webauthn::*;
 use crate::config::{
-    VaultCreateArgs, VaultDeleteArgs, VaultForgetArgs, VaultSubcommand, VaultUseArgs,
+    ApprovalArgs, VaultCreateArgs, VaultDeleteArgs, VaultForgetArgs, VaultSubcommand, VaultUseArgs,
 };
-
-// Port must equal `config::CONTROL_PORT` (the daemon's control/API plane).
-const LOCAL_CUSTODIAN: &str = "http://localhost:23293";
-const LOCAL_VAULT_ID: &str = "default";
 
 /// True if the custodian URL points at this machine. Used to specialize
 /// "daemon down" hints — a remote daemon being unreachable is a network
@@ -29,16 +25,14 @@ fn is_localhost(custodian: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
-pub async fn run(sub: VaultSubcommand, json: bool) -> Result<(), String> {
+pub async fn run(sub: VaultSubcommand, approval: &ApprovalArgs, json: bool) -> Result<(), String> {
     match sub {
         VaultSubcommand::Status(_a) => crate::cli::status::run(json).await,
         VaultSubcommand::Ls(_a) => run_ls(json).await,
         VaultSubcommand::Use(a) => run_use(a).await,
         VaultSubcommand::Forget(a) => run_forget(a).await,
         VaultSubcommand::Create(a) => run_create(a).await,
-        VaultSubcommand::Rm(a) => run_rm(a).await,
-        VaultSubcommand::Unlock(a) => crate::cli::unlock::run_unlock(a).await,
-        VaultSubcommand::Lock(a) => crate::cli::unlock::run_lock(a).await,
+        VaultSubcommand::Rm(a) => run_rm(a, approval).await,
     }
 }
 
@@ -76,48 +70,39 @@ async fn run_ls(json: bool) -> Result<(), String> {
         } else {
             " "
         };
-        // Lead with the human name + kind so an agent told "the team vault" can
-        // pick the right one; the id trails as the canonical, copyable handle.
-        let name = kv.label.as_deref().unwrap_or("(unnamed)");
-        let kind = kv.kind.as_deref().unwrap_or("?");
-        println!("  {} {}) {} ({})  {}", marker, i + 1, name, kind, kv.vault);
+        println!("  {} {}", marker, ls_row(i, kv));
     }
     Ok(())
 }
 
-/// Parse a `url_or_idx` arg into (custodian, vault). Accepts:
-/// - SPROTT_VAULT_URL (`<custodian>/v/<id>`)
-/// - numeric index (1-based) into the known_vaults list
-fn resolve_url_or_idx(arg: &str) -> Result<(String, String), String> {
-    if let Ok(idx) = arg.parse::<usize>() {
-        let known = known_vaults();
-        if idx < 1 || idx > known.len() {
-            return Err(format!("index {} out of range [1-{}]", idx, known.len()));
-        }
-        let kv = &known[idx - 1];
-        return Ok((kv.daemon.clone(), kv.vault.clone()));
-    }
-    if let Some(pair) = split_vault_url(arg) {
-        return Ok(pair);
-    }
-    // Otherwise resolve it as a vault TOKEN — id, unique id-prefix, or exact name
-    // (case-insensitive) — via the same git/docker/kubectl resolver `--vault`
-    // uses, so `sc vault use` and `sc run --vault` accept identical handles
-    // (including a quoted name). Ambiguity fails loud with candidates; a name
-    // with spaces just needs quoting.
+/// One `sprott vault ls` row after its default marker: `N) name (kind)  id`.
+/// Leads with the human name + kind so an agent told "the team vault" can pick
+/// the right one; the id trails as the canonical, copyable handle. `N` is the
+/// number the vault resolver accepts.
+fn ls_row(i: usize, kv: &KnownVault) -> String {
+    let name = kv.label.as_deref().unwrap_or("(unnamed)");
+    let kind = kv.kind.as_deref().unwrap_or("?");
+    format!("{}) {} ({})  {}", i + 1, name, kind, kv.vault)
+}
+
+/// `<VAULT>` of `vault use` / `vault forget`, through the one resolver
+/// `--vault` uses; absent, an interactive pick. `None` = the pick was cancelled.
+fn resolve_target(target: Option<String>) -> Result<Option<(String, String)>, String> {
     let cfg = load_config().unwrap_or_default();
-    crate::cli::active::resolve_vault_token(arg, &cfg)
+    let token = match target {
+        Some(t) => t,
+        None => match interactive_pick()? {
+            Some(t) => t,
+            None => return Ok(None),
+        },
+    };
+    resolve_vault_token(&token, &cfg).map(Some)
 }
 
 async fn run_use(args: VaultUseArgs) -> Result<(), String> {
-    let (custodian, vault) = if args.local {
-        (LOCAL_CUSTODIAN.to_string(), LOCAL_VAULT_ID.to_string())
-    } else if let Some(arg) = args.url_or_idx {
-        resolve_url_or_idx(&arg)?
-    } else {
-        let url = interactive_pick(OnEmpty::UseLocalDefault)?
-            .expect("UseLocalDefault never returns None");
-        split_vault_url(&url).ok_or_else(|| format!("not a valid SPROTT_VAULT_URL: {}", url))?
+    let Some((custodian, vault)) = resolve_target(args.target)? else {
+        eprintln!("cancelled");
+        return Ok(());
     };
 
     // Probe before saving. If the vault doesn't exist on the custodian,
@@ -127,7 +112,7 @@ async fn run_use(args: VaultUseArgs) -> Result<(), String> {
     match s.state {
         VaultState::NotFound => {
             return Err(format!(
-                "vault not found on custodian: {}\n  run `sprott vault create` to make a new one, or pick a different URL",
+                "vault not found on custodian: {}\n  run `sprott vault create` to make a new one, or pick a different vault",
                 join_vault_url(&custodian, &vault)
             ));
         }
@@ -166,14 +151,9 @@ async fn run_use(args: VaultUseArgs) -> Result<(), String> {
 }
 
 async fn run_forget(args: VaultForgetArgs) -> Result<(), String> {
-    let (custodian, vault) = if let Some(arg) = args.url_or_idx {
-        resolve_url_or_idx(&arg)?
-    } else {
-        if known_vaults().is_empty() {
-            return Err("no vaults in known list. Nothing to forget".into());
-        }
-        let url = interactive_pick(OnEmpty::Abort)?.ok_or("cancelled")?;
-        split_vault_url(&url).ok_or_else(|| format!("not a valid SPROTT_VAULT_URL: {}", url))?
+    let Some((custodian, vault)) = resolve_target(args.target)? else {
+        eprintln!("cancelled");
+        return Ok(());
     };
     let removed = forget_vault(&custodian, &vault)?;
     if !removed {
@@ -186,69 +166,32 @@ async fn run_forget(args: VaultForgetArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// What `interactive_pick` does when the user just hits Enter.
-enum OnEmpty {
-    /// Return the local-default URL (`use` semantics).
-    UseLocalDefault,
-    /// Return `Ok(None)` so the caller can treat it as a cancel
-    /// (`forget` semantics).
-    Abort,
-}
-
-fn interactive_pick(on_empty: OnEmpty) -> Result<Option<String>, String> {
+/// List the known vaults as `sprott vault ls` does and read one answer: a
+/// token for the vault resolver, or `None` when Enter cancels.
+fn interactive_pick() -> Result<Option<String>, String> {
+    if !io::stdin().is_terminal() {
+        return Err("pass the vault (see `sprott vault ls`)".into());
+    }
     let cfg = load_config().unwrap_or_default();
     let known = known_vaults();
-    let active = (cfg.daemon.as_deref(), cfg.vault.as_deref());
-    let has_known = !known.is_empty();
-    if has_known {
-        eprintln!("Known vaults:");
-        for (i, kv) in known.iter().enumerate() {
-            let marker = if active == (Some(&kv.daemon), Some(&kv.vault)) {
-                " (active)"
-            } else {
-                ""
-            };
-            eprintln!(
-                "  {}) {}{}",
-                i + 1,
-                join_vault_url(&kv.daemon, &kv.vault),
-                marker
-            );
-        }
-        eprintln!();
+    if known.is_empty() {
+        return Err("no vaults on this machine yet (`sprott vault create`)".into());
     }
-    // Prompt shape depends on what input is actually meaningful here:
-    // - has_known controls whether "index" is offered
-    // - on_empty controls what Enter does
-    let prompt = match (has_known, &on_empty) {
-        (true, OnEmpty::UseLocalDefault) => {
-            "Pick: index, SPROTT_VAULT_URL, or Enter for local default: "
-        }
-        (true, OnEmpty::Abort) => "Pick: index or SPROTT_VAULT_URL (Enter to cancel): ",
-        (false, OnEmpty::UseLocalDefault) => {
-            "Paste a SPROTT_VAULT_URL, or press Enter for local default: "
-        }
-        (false, OnEmpty::Abort) => "Paste a SPROTT_VAULT_URL (Enter to cancel): ",
-    };
-    eprint!("{}", prompt);
+    let active = (cfg.daemon.as_deref(), cfg.vault.as_deref());
+    for (i, kv) in known.iter().enumerate() {
+        let marker = if active == (Some(&kv.daemon), Some(&kv.vault)) {
+            "*"
+        } else {
+            " "
+        };
+        eprintln!("  {} {}", marker, ls_row(i, kv));
+    }
+    eprint!("Vault (number, name or id; Enter to cancel): ");
     io::stderr().flush().ok();
     let mut buf = String::new();
     io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
     let trimmed = buf.trim();
-    if trimmed.is_empty() {
-        return match on_empty {
-            OnEmpty::UseLocalDefault => Ok(Some(join_vault_url(LOCAL_CUSTODIAN, LOCAL_VAULT_ID))),
-            OnEmpty::Abort => Ok(None),
-        };
-    }
-    if let Ok(idx) = trimmed.parse::<usize>() {
-        if idx < 1 || idx > known.len() {
-            return Err(format!("index {} out of range [1-{}]", idx, known.len()));
-        }
-        let kv = &known[idx - 1];
-        return Ok(Some(join_vault_url(&kv.daemon, &kv.vault)));
-    }
-    Ok(Some(trimmed.to_string()))
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
 /// `sc vault create`: vaults are created in the Sprott console, where the
@@ -270,18 +213,30 @@ pub(crate) fn console_page(path: &str) -> Result<String, String> {
     Ok(format!("{}{}", origin.trim_end_matches('/'), path))
 }
 
-async fn run_rm(args: VaultDeleteArgs) -> Result<(), String> {
+async fn run_rm(args: VaultDeleteArgs, approval: &ApprovalArgs) -> Result<(), String> {
     if !args.yes {
         return Err("destructive; pass -y/--yes to confirm vault deletion".into());
     }
-    let (custodian, _) = resolve_active(Some(args.vault.as_str()))?;
-    let vault = args.vault.trim().to_string();
-    if vault.is_empty() {
-        return Err("vault id cannot be empty".into());
+    if args.target.trim().is_empty() {
+        return Err("vault cannot be empty".into());
     }
+    let (custodian, vault) = resolve_active(Some(args.target.as_str()))?;
+    // Name the vault the token resolved to, so `vault rm 2` shows which one.
+    let shown = match known_vaults()
+        .into_iter()
+        .find(|kv| kv.vault == vault)
+        .and_then(|kv| kv.label)
+        .filter(|l| !l.trim().is_empty())
+    {
+        Some(name) => format!("\"{}\" ({})", name, vault),
+        None => vault.clone(),
+    };
 
     if atty_isatty_stdin() {
-        eprint!("Type vault id `{}` to confirm permanent deletion: ", vault);
+        eprint!(
+            "Permanently delete vault {}? Type its id to confirm: ",
+            shown
+        );
         io::stderr().flush().ok();
         let mut buf = String::new();
         io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
@@ -299,12 +254,7 @@ async fn run_rm(args: VaultDeleteArgs) -> Result<(), String> {
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let opts = crate::cli::approve::ApproveOpts {
-        no_browser: args.no_browser,
-        cb_port: args.cb_port,
-        timeout: args.timeout,
-        return_after_remote_link: false,
-    };
+    let opts = crate::cli::approve::ApproveOpts::from_flags(approval);
     crate::cli::approve::approve_op(
         &custodian,
         &vault,
@@ -313,7 +263,7 @@ async fn run_rm(args: VaultDeleteArgs) -> Result<(), String> {
         &opts,
     )
     .await?;
-    eprintln!("sprott vault rm: ok (vault {} wiped)", vault);
+    eprintln!("sprott vault rm: ok (vault {} wiped)", shown);
     Ok(())
 }
 

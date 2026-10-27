@@ -1625,7 +1625,7 @@ fn egress_error_response(err: hudsucker::hyper_util::client::legacy::Error) -> R
 /// The `(x-sprott-error code, body)` for a forward-hop failure. Pure so the
 /// branching (connect vs not, proxy configured vs not) is testable without a
 /// `hyper_util` error, which has no public constructor. Never echoes the proxy
-/// URL — it can carry userinfo — pointing at `sc proxy show` instead.
+/// URL — it can carry userinfo — pointing at `sprott config get proxy` instead.
 fn egress_error_parts(is_connect: bool, cause: &str, has_proxy: bool) -> (ScCode, String) {
     if !is_connect {
         return (
@@ -1638,10 +1638,11 @@ fn egress_error_parts(is_connect: bool, cause: &str, has_proxy: bool) -> (ScCode
     }
     let hint = if has_proxy {
         "Egress goes through your configured proxy. Make sure it's up and can reach \
-         that host (`sprott proxy show`), or change it with `sprott proxy set <url>` / `sprott proxy clear`."
+         that host (`sprott config get proxy`), or change it with \
+         `sprott config set proxy <url>` / `sprott config unset proxy`."
     } else {
         "No egress proxy is set. If this machine reaches the internet only through a \
-         proxy, run `sprott proxy set <url>`."
+         proxy, run `sprott config set proxy <url>`."
     };
     (
         ScCode::EgressUnreachable,
@@ -1776,8 +1777,6 @@ mod tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let state = AppState::new(cfg);
@@ -1993,22 +1992,22 @@ mod tests {
         assert_eq!(code, ScCode::EgressUnreachable);
         assert!(msg.contains(cause));
         assert!(msg.contains("not a credential problem"));
-        assert!(msg.contains("sprott proxy set"));
+        assert!(msg.contains("sprott config set proxy"));
         assert!(msg.contains("No egress proxy is set"));
 
         // Connect failure WITH a proxy configured: point at the proxy, never
-        // echo its URL (it can carry userinfo), offer show/clear.
+        // echo its URL (it can carry userinfo), offer get/unset.
         let (code, msg) = egress_error_parts(true, cause, true);
         assert_eq!(code, ScCode::EgressUnreachable);
         assert!(msg.contains("configured proxy"));
-        assert!(msg.contains("sprott proxy show"));
-        assert!(msg.contains("sprott proxy clear"));
+        assert!(msg.contains("sprott config get proxy"));
+        assert!(msg.contains("sprott config unset proxy"));
 
         // NOT a connect failure (e.g. upstream sent a bad response): no proxy
         // hint that would misdirect, distinct token.
         let (code, msg) = egress_error_parts(false, "invalid HTTP response", false);
         assert_eq!(code, ScCode::UpstreamError);
-        assert!(!msg.contains("sprott proxy set"));
+        assert!(!msg.contains("sprott config set proxy"));
         assert!(msg.contains("not a credential problem"));
     }
 

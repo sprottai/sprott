@@ -838,24 +838,94 @@ fn restore_discovered_access(state: &AppState, discovered: &[DiscoveredVault]) -
     restored
 }
 
+/// Vault discovery's legacy cadence: the only path to a new vault when no
+/// `vaults` event can reach this daemon.
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(120);
+/// Vault discovery's safety timer while `vaults` events are live: the event
+/// (and every reconnect hello) is the fast path, this only bounds a missed one.
+const DISCOVERY_SAFETY_INTERVAL: Duration = Duration::from_secs(1800);
+/// Minimum spacing between two discovery pulls, however many events arrive
+/// (events accelerate the poll, they never replace its pacing).
+const DISCOVERY_FLOOR: Duration = Duration::from_secs(5);
+
+/// Discovery cadence (pure): relaxed only with PROOF the `vaults` event can
+/// reach us, i.e. a healthy stream whose hello declared the cap. Anything
+/// short of that keeps the 120s poll.
+fn discovery_interval(stream_healthy: bool, vault_events: bool) -> Duration {
+    if stream_healthy && vault_events {
+        DISCOVERY_SAFETY_INTERVAL
+    } else {
+        DISCOVERY_INTERVAL
+    }
+}
+
+/// When discovery's timer next comes due (pure). Relaxed, it counts from the
+/// later of the last discovery and the last hello carrying `account_cursors`
+/// (that hello re-checked the listing), so while hellos arrive it never fires.
+fn discovery_due(
+    last: std::time::Instant,
+    account_hello: Option<std::time::Instant>,
+    stream_healthy: bool,
+    vault_events: bool,
+) -> std::time::Instant {
+    let anchor = match account_hello {
+        Some(h) if stream_healthy && vault_events => last.max(h),
+        _ => last,
+    };
+    anchor + discovery_interval(stream_healthy, vault_events)
+}
+
 /// Live auto-discovery: adopt an account vault created AFTER the daemon started
-/// (e.g. in the console) without a restart. Re-lists the account's vaults on an
-/// interval; a genuinely new one is persisted, pulled once so it serves right
-/// away, then handed to a steady `watch_loop`. That watcher rides long-poll
-/// (its cell is not in the SSE dispatcher's fixed set); the next daemon restart
-/// folds it into the SSE stream. Spawned unconditionally for a paired daemon, so
-/// even a device with zero vaults today adopts its first console-created one.
-async fn discovery_reconcile_loop(state: Arc<AppState>, cloud: String, dk: String) {
-    /// Cadence for spotting a newly created vault. Fast path for existing vaults
-    /// is still the per-vault watcher; this only governs first adoption latency.
-    const INTERVAL: Duration = Duration::from_secs(120);
-    // A private health channel pinned Down: dynamically-added vaults run on
-    // long-poll (Fallback), and holding the sender here keeps every spawned
-    // watcher's `health_rx.changed()` parked instead of erroring on a dropped
-    // sender.
-    let (_health_tx, health_rx) = tokio::sync::watch::channel(StreamHealth::Down);
+/// (e.g. in the console) without a restart. Re-lists the account's vaults; a
+/// genuinely new one is persisted and handed to a steady `watch_loop`, whose
+/// cell joins the SSE stream (the dispatcher re-dials with it). Spawned
+/// unconditionally for a paired daemon, so even a device with zero vaults
+/// today adopts its first console-created one.
+///
+/// Cadence: with a healthy stream that declares the `vaults` cap, discovery
+/// runs on the `vaults` event and on every hello, plus a 1800s safety timer;
+/// otherwise every 120s, as before the cap existed. A health flip re-sizes
+/// the armed timer instead of riding a 1800s sleep into a Down stream.
+async fn discovery_reconcile_loop(
+    state: Arc<AppState>,
+    cloud: String,
+    dk: String,
+    health_rx: tokio::sync::watch::Receiver<StreamHealth>,
+) {
+    let mut last = std::time::Instant::now();
     loop {
-        tokio::time::sleep(INTERVAL).await;
+        let healthy = crate::sync_stream::stream_healthy();
+        let events = crate::sync_stream::vault_events_live();
+        let relaxed = healthy && events;
+        let due_at = |healthy, events| {
+            discovery_due(
+                last,
+                crate::sync_stream::last_account_hello_at(),
+                healthy,
+                events,
+            )
+        };
+        let due = tokio::time::Instant::from_std(due_at(healthy, events));
+        if relaxed {
+            tokio::select! {
+                _ = tokio::time::sleep_until(due) => {
+                    // A hello since arming may have moved the deadline on.
+                    if std::time::Instant::now() < due_at(healthy, events) {
+                        continue;
+                    }
+                }
+                _ = crate::sync_stream::vaults_notified() => {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(last + DISCOVERY_FLOOR)).await;
+                }
+                _ = crate::sync_stream::stream_health_edge() => continue,
+            }
+        } else {
+            tokio::select! {
+                _ = tokio::time::sleep_until(due) => {}
+                _ = crate::sync_stream::stream_health_edge() => continue,
+            }
+        }
+        last = std::time::Instant::now();
         let cfg = match active::load() {
             Ok(c) => c,
             Err(_) => continue,
@@ -882,7 +952,7 @@ async fn discovery_reconcile_loop(state: Arc<AppState>, cloud: String, dk: Strin
             {
                 continue;
             }
-            tracing::info!(vault = %vid, "cloud sync: live-adopted an account vault (long-poll until restart)");
+            tracing::info!(vault = %vid, "cloud sync: live-adopted an account vault");
             ensure_watcher(
                 state.clone(),
                 vid,
@@ -940,23 +1010,28 @@ pub(crate) fn ensure_watcher(
         }
     });
     *watcher = Some(handle);
+    // Offer the cell to the account stream: a vault adopted after startup
+    // (live discovery, restored access) joins it instead of staying on
+    // long-poll; the dispatcher re-dials with the new vid set.
+    crate::sync_stream::register_stream_vault(&vault, weak.clone());
     weak
 }
 
 /// Spawn one `watch_loop` per synced vault (active ∪ known_vaults), so every
 /// vault is kept live, not just the active one. Gated like the rest of sync —
-/// no-op for a local-only/unpaired daemon. Vaults added after start are picked
-/// up on the next daemon (re)start.
+/// no-op for a local-only/unpaired daemon. Vaults added after start are
+/// adopted by live discovery (`discovery_reconcile_loop`) and join the stream.
 ///
 /// SSE sync push (design/sse-sync.md): ONE dispatcher task owns the
 /// event stream for the whole daemon; each vault task gets a merged
 /// pending-wake cell plus the global health watch, and picks its select!
 /// shape per round from the cell's mode. The dispatcher holds only WEAK refs
-/// to the cells — a vault task that exits (tombstone) drops the sole strong
-/// ref, which is how the dispatcher knows to prune the vid from `?vids` at
-/// its next reconnect. The dispatcher is spawned even when `sync_stream=off`:
-/// it re-reads the switch at every (re)connect, so a runtime flip in either
-/// direction takes effect without a restart.
+/// to the cells (`sync_stream::register_stream_vault`, called by
+/// `ensure_watcher`): a vault task that exits (tombstone) drops the sole
+/// strong ref, which is how the dispatcher knows to prune the vid from
+/// `?vids` at its next reconnect. The dispatcher is spawned even when
+/// `sync_stream=off`: it re-reads the switch at every (re)connect, so a
+/// runtime flip in either direction takes effect without a restart.
 pub fn spawn_watchers(state: Arc<AppState>) {
     let cfg = match active::load() {
         Ok(c) => c,
@@ -989,33 +1064,29 @@ pub fn spawn_watchers(state: Arc<AppState>) {
     // `sync_stream::publish_stream_health` for why a OnceLock set HERE beats
     // creating the channel at AppState construction.
     crate::sync_stream::publish_stream_health(health_rx.clone());
-    let mut cells: Vec<(String, std::sync::Weak<WakeCell>)> = Vec::new();
     for vault in synced_vault_ids(&cfg) {
-        let cell = Arc::new(WakeCell::new());
-        let weak = ensure_watcher(
+        ensure_watcher(
             state.clone(),
-            vault.clone(),
+            vault,
             cloud.clone(),
             dk.clone(),
             health_rx.clone(),
-            Some(cell),
+            Some(Arc::new(WakeCell::new())),
         );
-        cells.push((vault, weak));
     }
-    if !cells.is_empty() {
-        tokio::spawn(crate::sync_stream::dispatcher(
-            state.clone(),
-            cloud.clone(),
-            dk.clone(),
-            cells,
-            health_tx,
-        ));
-    }
+    // Spawned even with zero vaults today: it waits for the first watcher to
+    // register (a freshly-paired device's first console-created vault).
+    tokio::spawn(crate::sync_stream::dispatcher(
+        state.clone(),
+        cloud.clone(),
+        dk.clone(),
+        health_tx,
+    ));
     // Live auto-discovery (design/vault-addressing.md): adopt account vaults
     // created after startup with no restart. Runs even with zero vaults today, so
     // a freshly-paired device picks up its first console-created vault. Seeded
     // with the vaults already watched above so it only spawns for NEW ones.
-    tokio::spawn(discovery_reconcile_loop(state, cloud, dk));
+    tokio::spawn(discovery_reconcile_loop(state, cloud, dk, health_rx));
 }
 
 /// Pull the vault's sealed blob (version-gated by the `.blob_version` sidecar).
@@ -1182,6 +1253,9 @@ fn apply_verified_envelope(state: &Arc<AppState>, vault: &str, body: &serde_json
             return;
         }
         state.set_vault_shared(vault, kind == "shared");
+        if format >= 2 {
+            note_membership_format(vault);
+        }
         // Data format newer than this build: refuse the vault loudly (the proxy
         // returns SC_UPGRADE_REQUIRED to the agent) rather than serve a partial
         // view. The 200 that delivered this envelope cleared the flag first, so
@@ -1201,29 +1275,38 @@ fn apply_verified_envelope(state: &Arc<AppState>, vault: &str, body: &serde_json
     }
     // Contact token: advance the lease freshness clock only from a verified token.
     if let Some(tok) = body.get("contact_token") {
-        let account_id = tok.get("account_id").and_then(|v| v.as_str()).unwrap_or("");
-        let issued_at = tok.get("issued_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        let nonce = tok
-            .get("nonce")
-            .and_then(|v| v.as_str())
-            .and_then(decode_b64)
-            .unwrap_or_default();
-        let verified = tok
-            .get("sig")
-            .and_then(|v| v.as_str())
-            .and_then(decode_sig64)
-            .map(|sig| {
-                crate::crypto::server_key::verify_contact_token(
-                    vault, account_id, issued_at, &nonce, &sig,
-                )
-            })
-            .unwrap_or(false);
-        if verified {
-            state.record_cloud_contact(vault);
-        } else {
-            tracing::warn!(vault = %vault, "cloud sync: contact token signature INVALID — not advancing lease clock");
-        }
+        apply_contact_token(state, vault, tok);
     }
+}
+
+/// Verify a server-signed contact token for `vault` and, if it verifies,
+/// advance the vault's lease contact clock. The ONE check for both carriers:
+/// a `/blob` 200 body and a stream hello's vault cell (same token shape,
+/// `{account_id, issued_at, nonce, sig}`). Returns whether it verified.
+pub(crate) fn apply_contact_token(state: &AppState, vault: &str, tok: &serde_json::Value) -> bool {
+    let account_id = tok.get("account_id").and_then(|v| v.as_str()).unwrap_or("");
+    let issued_at = tok.get("issued_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    let nonce = tok
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .and_then(decode_b64)
+        .unwrap_or_default();
+    let verified = tok
+        .get("sig")
+        .and_then(|v| v.as_str())
+        .and_then(decode_sig64)
+        .map(|sig| {
+            crate::crypto::server_key::verify_contact_token(
+                vault, account_id, issued_at, &nonce, &sig,
+            )
+        })
+        .unwrap_or(false);
+    if verified {
+        state.record_cloud_contact(vault);
+    } else {
+        tracing::warn!(vault = %vault, "cloud sync: contact token signature INVALID; not advancing lease clock");
+    }
+    verified
 }
 
 /// Parse a 200 blob-GET body into a `PullOutcome` and, for a live update,
@@ -2067,8 +2150,10 @@ fn retention_cutoff(days: u32) -> Option<i64> {
 ///
 /// THIRD SHAPE (design/sse-sync.md): when the SSE dispatcher's hello has
 /// confirmed this vault (`cell.mode() == Sse`), the round holds NO long-polls
-/// at all — it selects over the cell's wake / an event-independent 300s
-/// reconcile deadline / the global stream-health watch, and reacts to merged
+/// at all; it selects over the cell's wake / an event-independent reconcile
+/// deadline (1800s when hello carries cursors, else 300s; a shared vault
+/// also probes its blob every 600s) / the global stream-health watch, and
+/// reacts to merged
 /// hints by running the SAME pull paths (blob `?since` probe through the
 /// shared `handle_blob_wake_body`, then `pull_and_process`). The mode is
 /// re-read every round, so the task flips shapes the moment the dispatcher
@@ -2124,7 +2209,7 @@ pub async fn watch_loop(
     /// still the fast path (instant); this timer only matters when they stop
     /// coming. One cheap cursor-read per interval per vault — noise next to
     /// the ~25s park cycle.
-    const RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
+    const RECONCILE_INTERVAL: Duration = SSE_RECONCILE_LEGACY;
     /// Rebuild the HTTP client after this many consecutive channel errors. A
     /// poisoned connection pool (network flap / laptop sleep leaves half-open
     /// sockets, a dead egress-proxy hop) fails every request from THIS client
@@ -2144,6 +2229,9 @@ pub async fn watch_loop(
                                   // reconcile; the SSE shape holds no polls, so it must carry its own bound
                                   // (pg_cron-class writes, missed emits) that steady events cannot starve.
     let mut last_reconcile = std::time::Instant::now();
+    // Last blob answer from the cloud (it carries the signed contact token a
+    // shared vault's offline lease runs on). Only the Sse shape reads it.
+    let mut last_contact = std::time::Instant::now();
     loop {
         let round_wall = std::time::SystemTime::now();
         let round_mono = std::time::Instant::now();
@@ -2159,8 +2247,13 @@ pub async fn watch_loop(
             // the park is captured as a stored Notify permit and completes
             // the select instantly.
             let notified = cell.notified();
+            // Own wake-ups (see `sse_timers`): with hello cursors, a safety
+            // reconcile only once no hello has re-checked this vault for
+            // 1800s; a shared vault's contact refresh only when hellos do not
+            // carry its contact token, or are late.
             if !cell.has_work() {
-                let deadline = last_reconcile + RECONCILE_INTERVAL;
+                let t = sse_timers(&state, &vault, &cell, last_reconcile, &mut last_contact);
+                let deadline = t.reconcile_at.min(t.contact_at.unwrap_or(t.reconcile_at));
                 let until_reconcile = deadline.saturating_duration_since(std::time::Instant::now());
                 tokio::select! {
                     _ = notified => {}
@@ -2229,20 +2322,21 @@ pub async fn watch_loop(
                     .await
                     {
                         Ok(BlobWake::Stopped) => return,
-                        Ok(BlobWake::Unchanged) => {}
+                        Ok(BlobWake::Unchanged) => last_contact = std::time::Instant::now(),
                         Ok(BlobWake::Handled {
                             persist_failed,
                             pulls_ok,
                         }) => {
+                            last_contact = std::time::Instant::now();
                             pulled = true;
                             if !persist_failed && pulls_ok {
                                 // A clean Handled round ≡ a reconcile (blob
                                 // `?since` probe + the full pull block — the
-                                // exact requests the 300s floor issues), so
+                                // exact requests the reconcile floor issues), so
                                 // stamp the clock like the fallback blob arm
                                 // does; under steady vault events the floor
                                 // would otherwise re-run an identical round
-                                // every 300s for nothing.
+                                // every interval for nothing.
                                 last_reconcile = std::time::Instant::now();
                             }
                             clean = clean && !persist_failed && pulls_ok;
@@ -2260,10 +2354,12 @@ pub async fn watch_loop(
                 }
             }
 
-            // items/keys flags → the shared serial pull block (pull_keys
-            // runs first inside it, as today) — skipped when the vault
-            // branch just ran it (`pulled`); the flags' work rode along.
-            if !auth_park && !pulled && (work.items || work.keys) {
+            // items/keys flags (or hello cursors ahead of ours) → the shared
+            // serial pull block (pull_keys runs first inside it, as today),
+            // skipped when the vault branch just ran it (`pulled`); the
+            // flags' work rode along. Local cursors are read at use time.
+            let (local_items, local_keyset) = local_sync_cursors(&state_dir, &vault);
+            if !auth_park && !pulled && work_wants_pull(&work, local_items, local_keyset) {
                 pulled = true;
                 if !pull_and_process(&state, &state_dir, &cloud, &vault, &dk, "sse-wake").await {
                     clean = false;
@@ -2276,8 +2372,13 @@ pub async fn watch_loop(
 
             // ★ The reconcile floor fires on schedule even under steady
             // events (see `last_reconcile`): blob `?since` probe through the
-            // shared handler, plus the pull block.
-            if !auth_park && last_reconcile.elapsed() >= RECONCILE_INTERVAL {
+            // shared handler, plus the pull block. In between, a shared
+            // vault's contact refresh is the blob probe alone.
+            let now = std::time::Instant::now();
+            let t = sse_timers(&state, &vault, &cell, last_reconcile, &mut last_contact);
+            let full = now >= t.reconcile_at;
+            let contact = !full && t.contact_at.is_some_and(|at| now >= at);
+            if !auth_park && (full || contact) {
                 let mut ok = true;
                 match probe_blob_and_handle(
                     &state,
@@ -2293,6 +2394,7 @@ pub async fn watch_loop(
                     // branch above — same probe, same outcome policy; only
                     // the Unchanged handling differs by design.
                     Ok(BlobWake::Stopped) => return,
+                    Ok(BlobWake::Unchanged) if !full => {}
                     Ok(BlobWake::Unchanged) => {
                         // Blob row is current; the reconcile still owns
                         // items/keys staleness — run the pull block
@@ -2329,10 +2431,13 @@ pub async fn watch_loop(
                     }
                 }
                 if ok {
-                    last_reconcile = std::time::Instant::now();
+                    last_contact = std::time::Instant::now();
+                    if full {
+                        last_reconcile = last_contact;
+                    }
                 } else {
                     // Deadline NOT advanced: the bounded retry below re-runs
-                    // it on the backoff, not in another 300s.
+                    // it on the backoff, not a whole interval later.
                     clean = false;
                 }
             }
@@ -2372,6 +2477,7 @@ pub async fn watch_loop(
                     vault: work.vault,
                     items: true,
                     keys: true,
+                    ..Work::default()
                 });
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -2472,9 +2578,11 @@ pub async fn watch_loop(
                         BlobWake::Stopped => return,
                         BlobWake::Unchanged => {
                             // Long-poll window elapsed with no change — re-poll.
+                            last_contact = std::time::Instant::now();
                             continue;
                         }
                         BlobWake::Handled { persist_failed, .. } => {
+                            last_contact = std::time::Instant::now();
                             // A blob answer + the pull block ≡ a reconcile;
                             // stamping it keeps the SSE shape's clock fresh
                             // across a later mode flip (no behavior change in
@@ -2641,6 +2749,128 @@ async fn health_changed(rx: &mut tokio::sync::watch::Receiver<StreamHealth>) {
     if rx.changed().await.is_err() {
         std::future::pending::<()>().await;
     }
+}
+
+/// The Sse shape's safety reconcile while the stream's hello carries
+/// per-vault cursors, counted from the later of the last reconcile and the
+/// last hello (each hello re-checks the vault for free): with hellos every
+/// ~15 min it never fires; it only bounds a stream that stopped rotating.
+const SSE_RECONCILE_RELAXED: Duration = Duration::from_secs(1800);
+/// The Sse shape's safety reconcile without hello cursors (an older backend)
+/// and the fallback shape's floor.
+const SSE_RECONCILE_LEGACY: Duration = Duration::from_secs(300);
+/// A shared vault's blob probe cadence when hellos do not carry its contact
+/// token (an older backend): the blob answer carries the signed token its
+/// offline lease runs on.
+const SHARED_CONTACT_REFRESH: Duration = Duration::from_secs(600);
+/// With the token in every hello, probe only when the contact clock is older
+/// than this: beyond the ~15-min hello rotation, so it fires only when hellos
+/// are late.
+const HELLO_CONTACT_GRACE: Duration = Duration::from_secs(1200);
+
+/// Sse-shape safety reconcile interval (pure): relaxed only with proof that
+/// hello carries cursors.
+fn sse_reconcile_interval(hello_cursors: bool) -> Duration {
+    if hello_cursors {
+        SSE_RECONCILE_RELAXED
+    } else {
+        SSE_RECONCILE_LEGACY
+    }
+}
+
+/// What the safety reconcile counts from (pure): with hello cursors, the
+/// later of the last reconcile and the last hello (a hello re-checks every
+/// vault it confirms by cursor); without them, the last reconcile.
+fn sse_reconcile_anchor(
+    last_reconcile: std::time::Instant,
+    last_hello: Option<std::time::Instant>,
+    hello_cursors: bool,
+) -> std::time::Instant {
+    match last_hello {
+        Some(h) if hello_cursors => last_reconcile.max(h),
+        _ => last_reconcile,
+    }
+}
+
+/// How old a shared vault's contact clock may get before the task probes
+/// its blob (pure).
+fn contact_refresh_after(hello_carries_contact: bool) -> Duration {
+    if hello_carries_contact {
+        HELLO_CONTACT_GRACE
+    } else {
+        SHARED_CONTACT_REFRESH
+    }
+}
+
+/// An idle Sse-shape task's own deadlines.
+struct SseTimers {
+    reconcile_at: std::time::Instant,
+    /// `None` for a private vault (no contact clock to keep fresh).
+    contact_at: Option<std::time::Instant>,
+}
+
+/// Read the current stream facts and compute [`SseTimers`]. Folds a
+/// hello-delivered contact (verified and recorded by the dispatcher) into
+/// `last_contact` first.
+fn sse_timers(
+    state: &AppState,
+    vault: &str,
+    cell: &WakeCell,
+    last_reconcile: std::time::Instant,
+    last_contact: &mut std::time::Instant,
+) -> SseTimers {
+    let cursors = crate::sync_stream::hello_cursors_live();
+    let hello_contact = cell.hello_contact_at();
+    if let Some(t) = hello_contact {
+        *last_contact = (*last_contact).max(t);
+    }
+    let anchor = sse_reconcile_anchor(last_reconcile, crate::sync_stream::last_hello_at(), cursors);
+    SseTimers {
+        reconcile_at: anchor + sse_reconcile_interval(cursors),
+        contact_at: state
+            .vault_is_shared(vault)
+            .then(|| *last_contact + contact_refresh_after(hello_contact.is_some())),
+    }
+}
+
+/// This vault's local sync cursors as a hello can compare them: the items
+/// cursor, and the keyset cursor ONLY once a `/membership` pull has set it
+/// ([`membership_cursor_known`]): the hello's `keyset_seq` is the membership
+/// counter, while a format-1 vault's local cursor counts `/keys` rows on
+/// another sequence (whatever its keyset shape), so it is unknown here and
+/// always pulls. `None` = no local store yet (unknown: pull).
+fn local_sync_cursors(state_dir: &Path, vault: &str) -> (Option<u64>, Option<u64>) {
+    match read_per_item_store(state_dir, vault) {
+        Some(pv) => (
+            Some(pv.items_seq),
+            membership_cursor_known(vault).then_some(pv.keyset_seq),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Is a hello cursor ahead of ours (pure)? No hint = nothing asked; an
+/// unknown local cursor = pull.
+fn cursor_ahead(hint: Option<u64>, local: Option<u64>) -> bool {
+    match (hint, local) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(h), Some(l)) => h > l,
+    }
+}
+
+/// Does drained cell work call for the serial pull block (pure)? An
+/// unconditional items/keys flag always does; a hello cursor only when it is
+/// ahead of the local one.
+fn work_wants_pull(
+    work: &crate::sync_stream::Work,
+    local_items: Option<u64>,
+    local_keyset: Option<u64>,
+) -> bool {
+    work.items
+        || work.keys
+        || cursor_ahead(work.items_seq, local_items)
+        || cursor_ahead(work.keyset_seq, local_keyset)
 }
 
 /// Outcome of [`handle_blob_wake_body`] — the shared blob-body handler.
@@ -5268,6 +5498,11 @@ pub(crate) async fn pull_keys(
     if leave_shared_to_official(vault) {
         return Ok(0);
     }
+    // A vault already known to use the membership triple goes straight to
+    // `/membership`: its `/keys` answer is always the 409 redirect below.
+    if uses_membership_format(vault) {
+        return pull_membership(state_dir, cloud, vault, device_key, false, lock).await;
+    }
     // The cursor only: the store is read again for the write-back.
     let since = read_per_item_store(state_dir, vault).map_or(0, |pv| pv.keyset_seq);
 
@@ -5292,7 +5527,10 @@ pub(crate) async fn pull_keys(
         // fmt>=2 vault: the backend serves the end-to-end verify(anchor, members, proof)
         // TRIPLE at /membership, not row-shaped /keys. Route there. Legacy fmt=1 personal
         // vaults keep the row path below (single request, unchanged).
-        409 => return pull_membership(state_dir, cloud, vault, device_key, false, lock).await,
+        409 => {
+            note_membership_format(vault);
+            return pull_membership(state_dir, cloud, vault, device_key, false, lock).await;
+        }
         401 => {
             crate::sync_stream::notify_device_auth_rejected();
             return Err(CloudError::Other(format!(
@@ -5350,6 +5588,43 @@ async fn adopt_pulled_key_rows(
     // Persist even a zero-adopt pull so the advanced cursor sticks.
     write_per_item_store(state_dir, vault, &pv)?;
     Ok(adopted)
+}
+
+/// Vaults known to serve their keyset as the membership triple (`format >=
+/// 2`), learned this process from a `/keys` 409 or a verified envelope. The
+/// format only ratchets up, so a vault once known never needs `/keys` again.
+static MEMBERSHIP_FORMAT_VAULTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn note_membership_format(vault: &str) {
+    MEMBERSHIP_FORMAT_VAULTS
+        .lock()
+        .unwrap()
+        .insert(vault.to_string());
+}
+
+fn uses_membership_format(vault: &str) -> bool {
+    MEMBERSHIP_FORMAT_VAULTS.lock().unwrap().contains(vault)
+}
+
+/// Vaults whose local `keyset_seq` is the membership counter: a `/membership`
+/// pull landed for them this process. Knowing the format is not enough: a
+/// vault that moved from format 1 still holds its `/keys` cursor until its
+/// first `/membership` pull replaces it.
+static MEMBERSHIP_CURSOR_VAULTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn note_membership_cursor(vault: &str) {
+    MEMBERSHIP_CURSOR_VAULTS
+        .lock()
+        .unwrap()
+        .insert(vault.to_string());
+}
+
+fn membership_cursor_known(vault: &str) -> bool {
+    uses_membership_format(vault) && MEMBERSHIP_CURSOR_VAULTS.lock().unwrap().contains(vault)
 }
 
 /// Pull a fmt=2 vault's `verify(anchor, members, proof)` TRIPLE from `GET /v/{vid}/membership`
@@ -5434,9 +5709,16 @@ async fn pull_membership(
         .json()
         .await
         .map_err(|e| format!("parse membership response: {}", e))?;
-    adopt_pulled_membership(state_dir, vault, lock, &body)
+    let adopted = adopt_pulled_membership(state_dir, vault, lock, &body)
         .await
-        .map_err(CloudError::Other)
+        .map_err(CloudError::Other)?;
+    // The format memo is NOT set here (the approve self-heal also calls this
+    // path); the cursor's provenance is, for a vault already known to be
+    // format 2, so the cursor now on disk is the membership one.
+    if uses_membership_format(vault) {
+        note_membership_cursor(vault);
+    }
+    Ok(adopted)
 }
 
 /// The write-back of [`pull_membership`]: under the vault write lock, re-read
@@ -6402,8 +6684,6 @@ mod peritem_tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         }
     }
@@ -6456,7 +6736,7 @@ mod peritem_tests {
         state.mark_vault_key_changed(vault);
         state.note_sync(vault, "item", crate::state::SyncNote::Refused("x".into()));
         state.note_catch_up(vault, "x");
-        state.note_rotation_pending(vault, "conn", "role", "token", "x");
+        state.note_rotation_pending(vault, "conn", "role", b"old", "token", "x");
         let runtime = state.runtime(vault).unwrap();
         runtime
             .pending_format_mark
@@ -8239,8 +8519,6 @@ mod peritem_tests {
                 "http://localhost",
                 "localhost",
             ),
-            admin_key: None,
-            relay_url: None,
             body_cap: crate::config::DEFAULT_BODY_CAP,
         };
         let mut st = AppState::new(cfg);
@@ -9471,6 +9749,132 @@ mod tests {
             assert!(!vault_format_too_new(f), "format {f} is readable");
         }
         assert!(vault_format_too_new(SUPPORTED_VAULT_FORMAT + 1));
+    }
+
+    // ── Idle cadence + gating (design/sse-sync.md v1.2) ──
+
+    #[test]
+    fn sse_reconcile_relaxes_only_with_hello_cursors() {
+        assert_eq!(sse_reconcile_interval(true), Duration::from_secs(1800));
+        assert_eq!(sse_reconcile_interval(false), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn hellos_with_cursors_stand_in_for_the_safety_reconcile() {
+        let t0 = std::time::Instant::now();
+        let hello = t0 + Duration::from_secs(900);
+        // With cursors, a later hello moves the anchor: while hellos keep
+        // arriving every ~15 min the 1800s reconcile never comes due.
+        assert_eq!(sse_reconcile_anchor(t0, Some(hello), true), hello);
+        // A hello older than the last reconcile does not move it back.
+        assert_eq!(sse_reconcile_anchor(hello, Some(t0), true), hello);
+        // No hello yet, or no cursors: the last reconcile alone.
+        assert_eq!(sse_reconcile_anchor(t0, None, true), t0);
+        assert_eq!(sse_reconcile_anchor(t0, Some(hello), false), t0);
+    }
+
+    #[test]
+    fn shared_contact_refresh_waits_out_hellos_that_carry_the_token() {
+        assert_eq!(contact_refresh_after(false), Duration::from_secs(600));
+        // Longer than the ~15-min hello rotation: fires only if hellos are late.
+        assert_eq!(contact_refresh_after(true), Duration::from_secs(1200));
+        assert!(contact_refresh_after(true) > Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn hello_cursor_gates_the_pull_block() {
+        use crate::sync_stream::Work;
+        let hints = |i: Option<u64>, k: Option<u64>| Work {
+            items_seq: i,
+            keyset_seq: k,
+            ..Work::default()
+        };
+        // Both cursors current: no request at all.
+        assert!(!work_wants_pull(&hints(Some(10), Some(4)), Some(10), Some(4)));
+        // A cursor behind ours (rows GC'd) is not "ahead".
+        assert!(!work_wants_pull(&hints(Some(9), Some(3)), Some(10), Some(4)));
+        // Either cursor ahead pulls.
+        assert!(work_wants_pull(&hints(Some(11), Some(4)), Some(10), Some(4)));
+        assert!(work_wants_pull(&hints(Some(10), Some(5)), Some(10), Some(4)));
+        // Unknown local cursor (no store, or a legacy keyset) pulls.
+        assert!(work_wants_pull(&hints(Some(0), Some(4)), None, Some(4)));
+        assert!(work_wants_pull(&hints(Some(10), Some(4)), Some(10), None));
+        // An unconditional flag (an event, or a hello without cursors) pulls.
+        let mut w = hints(Some(10), Some(4));
+        w.items = true;
+        assert!(work_wants_pull(&w, Some(10), Some(4)));
+        let w = Work {
+            keys: true,
+            ..Work::default()
+        };
+        assert!(work_wants_pull(&w, Some(10), Some(4)));
+        // A vault-slot-only work never pulls here (the blob branch owns it).
+        let w = Work {
+            vault: Some((5, crate::sync_stream::VaultStatus::Live)),
+            ..Work::default()
+        };
+        assert!(!work_wants_pull(&w, Some(10), Some(4)));
+    }
+
+    #[test]
+    fn local_cursors_trust_the_keyset_cursor_only_for_a_membership_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(local_sync_cursors(dir.path(), "lc-none"), (None, None));
+        let mut pv = empty_keyset_store();
+        pv.items_seq = 12;
+        pv.keyset_seq = 7;
+        // A format-1 vault can hold a v2-shaped keyset adopted from /keys
+        // rows; its cursor still counts /keys rows, so it is not comparable.
+        pv.keyset.uik = Some(Default::default());
+        std::fs::create_dir_all(dir.path().join("vaults").join("lc-fmt1")).unwrap();
+        write_per_item_store(dir.path(), "lc-fmt1", &pv).unwrap();
+        assert_eq!(local_sync_cursors(dir.path(), "lc-fmt1"), (Some(12), None));
+        // Known format 2 but no /membership pull yet: the cursor may still
+        // be the /keys one (a vault that moved from format 1).
+        std::fs::create_dir_all(dir.path().join("vaults").join("lc-fmt2")).unwrap();
+        write_per_item_store(dir.path(), "lc-fmt2", &pv).unwrap();
+        note_membership_format("lc-fmt2");
+        assert_eq!(local_sync_cursors(dir.path(), "lc-fmt2"), (Some(12), None));
+        // After a /membership pull set it: comparable.
+        note_membership_cursor("lc-fmt2");
+        assert_eq!(local_sync_cursors(dir.path(), "lc-fmt2"), (Some(12), Some(7)));
+    }
+
+    #[test]
+    fn discovery_relaxes_only_with_vault_events_on_a_healthy_stream() {
+        assert_eq!(discovery_interval(true, true), Duration::from_secs(1800));
+        assert_eq!(discovery_interval(true, false), Duration::from_secs(120));
+        assert_eq!(discovery_interval(false, true), Duration::from_secs(120));
+        assert_eq!(discovery_interval(false, false), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn discovery_timer_counts_from_account_cursor_hellos() {
+        let t0 = std::time::Instant::now();
+        let hello = t0 + Duration::from_secs(900);
+        // Relaxed: a later account-cursor hello moves the deadline on, so
+        // with hellos every ~15 min the 1800s timer never fires.
+        assert_eq!(
+            discovery_due(t0, Some(hello), true, true),
+            hello + DISCOVERY_SAFETY_INTERVAL
+        );
+        assert_eq!(
+            discovery_due(hello, Some(t0), true, true),
+            hello + DISCOVERY_SAFETY_INTERVAL
+        );
+        assert_eq!(discovery_due(t0, None, true, true), t0 + DISCOVERY_SAFETY_INTERVAL);
+        // Not relaxed: the 120s poll from the last discovery, hellos or not.
+        assert_eq!(discovery_due(t0, Some(hello), false, true), t0 + DISCOVERY_INTERVAL);
+        assert_eq!(discovery_due(t0, Some(hello), true, false), t0 + DISCOVERY_INTERVAL);
+    }
+
+    #[test]
+    fn membership_format_is_remembered_per_vault() {
+        let vid = "fmt2-memo-test-only";
+        assert!(!uses_membership_format(vid));
+        note_membership_format(vid);
+        assert!(uses_membership_format(vid));
+        assert!(!uses_membership_format("fmt2-memo-test-other"));
     }
 
     /// The browser assembles the blob client-side; this guards that the exact

@@ -462,27 +462,27 @@ the reverse-intuitive trap):
 
 - **Interactive** (TTY): missing value → hidden prompt (keeps the secret out of
   shell history / `ps`); missing host → prompt, **required**; no-broker must be
-  chosen explicitly (`--no-broker` or typing `none`, echoing the consequence
+  chosen explicitly (`--no-host`, echoing the consequence
   "agent cannot use this item"). Every prompt echoes the intent of what was
   already passed (defends arg-order mistakes; host is `--host`, never a 3rd
   positional).
 - **Non-interactive** (script / agent pipe): missing host → error listing the two
-  fixes (`--host <h>` / `--no-broker`). Never hangs.
+  fixes (`--host <h>` / `--no-host`). Never hangs.
 
 `sc set KEY [VALUE] --host H` **creates the raw connection** — id `= lower(KEY)`,
 `service: None`, `hosts: [H]`, and explicit `secrets: [KEY]` (KEY force-uppercased
 to the one canonical form; the value is stored bare in the flat pool). Hostless
-`--no-broker` (or `--host none`) writes a no-broker item invisible to the broker,
+`--no-host` writes a no-broker item invisible to the broker,
 and drops any raw connection a prior `sc set … --host` created for the key.
 
 `sc set --host` is the single-secret **shorthand of `sc connection add`** (`add ⊃
 set`; `sc connect` is the hidden back-compat alias): `sc connection add <id> --host
-H… --from-literal KEY=VALUE…` builds a multi-secret raw connection, and `--service SVC`
+H… --set KEY=VALUE…` builds a multi-secret raw connection, and `--service SVC`
 a service-backed one, where `--host` then only PINS an exact FQDN ⊆ the service's
 `*.suffix` hosts, and each slot is one of the service's declared secret roles. A slot
-is filled from a new value (`--from-literal SLOT=VALUE`) or from a secret already in
-the vault (`--from-secret SLOT=KEY`; a raw connection's slot is its KEY, so
-`--from-secret KEY`). See [connect-bind-existing-secret.md](connect-bind-existing-secret.md).
+is filled from a new value (`--set SLOT=VALUE`) or from a secret already in
+the vault (`--use SLOT=KEY`; a raw connection's slot is its KEY, so
+`--use KEY`). See [connect-bind-existing-secret.md](connect-bind-existing-secret.md).
 `<id>` is a handle you choose (free text is slugified). Siblings:
 `sc connection ls` / `sc connection rm <id>`.
 
@@ -607,9 +607,7 @@ stdout (key shown once; stderr guidance carries no secret) — a mint-time
 projection of the DEVICE atoms — and the agent appends it unseen to its own
 `.env`. The key stays out of the install prompt AND the transcript (settled:
 the cloud also can't know a device's real atoms, so a console-baked env would
-freeze assumptions). `sc env` stays the HUMAN-shell projection (`BROKER_URL`
-only — never a key, which would collapse per-agent revocation, and never a
-vault pin, which would shadow `sc vault use`). Install chain: prompt = install + pair-token login + `sc agent
+freeze assumptions). Install chain: prompt = install + pair-token login + `sc agent
 add >> .env` + a CLAUDE.md reminder.
 
 **Atoms are truth, `_url`s are derived** — `src/cli/active.rs` is the single
@@ -621,8 +619,8 @@ the same daemon host** — when `$SPROTT_BROKER_URL` is set, its HOST feeds
 its own HTTP cannot target different daemons; worst case is a uniformly
 stale snapshot, never a split. Vault precedence at the one choke point
 (`resolve_active`): `--vault > $SPROTT_VAULT_ID (env pin) > config >
-single-known auto-select`. Mint-time projections (`sc env`, `sc agent add`)
-read DEVICE atoms only — never the env pins (a re-eval must not freeze its
+single-known auto-select`. The mint-time projection (`sc agent add`)
+reads DEVICE atoms only — never the env pins (a re-eval must not freeze its
 own prior output). Remote is config, not code: hand-edit the daemon atom,
 copy the PUBLIC `ca.pem` (`$SPROTT_CA_PATH`); `ca.key` never leaves.
 
@@ -654,7 +652,7 @@ human-anchored host anyway). Skill stays generic; the shipped
   long-lived credential in the transcript AND bakes cloud-side assumptions
   about device atoms. The device-side minter (`sc agent add` → full dotenv
   block on stdout) achieves single-minter without either cost.
-- **`sc env` emitting the agent key / a key-bearing PROXY_URL — REJECTED.**
+- **A device-scope env command emitting the agent key / a key-bearing PROXY_URL — REJECTED.**
   Device-scope tool; one device-level key would collapse per-agent
   revocation/audit.
 - **`/use/<conn>/<path>` endpoint — RETIRED.** Two injection triggers (URL-conn +

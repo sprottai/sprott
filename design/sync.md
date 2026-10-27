@@ -59,7 +59,7 @@ recreate. Split them:
 |---|---|---|---|---|
 | **Clear contents** | same | same | emptied | normal content pull (blob now empty); nothing else changes — the agent's `SPROTT_VAULT_URL` keeps working |
 | **Delete vault** | **retired forever** | gone | gone | pull sees a **tombstone** → drop local `vault.dat`, lock, forget, zeroize `K`; the agent's URL now 404s (re-pair expected) |
-| **Create / recreate** | **brand-new id** | fresh | fresh | a new vault to enroll — re-pair, `sc env` again |
+| **Create / recreate** | **brand-new id** | fresh | fresh | a new vault to enroll — re-pair |
 
 **Delete ⇒ new id on recreate (never reuse).** A deleted id is a tombstone and is
 **never reissued**. Recreating "the same vault" mints a new id with a new `K`.

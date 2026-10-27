@@ -17,18 +17,18 @@
 //! Model (deliberately the standard one — Docker/systemd/git all do this): the
 //! proxy is CONFIGURED at the device level, persisted in a file, and applied to
 //! the process env at startup BEFORE any HTTP client is built (reqwest honours
-//! `*_PROXY` natively, so one env shaping covers every client). `sc proxy set`
+//! `*_PROXY` natively, so one env shaping covers every client). `sprott config set proxy`
 //! writes it + bounces the daemon; changing it is a service-config change, not a
 //! per-request knob. An explicit shell `HTTPS_PROXY` still WINS (env > config),
 //! so this only fills the gap, never overrides an operator who set it directly.
 //! Hosts that must stay direct (e.g. a narrow proxy that can't reach us) go in
 //! the operator's own `NO_PROXY` — we never silently carve the backend out.
 //!
-//! LIVE FOLLOW (so a proxied agent just works without `sc proxy set`): every
+//! LIVE FOLLOW (so a proxied agent just works without `sprott config set proxy`): every
 //! `sc run` reports its shell proxy to the daemon's in-memory ambient slot (see
 //! [`ambient`] / [`set_ambient`] and `POST /proxy/ambient`). The daemon then
 //! follows the operator's CURRENT shell proxy, nothing is persisted, and a shell
-//! with no proxy simply falls back to the file. `sc proxy set` stays the
+//! with no proxy simply falls back to the file. `sprott config set proxy` stays the
 //! explicit override and the only option for a headless/remote daemon that no
 //! `sc run` ever reports to. Ambient and file are ONE resolver ([`effective`]),
 //! not two mechanisms — ambient is just the env tier kept live instead of frozen.
@@ -46,7 +46,7 @@ use crate::config::default_state_dir;
 /// under systemd/launchd, which don't inherit a shell) and then REFRESHED by
 /// every `sc run`, which reports its shell proxy to `POST /proxy/ambient`. That
 /// is what lets the daemon follow the operator's live proxy state with NO
-/// persisted `sc proxy set`, and with no stale-value risk: it is in-memory only,
+/// persisted `sprott config set proxy`, and with no stale-value risk: it is in-memory only,
 /// so a restart clears it and the next `sc run` re-seeds it.
 ///
 /// `Some(url)` = an ambient proxy to use; `None` = none reported, fall through
@@ -136,7 +136,7 @@ pub fn apply_to_env() {
 /// client + the resident proxy's forward connector) should use RIGHT NOW,
 /// honouring env > config: the live ambient proxy (the shell proxy `sc run`
 /// last reported, or this process's own shell) wins; otherwise the stored file,
-/// re-read FRESH so a runtime `sc proxy set` (which rewrites the file) or an
+/// re-read FRESH so a runtime `sprott config set proxy` (which rewrites the file) or an
 /// ambient push takes effect via `/proxy/reload` / `/proxy/ambient` with no
 /// restart. Falls back to [`load`] when nothing ambient is set.
 pub fn effective() -> Option<String> {
@@ -212,7 +212,7 @@ pub fn apply(b: reqwest::ClientBuilder, proxy: Option<&str>) -> reqwest::ClientB
 }
 
 /// Apply the currently-[`effective`] egress proxy to a client builder. Because
-/// `effective()` re-reads the stored value FRESH, a `sc proxy set` that ran
+/// `effective()` re-reads the stored value FRESH, a `sprott config set proxy` that ran
 /// after the daemon started (via `/proxy/reload`, no restart) is honoured by the
 /// very next client built through here — the whole point of the hot path.
 pub fn apply_effective(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
@@ -222,7 +222,7 @@ pub fn apply_effective(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 /// The one constructor for the daemon's per-call cloud clients (sync loops,
 /// op-relay): an HTTP client with the effective device egress proxy applied and
 /// the given overall timeout. Routing sync/relay through here is what makes
-/// `sc proxy set` reach them without a daemon restart — see the module header.
+/// `sprott config set proxy` reach them without a daemon restart — see the module header.
 pub fn client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
     apply_effective(
         crate::util::http_builder()
@@ -245,7 +245,7 @@ fn version_headers() -> reqwest::header::HeaderMap {
 
 /// The constructor for the daemon's STREAMING cloud connection (the SSE sync
 /// stream, design/sse-sync.md): same fresh-proxy contract as [`client`]
-/// — built per (re)connect, so a runtime `sc proxy set` is honoured at the
+/// — built per (re)connect, so a runtime `sprott config set proxy` is honoured at the
 /// very next dial — but with ONLY a connect budget. A total `.timeout()` here
 /// would be a bug: it fires mid-body and would kill a healthy held-open
 /// stream at the deadline. Liveness on the open stream is the caller's job
@@ -259,7 +259,7 @@ pub fn client_streaming(connect: std::time::Duration) -> reqwest::Result<reqwest
     .build()
 }
 
-/// The first non-empty proxy set in THIS process's env right now. Read once by
+/// The first non-empty proxy variable in THIS process's env right now. Read once by
 /// `apply_to_env` before it shapes env, so it reflects the operator's shell.
 fn shell_proxy_now() -> Option<String> {
     for key in [

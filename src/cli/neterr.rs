@@ -3,13 +3,13 @@
 //! Principle: state the OBSERVED fact ("couldn't reach X") and only HINT at a
 //! proxy CONDITIONALLY. A reachability failure can't tell you *why* the host is
 //! unreachable, so we never assert "missing proxy" as the cause — at most we say
-//! "if this machine needs a proxy for outbound HTTPS, `sc proxy set <url>`". The
+//! "if this machine needs a proxy for outbound HTTPS, `sprott config set proxy <url>`". The
 //! same wording is reused everywhere (`sc sync`, `sc agent`, `sc login`, doctor)
 //! so the signal an agent/human sees is uniform.
 
 /// The one conditional proxy hint, appended to a reachability failure.
 pub const PROXY_HINT: &str =
-    "if this machine needs a proxy for outbound HTTPS, set one with `sprott proxy set <url>`";
+    "if this machine needs a proxy for outbound HTTPS, set one with `sprott config set proxy <url>`";
 
 /// A reqwest error that is a *reachability* failure (couldn't connect, timed
 /// out), as opposed to a logical/HTTP error where a proxy hint would misdirect.
@@ -32,8 +32,7 @@ pub fn reach_failed(target: &str, err: &reqwest::Error) -> String {
 /// the typed `reqwest::Error`): append the proxy hint iff the message looks like
 /// a reachability failure and doesn't already carry it.
 pub fn with_proxy_hint(msg: &str) -> String {
-    // A daemon older than 1.5 names the knob `sc proxy set`.
-    if msg.contains("sprott proxy set") || msg.contains("sc proxy set") || !looks_unreachable(msg) {
+    if msg.contains("sprott config set proxy") || !looks_unreachable(msg) {
         return msg.to_string();
     }
     format!("{msg}; {PROXY_HINT}.")
@@ -62,14 +61,10 @@ mod tests {
     fn with_proxy_hint_only_on_reachability_and_not_twice() {
         // Reach failure → hint appended.
         let m = with_proxy_hint("reach https://api.sprott.ai: connection refused");
-        assert!(m.contains("sprott proxy set"));
-        // Already carries the knob → left alone (no double hint).
-        for carried in [
-            "couldn't reach x: timed out; sprott proxy set <url>",
-            "couldn't reach x: timed out; sc proxy set <url>",
-        ] {
-            assert_eq!(with_proxy_hint(carried), carried);
-        }
+        assert!(m.contains("sprott config set proxy"));
+        // Already carries the hint → left alone (no double hint).
+        let carried = "couldn't reach x: timed out; sprott config set proxy <url>";
+        assert_eq!(with_proxy_hint(carried), carried);
         // A logical/non-network error → untouched, NOT told to set a proxy.
         assert_eq!(with_proxy_hint("vault not found"), "vault not found");
     }

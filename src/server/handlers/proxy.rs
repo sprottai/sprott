@@ -1,5 +1,5 @@
 //! `POST /proxy/reload` — hot-reload the device egress proxy into the running
-//! daemon's swappable clients after `sc proxy set/clear` rewrites the stored
+//! daemon's swappable clients after `sprott config set/unset proxy` rewrites the stored
 //! value. It re-points BOTH egress paths — the shared reqwest client (OAuth
 //! mint / GCP / snaplii, via [`crate::core::forward::reload_egress_proxy`]) and
 //! the resident proxy's forward connector (the shared [`AppState::egress_proxy`]
@@ -45,7 +45,7 @@ pub struct AmbientBody {
 
 /// `POST /proxy/ambient` — a short-lived `sc` command (today `sc run`) reports
 /// the operator's LIVE shell egress proxy so the long-running daemon can follow
-/// it WITHOUT a persisted `sc proxy set`. Sets the in-memory ambient value (never
+/// it WITHOUT a persisted `sprott config set proxy`. Sets the in-memory ambient value (never
 /// persisted) and, only when it changed, hot-reloads the egress clients exactly
 /// like `/proxy/reload`.
 ///
@@ -53,7 +53,7 @@ pub struct AmbientBody {
 /// OWN local file and so is safe from any origin, but this accepts a caller-
 /// CHOSEN proxy (which may carry userinfo credentials), so it must never be
 /// reachable off-box even if the control plane is bound beyond loopback. A remote
-/// daemon uses `sc proxy set`, never this. Non-loopback peers get 403.
+/// daemon uses `sprott config set proxy`, never this. Non-loopback peers get 403.
 pub async fn ambient(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
