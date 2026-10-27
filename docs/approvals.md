@@ -51,7 +51,8 @@ replayed into a different request.
 
 ### Details
 
-An approval covers only the agent that asked, on that connection and host:
+An approval covers only the agent that asked, on that connection and host,
+with the same credentials (the same secrets of the connection):
 
 - `ask-always`: this one request.
 - `ask` on a request the service scopes by its values (such as an amount):
@@ -61,14 +62,37 @@ An approval covers only the agent that asked, on that connection and host:
 - `ask` from a floor: later reads (or writes) on that connection that no
   rule matches, for the floor's window.
 
-A read approval never lets a write through. The card states what the
-approval covers, and the daemon refuses an approval whose signed card differs
-from what it would grant.
+A read approval never lets a write through. A request that uses another
+secret of the connection, or one more, asks again; so does one after the
+connection is rebound to other secrets. A new value for the same secret
+keeps the approval.
+
+The card states what the approval covers, and the daemon refuses an approval
+whose signed card differs from what it would grant. It may grant less, never
+more: approving while the vault is locked lets nothing through (the request
+says the vault is locked), and a window approved after the vault's policy
+changed is not kept (the request asks again).
+
+How long a window lasts:
+
+- Any change to the vault's policy ends its windows, also one made while it
+  was locked. Other changes to the vault keep them.
+- Locking the vault ends every approval.
+- A window lasts its full length even if the person who approved it is
+  removed from the vault meanwhile.
+- An agent that is removed from the vault is refused before any approval is
+  looked at. Added back, its approvals that have not run out apply again.
+
+Values the daemon read from an external store are read again after any
+change to the vault, or after a lock and unlock.
 
 ## Boundaries refuse
 
 A request outside a connection's hosts, to a private address, or against a
-`deny` rule is refused at once. It does not become an approval prompt.
+`deny` rule is refused at once. So is one naming a secret the connection
+doesn't have, or one the vault doesn't hold (`unknown_role`,
+`secret_not_set`), and one an external store can't answer
+(`store_unavailable`). None of these becomes an approval prompt.
 Prompts are kept for the actions you marked as sensitive, so each one means
 something. A host the connection doesn't list yet comes with one approval to
 add it permanently.
