@@ -35,9 +35,7 @@ impl std::fmt::Display for PathError {
         f.write_str(match self {
             PathError::Malformed => "the request path is not a valid URI path",
             PathError::Nul => "the request path contains %00",
-            PathError::Ambiguous => {
-                "the request path has an encoded slash next to a dot segment"
-            }
+            PathError::Ambiguous => "the request path has an encoded slash next to a dot segment",
         })
     }
 }
@@ -163,13 +161,19 @@ mod tests {
     fn an_encoded_slash_has_a_second_reading() {
         let p = normalize("/repos/o/r/git/refs/heads%2fmain").unwrap();
         assert_eq!(p, "/repos/o/r/git/refs/heads%2Fmain");
-        assert_eq!(slash_decoded(&p), Ok(vec!["/repos/o/r/git/refs/heads/main".to_string()]));
+        assert_eq!(
+            slash_decoded(&p),
+            Ok(vec!["/repos/o/r/git/refs/heads/main".to_string()])
+        );
         assert_eq!(slash_decoded("/plain/path"), Ok(vec![]));
         // Empty segments a decoded slash makes: decided both as is and merged
         // (a storage key may hold `//`).
         assert_eq!(
             slash_decoded("/o/logs%2F%2F2024"),
-            Ok(vec!["/o/logs//2024".to_string(), "/o/logs/2024".to_string()])
+            Ok(vec![
+                "/o/logs//2024".to_string(),
+                "/o/logs/2024".to_string()
+            ])
         );
         // Dot segments it makes: no reading is safe.
         for p in ["/a%5C..%5Cb", "/repos/o/r/x%2F%2F..", "/a%2F.%2Fb"] {
