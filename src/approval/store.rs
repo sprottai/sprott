@@ -515,14 +515,14 @@ impl ApprovalStore {
 
     /// Test seam: mutable record access (backdating clocks, etc.).
     #[cfg(test)]
+    pub fn get_mut_for_test(&mut self, id: &str) -> Option<&mut ApprovalRecord> {
+        self.inner.get_mut(id)
+    }
+
     /// Tests: every op held, whatever its status.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.inner.len()
-    }
-
-    pub fn get_mut_for_test(&mut self, id: &str) -> Option<&mut ApprovalRecord> {
-        self.inner.get_mut(id)
     }
 
     /// Drop expired and consumed records.

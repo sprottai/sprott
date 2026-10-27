@@ -119,6 +119,9 @@ pub enum ScCode {
     SecretEncoding,
     /// A KEY the request's phantom names is not in any of the vault's stores.
     SecretNotSet,
+    /// A connection names a vault service definition this device does not
+    /// load (rejected, a conflict copy, or no such service).
+    ServiceNotLoaded,
     StoreUnavailable,
     VaultKeyChanged,
     UnknownConnection,
@@ -374,9 +377,16 @@ impl ScCode {
                 "internal",
             ),
             SecretNotSet => (
-                404,
+                424,
                 "secret_not_set",
                 "Secret not set",
+                "configure",
+                "vault",
+            ),
+            ServiceNotLoaded => (
+                409,
+                "service_not_loaded",
+                "Service definition not loaded",
                 "configure",
                 "vault",
             ),
@@ -735,6 +745,7 @@ mod tests {
             RefreshForbidden,
             SecretEncoding,
             SecretNotSet,
+            ServiceNotLoaded,
             StoreUnavailable,
             VaultKeyChanged,
             UnknownConnection,

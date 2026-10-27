@@ -85,7 +85,8 @@ Sprott reports them because it saw them happen.
 |---|---|---|---|
 | `unknown_connection` | 400 | The phantom names no connection. | Copy the phantom from `sprott connection ls`. |
 | `unknown_role` | 400 | The phantom names a role its connection doesn't have. The message lists the connection's phantoms. | Use one of them. |
-| `secret_not_set` | 404 | A secret the phantom needs is in none of the vault's stores. The message names it. | Set it (`sprott set <KEY>`), or use another phantom. |
+| `secret_not_set` | 424 | A secret the phantom needs is in none of the vault's stores. The message names it. | Set it (`sprott set <KEY>`), or use another phantom. |
+| `service_not_loaded` | 409 | The connection's service is a vault definition this device does not load (the message says why). | Fix or remove the definition (`sprott service ls` lists it). |
 | `phantom_unresolved` | 424 | A phantom could not be resolved, so the request was blocked before it left. | Check the name with `sprott connection ls`, or run `sprott unlock`. |
 | `ambiguous_phantom` | 400 | A bare phantom on a connection with several values. | Use the per-key phantom, `__sprott__<conn>__<key>__`. |
 | `multi_connection` | 400 | One request named several connections. | Send one connection per request. |

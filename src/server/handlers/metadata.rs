@@ -333,9 +333,9 @@ pub async fn sync_now(
 }
 
 /// Decrypt vault and return a parsed v3 view of the plaintext. Used by
-/// `approve.rs` for Export/Use act dispatch and by the unlock-bootstrap
-/// path. Hard-fails on `version != 3` (callers should treat this as
-/// "user must re-enroll under the new binary").
+/// `approve.rs` for Export dispatch and by the unlock and write paths
+/// through [`open_view_for_grant`]. Hard-fails on `version != 3` (callers
+/// should treat this as "user must re-enroll under the new binary").
 pub fn decrypt_vault_view(
     op: &Operation,
     wrapping_key: &[u8],
@@ -634,7 +634,7 @@ pub(crate) fn fold_store_with_key(
 ///
 /// One call site for every read so the two formats can't diverge in what a
 /// grant resolves. Returns the `VaultPlaintextView` the whole downstream
-/// (resolve_value_async, Export map, bootstrap_cache) already consumes.
+/// (resolve_value_async, the Export map, the snapshot build) consumes.
 pub fn open_view_for_grant(
     state: &AppState,
     vault_id: &str,

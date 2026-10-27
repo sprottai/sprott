@@ -2436,10 +2436,9 @@ impl AppState {
     /// user has to actually approve. Falls back to the default when the vault is
     /// locked or sets no timeout.
     pub fn policy_approval_hold(&self, vault_id: &str) -> u64 {
-        const DEFAULT_APPROVAL_HOLD: u64 = 1800;
         self.snapshot(vault_id)
-            .and_then(|s| s.inputs.policy.timeout)
-            .unwrap_or(DEFAULT_APPROVAL_HOLD)
+            .map(|s| s.inputs.approval_hold())
+            .unwrap_or(crate::snapshot::DEFAULT_APPROVAL_HOLD)
     }
 
     // ── Proxy-facing accessors (resident phantom-only proxy) ─────────────────

@@ -621,7 +621,7 @@ impl BrokerHandler {
                 .map(String::as_str)
                 .unwrap_or("this device has no such service");
             return deny(
-                ScCode::PolicyDenied,
+                ScCode::ServiceNotLoaded,
                 &format!(
                     "connection '{}' uses service '{}', whose definition is not loaded: {}",
                     conn, s, why
@@ -832,15 +832,20 @@ impl BrokerHandler {
         // store (an install was refused, so an approved widen may be stored
         // but not served) it says so instead of minting another.
         if !crate::core::host::host_allowed(&dest_host, &resolved_hosts) {
+            let behind = state.is_vault_behind(&vault_id);
             // Refused whether or not the widen request below registers.
             write_forward_audit(
                 &state,
                 &refused,
                 0,
                 Some(&dest_host),
-                Some(ScCode::HostNotAnchored),
+                Some(if behind {
+                    ScCode::VaultKeyChanged
+                } else {
+                    ScCode::HostNotAnchored
+                }),
             );
-            if state.is_vault_behind(&vault_id) {
+            if behind {
                 return err_response(
                     ScCode::VaultKeyChanged,
                     &format!(
@@ -852,7 +857,8 @@ impl BrokerHandler {
                 )
                 .into();
             }
-            return self.widen_deny(&vault_id, &conn, &dest_host, ip).await;
+            let hold = snapshot.inputs.approval_hold();
+            return self.widen_deny(&vault_id, &conn, &dest_host, hold, ip).await;
         }
 
         // ── 6. permit ────────────────────────────────────────────────────────
@@ -872,6 +878,7 @@ impl BrokerHandler {
             ttl,
             credentials: credentials.clone(),
             fingerprint: snapshot.fingerprint,
+            hold: snapshot.inputs.approval_hold(),
         };
         let permit = match level {
             AccessLevel::Allow => None,
@@ -1088,6 +1095,7 @@ impl BrokerHandler {
             ttl,
             credentials,
             fingerprint,
+            hold,
         } = p;
         let (level, decided_by) = (*level, decided_by.clone());
         let now = now_secs();
@@ -1098,7 +1106,7 @@ impl BrokerHandler {
         //     expires (aux.policy.timeout, else 5 min). A long grant window must
         //     not stretch the approval deadline.
         let grant_ttl = ttl.unwrap_or(DEFAULT_ASK_TTL);
-        let hold_secs = self.state.policy_approval_hold(vault_id);
+        let hold_secs = *hold;
 
         // The op names the credentials an approval of it permits: the KEYs
         // the request resolved, the same set its permit is keyed by.
@@ -1248,6 +1256,7 @@ impl BrokerHandler {
         vault_id: &str,
         conn: &str,
         host: &str,
+        hold: u64,
         ip: IpAddr,
     ) -> RequestOrResponse {
         use crate::protocol::operation::{Act, ActType, Bind, Operation, Valid};
@@ -1273,7 +1282,7 @@ impl BrokerHandler {
             },
             // Portal pendings inherit the SAME approval window as every
             // other pending op (aux.policy.timeout; SSOT) — was a fixed 15 min.
-            valid: Valid::single_use(now, Some(now + self.state.policy_approval_hold(vault_id))),
+            valid: Valid::single_use(now, Some(now + hold)),
         };
         let approve_line = match crate::server::broker_flow::register_pending_use(
             &self.state,
@@ -1389,6 +1398,8 @@ struct Portal {
     credentials: crate::state::CredentialSet,
     /// The policy fingerprint of the snapshot it was decided on.
     fingerprint: [u8; 32],
+    /// How long the op waits for its approval, under that snapshot's policy.
+    hold: u64,
 }
 
 /// What a phantom injects: a KEY's value, or the token minted from a minted
@@ -1473,10 +1484,20 @@ async fn locate_role_less(
             .await
             .map(|at| (only.key.clone(), at));
     }
-    for use_absent in [true, false] {
+    // Pass 1 takes a recorded "absent" as is; with no candidate present,
+    // pass 2 walks again only the ones pass 1 answered from that record (it
+    // walked the others just now).
+    let from_record: Vec<bool> = candidates
+        .iter()
+        .map(|c| snapshot.recorded_absent(&c.key))
+        .collect();
+    for pass in [1, 2] {
         let mut present = Vec::new();
-        for c in &candidates {
-            if let Some(at) = snapshot.locate(state, vault_id, &c.key, use_absent).await? {
+        for (c, recorded) in candidates.iter().zip(&from_record) {
+            if pass == 2 && !recorded {
+                continue;
+            }
+            if let Some(at) = snapshot.locate(state, vault_id, &c.key, pass == 1).await? {
                 if !present.is_empty() {
                     return Err(Unlocated::Ambiguous);
                 }

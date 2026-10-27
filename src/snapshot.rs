@@ -126,7 +126,17 @@ pub struct PolicyInputs {
     pub custom: HashMap<String, ServiceDef>,
 }
 
+/// How long a pending op waits for its approval when the vault's policy sets
+/// no `timeout`.
+pub const DEFAULT_APPROVAL_HOLD: u64 = 1800;
+
 impl PolicyInputs {
+    /// How long a pending op minted under this policy waits for its approval
+    /// (`aux.policy.timeout`, else [`DEFAULT_APPROVAL_HOLD`]).
+    pub fn approval_hold(&self) -> u64 {
+        self.policy.timeout.unwrap_or(DEFAULT_APPROVAL_HOLD)
+    }
+
     /// A service definition as a connection resolves it: the vault's own
     /// first, else the compiled one.
     pub fn def<'a>(&'a self, services: &'a ServiceRegistry, id: &str) -> Option<&'a ServiceDef> {
@@ -274,46 +284,55 @@ impl PolicyInputs {
 
     /// The policy fingerprint: a hash of the canonical form of these inputs
     /// (JSON with sorted keys; a vault definition contributes its policy and
-    /// its `[requests]` shapes, nothing else of it).
+    /// its `[requests]` shapes, nothing else of it). Inputs that can't be
+    /// written canonically get a random fingerprint, equal to no other: no
+    /// window outlives the install that serves them, and none is stored for
+    /// an op minted under another policy (fail closed).
     pub fn fingerprint(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
-        use serde_json::json;
-        let custom: BTreeMap<&String, serde_json::Value> = self
-            .custom
-            .iter()
-            .map(|(id, d)| {
-                let shapes: BTreeMap<&String, serde_json::Value> = d
-                    .requests
-                    .iter()
-                    .map(|(name, s)| {
-                        // A var's address is plain data; its Debug form is stable.
-                        let vars: BTreeMap<&String, String> =
-                            s.vars.iter().map(|(k, v)| (k, format!("{:?}", v))).collect();
-                        let shape = json!({
-                            "match": s.match_pattern,
-                            "vars": vars,
-                            "scope": s.scope,
-                            "consent": s.consent,
-                        });
-                        (name, shape)
-                    })
-                    .collect();
-                let decided = json!({
-                    "defaults": d.policy.as_ref().map(|p| &p.defaults),
-                    "rules": d.policy.as_ref().map(|p| &p.rules),
-                    "requests": shapes,
-                });
-                (id, decided)
-            })
-            .collect();
-        let canonical = json!({
-            "policy": serde_json::to_value(&self.policy).unwrap_or_default(),
-            "custom": custom,
-        });
-        let mut h = Sha256::new();
-        h.update(FINGERPRINT_TAG);
-        h.update(serde_json::to_vec(&canonical).unwrap_or_default());
-        h.finalize().into()
+        match self.canonical() {
+            Ok(bytes) => {
+                let mut h = Sha256::new();
+                h.update(FINGERPRINT_TAG);
+                h.update(bytes);
+                h.finalize().into()
+            }
+            Err(e) => {
+                use rand::RngCore as _;
+                tracing::warn!("policy fingerprint: the policy can't be written canonically: {}", e);
+                let mut random = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut random);
+                random
+            }
+        }
+    }
+
+    fn canonical(&self) -> serde_json::Result<Vec<u8>> {
+        use serde_json::{to_value, Map, Value};
+        let mut custom = Map::new();
+        for (id, d) in &self.custom {
+            let mut shapes = Map::new();
+            for (name, s) in &d.requests {
+                // A var's address is plain data; its Debug form is stable.
+                let vars: BTreeMap<&String, String> =
+                    s.vars.iter().map(|(k, v)| (k, format!("{:?}", v))).collect();
+                let mut shape = Map::new();
+                shape.insert("match".into(), to_value(&s.match_pattern)?);
+                shape.insert("vars".into(), to_value(vars)?);
+                shape.insert("scope".into(), to_value(&s.scope)?);
+                shape.insert("consent".into(), to_value(&s.consent)?);
+                shapes.insert(name.clone(), Value::Object(shape));
+            }
+            let mut decided = Map::new();
+            decided.insert("defaults".into(), to_value(d.policy.as_ref().map(|p| &p.defaults))?);
+            decided.insert("rules".into(), to_value(d.policy.as_ref().map(|p| &p.rules))?);
+            decided.insert("requests".into(), Value::Object(shapes));
+            custom.insert(id.clone(), Value::Object(decided));
+        }
+        let mut canonical = Map::new();
+        canonical.insert("policy".into(), to_value(&self.policy)?);
+        canonical.insert("custom".into(), Value::Object(custom));
+        serde_json::to_vec(&Value::Object(canonical))
     }
 }
 
@@ -860,6 +879,11 @@ impl Snapshot {
             .unwrap()
             .retain(|k, _| !k.eq_ignore_ascii_case(key));
         next
+    }
+
+    /// Whether a walk of this snapshot recorded `key` absent from every store.
+    pub(crate) fn recorded_absent(&self, key: &str) -> bool {
+        matches!(self.memo_get(key), Some(Found::Absent))
     }
 
     fn memo_get(&self, key: &str) -> Option<Found> {

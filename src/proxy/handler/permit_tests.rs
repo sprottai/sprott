@@ -525,6 +525,18 @@ async fn replay_case(service: Service, tier: Tier, phantoms: Phantoms, stores: S
     }
     keys.sort();
     assert_eq!(target(&state, &op), keys.join(", "), "{case}");
+    let (level, reuse) = match tier {
+        Tier::AskAlways => ("ask-always", "none"),
+        Tier::AskOnce => ("ask", "none"),
+        Tier::Exact => ("ask", "exact"),
+        Tier::Unit => ("ask", "rule"),
+    };
+    {
+        let approvals = state.approvals.lock().unwrap();
+        let scope = &approvals.get_any(&op).unwrap().op.act.scope;
+        assert_eq!(scope["level"], level, "{case}");
+        assert_eq!(scope["reuse"], reuse, "{case}");
+    }
     approve(&state, &op);
     let (sent_auth, sent_url) = send(&state, method, &url, &auth, body).await.sent();
     assert_eq!(sent_auth, want_auth, "{case}");
@@ -759,7 +771,7 @@ async fn a_connection_whose_definition_is_not_loaded_is_refused() {
     let (code, msg) = send(&state, "GET", "https://api.x.dev/x", &bearer("__sprott__mine__"), "")
         .await
         .refused();
-    assert_eq!(code, "policy_denied");
+    assert_eq!(code, "service_not_loaded");
     assert!(msg.contains("'broken'") && msg.contains("not loaded"), "{msg}");
 }
 
@@ -844,13 +856,53 @@ async fn the_permit_is_spent_once_and_a_lock_before_spending_is_vault_locked() {
     let b = state.authorize(V, snapshot.clone(), BTreeMap::new(), key()).unwrap();
     assert!(state.consume(V, a).unwrap());
     assert!(!state.consume(V, b).unwrap(), "the loser goes to the portal");
+    let c = state.authorize(V, snapshot, BTreeMap::new(), key());
+    assert!(matches!(c, Err(crate::state::Unauthorized::NoPermit)));
+}
 
-    let op = send(&state, "POST", url, &auth, "{}").await.ask();
+/// A lock that lands after a replay's permit was found and before it is
+/// spent (here: while its access token is being minted) answers
+/// `vault_locked`; no op is minted for it.
+#[tokio::test]
+async fn a_lock_between_the_permit_and_its_spending_is_vault_locked() {
+    let (_dir, state) = new_state();
+    // A token endpoint that says when a mint reached it, then answers late.
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let hit = reached.clone();
+    let app = axum::Router::new().route(
+        "/token",
+        axum::routing::post(move || {
+            let hit = hit.clone();
+            async move {
+                hit.notify_one();
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                axum::Json(json!({ "access_token": "at", "expires_in": 3600 }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/token", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Vault::new()
+        .service("acme", MINTED)
+        .secret("ACME_REFRESH_TOKEN", "rt-0")
+        .rule("acme", "t", "POST /x", AccessLevel::AskAlways, None)
+        .unlock(&state);
+    state.edit_snapshot(V, |s| {
+        if let Some(crate::service::AuthDef::Oauth2(o)) = s.inputs.custom.get_mut("acme").and_then(|d| d.auth.as_mut()) {
+            o.token_url = Some(url.clone());
+        }
+    });
+    let auth = bearer("__sprott__acme__");
+    let op = send(&state, "POST", "https://api.acme.dev/x", &auth, "{}").await.ask();
     approve(&state, &op);
     let before = ops(&state);
-    let c = state.authorize(V, snapshot, BTreeMap::new(), key()).unwrap();
-    state.lock_vault(V);
-    assert!(matches!(state.consume(V, c), Err(crate::error::AppError::VaultLocked)));
+    let lock = async {
+        reached.notified().await;
+        state.lock_vault(V);
+    };
+    let (replay, ()) = tokio::join!(send(&state, "POST", "https://api.acme.dev/x", &auth, "{}"), lock);
+    assert_eq!(replay.refused().0, "vault_locked");
     assert_eq!(ops(&state), before, "no op");
 }
 
@@ -1079,6 +1131,28 @@ async fn a_role_less_phantom_with_one_key_unset_walks_once() {
         assert_eq!(send(&state, "GET", "https://api.cloudflare.com/x", &auth, "").await.sent().0, "Bearer cf-token");
     }
     assert_eq!(ext.calls(), 1);
+}
+
+/// A role-less phantom none of whose candidates is present anywhere walks
+/// each KEY once per request: the first request walks both for the first
+/// time, a later one walks again only what the record said was absent.
+#[tokio::test]
+async fn an_unset_role_less_phantom_walks_each_key_once_per_request() {
+    let (_dir, state) = new_state();
+    let name = format!("unset-{}", uuid::Uuid::new_v4());
+    let ext = crate::store::memory::store(&name);
+    Vault::new().store(&name, false).unlock(&state);
+    let auth = bearer("__sprott__cloudflare__");
+    let refused = |o: Out| o.refused().0;
+    assert_eq!(refused(send(&state, "GET", "https://api.cloudflare.com/x", &auth, "").await), "secret_not_set");
+    assert_eq!(ext.calls(), 2);
+    assert_eq!(refused(send(&state, "GET", "https://api.cloudflare.com/x", &auth, "").await), "secret_not_set");
+    assert_eq!(ext.calls(), 4);
+    ext.set("CLOUDFLARE_ACCOUNT_ID", "acct");
+    assert_eq!(
+        send(&state, "GET", "https://api.cloudflare.com/x", &auth, "").await.sent().0,
+        "Bearer acct"
+    );
 }
 
 /// A store in an outage refuses a KEY it precedes, at allow too, and the
