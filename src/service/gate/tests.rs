@@ -525,10 +525,17 @@ fn consent_filters_are_the_ones_the_console_implements() {
         )
     };
     ok(&raw("{{ vars.raw | email }}"));
+    // `graphql` renders only a GraphQL request's calls.
+    let e = rejected(&raw("{{ vars.raw | graphql }}"));
+    assert!(mentions(&e, "reads only a `{ in = \"graphql\", at = \"calls\" }` var"), "{e:?}");
+    ok(&raw("{{ vars.raw | email }}").replace(
+        "vars.raw = \"/raw\"",
+        "vars.raw = \"/raw\"\nvars.calls = { in = \"graphql\", at = \"calls\" }",
+    ).replace("scope = [\"raw\"]", "scope = [\"raw\", \"calls\"]").replace("{{ vars.raw | email }}", "{{ vars.calls | graphql }}"));
     ok(&raw("Send {{vars.raw}} now"));
     let e = rejected(&raw("{{ vars.raw | html }}"));
     assert!(
-        mentions(&e, "consent filter 'html' is unknown (known: email)"),
+        mentions(&e, "consent filter 'html' is unknown (known: email, graphql)"),
         "{e:?}"
     );
     // A token the console's grammar does not read is refused, not left literal.
@@ -565,7 +572,7 @@ fn policy_rules_are_recognized_whole_or_rejected() {
             "level 'sometimes' is unknown",
         ),
         ("level = \"ask-always\"\n", "", "declares no level"),
-        ("vars.amount > 80", "amount is big", "not a valid condition"),
+        ("vars.amount > 80", "amount is big", "not a valid CEL condition"),
         (
             "vars.amount > 80",
             "vars.total > 80",
@@ -611,19 +618,18 @@ fn a_rule_matching_every_request_is_refused() {
 }
 
 #[test]
-fn when_that_can_never_fire_is_rejected() {
+fn when_that_is_not_cel_over_declared_vars_is_rejected() {
     for (when, why) in [
-        ("vars.amount > 80usd", "needs a numeric literal"),
-        ("vars.amount > \\\"80\\\"", "needs a numeric literal"),
-        ("vars.amount >= NaN", "not a finite number"),
-        ("vars.amount < 1e400", "not a finite number"),
-        ("vars.amount == inf", "not a finite number"),
+        ("vars.amount > 80usd", "not a valid CEL condition"),
+        ("vars.amount >= NaN", "`NaN` is not a known name"),
+        ("vars.amount == unlimited", "`unlimited` is not a known name"),
+        ("amount > 80", "`amount` is not a known name"),
+        ("1 > 0", "reads no `vars.<name>`"),
         ("vars.nope.amount > 1", "names shape 'nope'"),
         (
             "vars.purchase.total > 1",
             "[requests.purchase] does not declare",
         ),
-        ("vars.purchase.amount.x > 1", "must be `vars.<name>`"),
     ] {
         let e = rejected_with(REQ_SERVICE, &RULE.replace("vars.amount > 80", when));
         assert!(mentions(&e, why), "{when}: {e:?}");
@@ -642,16 +648,21 @@ fn when_that_can_never_fire_is_rejected() {
     );
     let e = rejected_with(
         &svc,
-        &RULE.replace("vars.amount > 80", "vars.purchase.memo == \\\"x\\\""),
+        &RULE.replace("vars.amount > 80", "vars.purchase.memo == 'x'"),
     );
     assert!(mentions(&e, "[requests.purchase] does not bind"), "{e:?}");
-    // Equality with a bare word stays a string comparison.
-    assert!(admit(
-        None,
-        REQ_SERVICE,
-        Some(&RULE.replace("vars.amount > 80", "vars.amount == unlimited"))
-    )
-    .is_ok());
+    // Standard CEL is accepted: macros, functions, comparisons of any type.
+    for ok in [
+        "vars.amount == 'unlimited'",
+        "double(vars.amount) > 80.0",
+        "['a', 'b'].exists(p, string(vars.amount).startsWith(p))",
+        "has(vars.amount) && vars.amount > 80",
+    ] {
+        assert!(
+            admit(None, REQ_SERVICE, Some(&RULE.replace("vars.amount > 80", ok))).is_ok(),
+            "{ok}"
+        );
+    }
 }
 
 #[test]
@@ -660,7 +671,7 @@ fn when_var_must_be_bound() {
         "vars.amount = \"/amount\"",
         "vars.amount = \"/amount\"\nvars.risk = \"/risk\"",
     );
-    let policy = RULE.replace("vars.amount > 80", "vars.risk == \\\"high\\\"");
+    let policy = RULE.replace("vars.amount > 80", "vars.risk == 'high'");
     let e = rejected_with(&svc, &policy);
     assert!(mentions(&e, "[requests.purchase] does not bind"), "{e:?}");
 }

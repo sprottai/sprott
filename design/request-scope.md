@@ -64,14 +64,18 @@ consent = "Pay {{ vars.amount }} to {{ vars.merchant }}"   # {{ vars.x | filter 
   an OR. Shapes should not overlap; if they do, selection is deterministic (the
   matching shape whose name sorts first wins) so the bound digest stays stable.
 - **`vars.<name>`** — an address into the request:
-  - a **bare string** = a JSON Pointer into the **body** (parsed as JSON; v1 is
-    JSON-only — a non-JSON body leaves body vars undefined, which is safe: a
-    `when` doesn't fire and nothing is bound);
+  - a **bare string** = a JSON Pointer into the **body**;
   - `{ in = "query", at = "<param>" }` = a **query** parameter by name;
-  - `{ in = "body", at = "/ptr" }` = the explicit long form of the bare string.
+  - `{ in = "body", at = "/ptr" }` = the explicit long form of the bare string;
+  - `{ in = "graphql", at = "request" | "calls" | "fields" }` = the body read as
+    the GraphQL operation a server would run: `request` is every top-level call
+    with its arguments as canonical JSON (what an approval binds), `calls` the
+    same shortened for a person to read (what the card shows), `fields` the list
+    of called field names (what rules decide on).
   Addressing is structural (RFC 6901), never a regex over serialized bytes, so
-  key order / whitespace don't matter. A pointer that doesn't resolve, or a body
-  that isn't parseable, yields an **undefined** var.
+  key order / whitespace don't matter. A pointer that doesn't resolve yields an
+  **undefined** var. A source that can't be read the way its standard says
+  (see "Reading a request" below) is refused, never left undefined.
 - **`scope`** — the subset of vars whose VALUES become part of the grant identity.
   Absent or `[]` ⇒ nothing bound (P5). Whitelist only in v1 (see Deferred).
 - **`consent`** — ONE template string, using the SAME `{{ vars.x | filter }}`
@@ -100,6 +104,24 @@ resolves natively (`Value::pointer`) — one pointer resolves to exactly one val
 which is what a deterministic grant identity needs. (Multi-value JSONPath, RFC
 9535, is a future need only if a rule must range over an array; deferred.)
 
+### Reading a request
+
+Every layer is read with its own standard, and the request is forwarded in the
+form that was read, so the upstream acts on exactly what was decided:
+
+| Layer | Standard | Implementation |
+|---|---|---|
+| Path | RFC 3986 §6.2.2 normalization plus merged slashes (Envoy `normalize_path` + `merge_slashes`) | iri-string; the normalized path is decided on AND forwarded |
+| Encoded slash `%2F` / `%5C` | servers differ (Envoy leaves it per backend) | both readings decided, the stricter kept; forwarded as sent |
+| Content-Encoding | RFC 9110 (gzip, deflate, br, zstd) | hudsucker's decoder; forwarded decoded; another coding is 415 |
+| Query | WHATWG `application/x-www-form-urlencoded` | `form_urlencoded`; a parameter a var reads given twice is 400 |
+| JSON body | RFC 8259 with I-JSON (RFC 7493): UTF-8, no duplicate keys | serde_json with a duplicate-key check; invalid is 400 |
+| GraphQL | GraphQL spec (GetOperation, CollectFields, variable coercion) and GraphQL over HTTP | apollo-compiler parse + schema-free validation; 400 / 422 as a server answers |
+
+A refusal here is what a compliant server would answer too, so it never blocks
+a request that would have worked; deciding on a guess instead could let a
+request past the rule meant for it.
+
 ## `policy.toml` — the `when` predicate
 
 A rule gains ONE optional field, `when`, AND-combined with `match` and `body`:
@@ -117,11 +139,16 @@ when  = "vars.amount > 80"    # refinement: a large one asks EVERY time
 level = "ask-always"
 ```
 
-`when` grammar (v1): `vars.<name> <op> <literal>`, `op ∈ > < >= <= == !=`,
-literal is a number or a `"quoted string"`. The `vars.` prefix mirrors K8s
-ValidatingAdmissionPolicy's `variables.<name>` (and leaves room for future
-built-ins like `request.method`); it composes toward CEL if the grammar ever
-needs to grow, without a parser dependency today.
+`when` is a CEL expression (Common Expression Language, via cel-rust: the rule
+language of Kubernetes ValidatingAdmissionPolicy, Envoy RBAC and Google IAM
+conditions) over `vars`: `vars.amount > 80`, `double(vars.amount) > 100.0`,
+`vars.private == false || vars.visibility == 'public'`,
+`vars.fields.exists(f, f in ['serviceDelete', 'projectDelete'])`. Vars keep
+their JSON type (a body number is a number, a query parameter a string). The
+only free name is `vars`; a string literal is quoted. A rule fires only when
+its `when` evaluates to `true`; an undefined var, a type that doesn't compare,
+or a non-bool result means it does not match (P3). CEL's `||` and `&&` absorb
+an error the other side decides, so one undefined field doesn't hide another.
 
 Because rules resolve **most-restrictive-wins**, the two rules above need no
 special handling: `amount = 100` matches both → `ask-always` wins; `amount = 50`
@@ -207,14 +234,13 @@ Binding `raw` means an approved email cannot be swapped for a different one on
 replay. The `email` filter (console code, like git's `| basic`) decodes
 base64url→RFC822 into a legible card, the raw message under Advanced Details.
 
-### github — the opt-out baseline
+### github — mostly path-identified
 
-github's dangerous actions are identified by **path** (`DELETE /repos/*/*`,
+github's dangerous actions are mostly identified by **path** (`DELETE /repos/*/*`,
 `PUT /repos/*/*/collaborators/*`), which Phase 1 already binds and which the
-approve screen already shows legibly. So github needs **no** `[requests]` — it is
-the proof that the feature is opt-in and that a path-identified action needs
-nothing new. (The one body-shaped gate, `make-public`, keeps its existing `body`
-regex; migrating it to a `when` is possible but buys nothing here.)
+approve screen already shows legibly. The one body-shaped gate, `make-public`,
+reads the parsed body: `[requests.repo_settings]` exposes `/private` and
+`/visibility`, and the rule is `when = "vars.private == false || vars.visibility == 'public'"`.
 
 ## Verification
 
@@ -235,8 +261,9 @@ Enforced against every shipped service for free by the existing
 `compiled_services_pass_validator` test.
 
 **Cross-file `service.toml` × `policy.toml`** — `validate_service_policy(service,
-policy)` parses both and checks every rule `when`: it must `Condition::parse`,
-and its `vars.<name>` must be declared by some `[requests]` shape. Run over the
+policy)` parses both and checks every rule `when`: it must compile as CEL with
+`vars` its only free name, and every `vars.<name>` it reads must be declared and
+bound by each `[requests]` shape covering the rule. Run over the
 compiled pairs by the `compiled_policies_when_vars_are_declared` test — so if a
 future edit drops snaplii's `amount` var while a rule still says
 `vars.amount > 80`, the suite goes red. (`policy.toml` has no
@@ -270,11 +297,11 @@ re-prompt) or is a documented author responsibility, none is a silent bypass:
   Always keep a base rule (snaplii's `purchase → ask` under the
   `purchase-large → ask-always`). Verification requires a `when` var to be
   bound, but does not (cannot) prove a base rule exists.
-- **Parser differential.** The binding assumes Sprott's JSON parse equals the
-  upstream's. `serde_json` is duplicate-key-last-wins and lenient in ways a
-  given API may not share; a crafted body (`{"amount":180,"amount":80}`) could
-  bind/show one value while the upstream acts on another. This is the
-  proxy-vs-origin parsing class (cf. request smuggling); out of scope for v1.
+- **Parser differential.** The binding assumes Sprott reads a request as the
+  upstream does. Each layer is read with its standard's strict form and the
+  ambiguous cases are refused (a duplicate JSON key, a repeated query
+  parameter) or decided both ways (an encoded slash); what remains is an
+  upstream that departs from its own standard.
 - **Numeric canonicalization.** `80`, `80.0`, `8e1` compare equal to a `when`
   threshold but bind three different digest strings — so a replay that
   re-serializes the number differently re-prompts (fails safe, never
@@ -290,4 +317,3 @@ re-prompt) or is a documented author responsibility, none is a silent bypass:
   whitelist covers them. Shape is reserved.
 - **WYSIWYG consent transforms** (gmail base64url→RFC822 decode for display).
 - **JSONPath (RFC 9535)** multi-value addressing for array-ranging conditions.
-- **CEL** for `when` once the grammar outgrows `var op literal`.

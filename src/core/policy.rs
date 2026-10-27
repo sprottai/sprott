@@ -506,26 +506,27 @@ pub fn unenforceable_user_rule(
                 id, shape
             ));
         }
-        let Some(cond) = rule.when.as_deref().and_then(Condition::parse) else {
+        let Some(cond) = rule.when.as_deref().and_then(compiled_condition) else {
             continue; // an unparseable `when` never matches (P3)
         };
-        let var = cond.var_name();
-        // The declared fields the `when` can resolve to, by the same lookup
-        // evaluation uses (`extract_request_scope` inserts each var as `name`
-        // and as `<shape>.name`). None: it never resolves on this path.
-        let qualified = format!("{}.", shape);
-        let fields: Vec<&str> = [Some(var), var.strip_prefix(qualified.as_str())]
-            .into_iter()
-            .flatten()
-            .filter(|f| declared.iter().any(|d| d == f))
-            .collect();
-        if fields.iter().any(|f| !binds.iter().any(|b| b == f)) {
-            return Some(format!(
-                "this connection's policy rule '{}' gates on `vars.{}`, which the [requests.{}] \
-                 shape does not bind, so an approval could not hold it fixed; gate the rule on a \
-                 bound field instead",
-                id, var, shape
-            ));
+        for var in cond.var_names() {
+            // The declared fields the `when` can resolve to, by the same lookup
+            // evaluation uses (`extract_request_scope` inserts each var as
+            // `name` and as `<shape>.name`). None: it never resolves here.
+            let qualified = format!("{}.", shape);
+            let fields: Vec<&str> = [Some(var.as_str()), var.strip_prefix(qualified.as_str())]
+                .into_iter()
+                .flatten()
+                .filter(|f| declared.iter().any(|d| d == f))
+                .collect();
+            if fields.iter().any(|f| !binds.iter().any(|b| b == f)) {
+                return Some(format!(
+                    "this connection's policy rule '{}' gates on `vars.{}`, which the [requests.{}] \
+                     shape does not bind, so an approval could not hold it fixed; gate the rule on a \
+                     bound field instead",
+                    id, var, shape
+                ));
+            }
         }
     }
     None
@@ -690,138 +691,202 @@ fn specificity(rule: &PolicyRule) -> u32 {
 
 // ── `when` field conditions ──────────────────────────────────────────────────
 
-/// Extracted request variables, `var-name → value` (the value as a string: a
-/// JSON number renders canonically, a JSON string is itself, a query param is
-/// its raw value). Produced by the service layer from the matching `[requests]`
-/// shape (service.toml); consumed here to evaluate a rule's `when`. Both the
-/// bare name (`amount`) and, for a matched shape, the qualified name
-/// (`purchase.amount`) are inserted so a rule spanning several shapes can
-/// disambiguate. Empty when a request matched no shape.
-pub type VarMap = std::collections::HashMap<String, String>;
+/// Extracted request variables, `var-name → value` (the JSON value as read: a
+/// body field keeps its JSON type, a query param is a string, a GraphQL
+/// request's `fields` is a list of names). Produced by the service layer from
+/// the matching `[requests]` shape (service.toml); consumed here to evaluate a
+/// rule's `when`. Both the bare name (`amount`) and, for a matched shape, the
+/// qualified name (`purchase.amount`) are inserted so a rule spanning several
+/// shapes can disambiguate. Empty when a request matched no shape.
+pub type VarMap = std::collections::HashMap<String, serde_json::Value>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CmpOp {
-    Gt,
-    Lt,
-    Ge,
-    Le,
-    Eq,
-    Ne,
+/// A parsed `when` predicate: a CEL expression (the Common Expression
+/// Language, via cel-rust: the rule language of Kubernetes admission policies,
+/// Envoy RBAC and Google IAM conditions) over `vars`, e.g.
+/// `vars.amount > 100` or `vars.fields.exists(f, f in ["serviceDelete"])`. A
+/// var is `vars.<name>`, or `vars.<shape>.<name>` for one shape's var.
+///
+/// It decides a request only when it evaluates to `true`. Anything else (a
+/// var the request left undefined, a type that doesn't compare, a non-bool
+/// result) means the rule does not match (P3: the engine invents no
+/// decision). CEL's `||` and `&&` absorb an error the other side decides, so
+/// `vars.a == 1 || vars.b == 2` still fires on `b` when `a` is undefined.
+#[derive(Clone)]
+pub struct Condition {
+    program: std::sync::Arc<cel::Program>,
+    vars: Vec<String>,
 }
 
-/// A parsed `when` predicate: `vars.<name> <op> <literal>`. v1 grammar — one
-/// comparison, no boolean combinators (compose by writing separate rules, which
-/// resolve most-restrictive-wins). The `vars.` prefix mirrors K8s
-/// ValidatingAdmissionPolicy's `variables.<name>` and keeps room for future
-/// built-ins without a parser dependency.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Condition {
-    /// The var name with the `vars.` prefix stripped (may be qualified,
-    /// e.g. `purchase.amount`).
-    var: String,
-    op: CmpOp,
-    /// The literal: numeric if it parsed as one, else the raw (unquoted) string.
-    lit_num: Option<f64>,
-    lit_str: String,
+impl std::fmt::Debug for Condition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Condition").field("vars", &self.vars).finish()
+    }
 }
 
 impl Condition {
-    /// Parse `"vars.<name> <op> <literal>"`. Returns `None` for any malformed
-    /// input (no `vars.` prefix, unknown operator, empty operand) — build-time
-    /// verification rejects those, so at runtime `None` is treated as a
-    /// non-matching rule (fail-safe: an unparseable predicate never *grants*).
-    pub fn parse(s: &str) -> Option<Condition> {
-        let s = s.trim();
-        // Operators longest-first so `>=` isn't read as `>`.
-        const OPS: &[(&str, CmpOp)] = &[
-            (">=", CmpOp::Ge),
-            ("<=", CmpOp::Le),
-            ("==", CmpOp::Eq),
-            ("!=", CmpOp::Ne),
-            (">", CmpOp::Gt),
-            ("<", CmpOp::Lt),
-        ];
-        let (lhs, op, rhs) = OPS.iter().find_map(|(tok, op)| {
-            let idx = s.find(tok)?;
-            Some((s[..idx].trim(), *op, s[idx + tok.len()..].trim()))
-        })?;
-        let var = lhs.strip_prefix("vars.")?.trim();
-        if var.is_empty() || rhs.is_empty() {
-            return None;
+    /// Compile `s`. `Err` says why it is not a condition: CEL that doesn't
+    /// parse, no `vars.<name>` in it, or a name other than `vars` (a bare
+    /// word is a name in CEL; a string literal is quoted).
+    pub fn compile(s: &str) -> Result<Condition, String> {
+        let program = cel::Program::compile(s).map_err(|e| e.to_string())?;
+        let mut vars = Vec::new();
+        let mut unknown = Vec::new();
+        walk_names(program.expression(), &mut Vec::new(), &mut vars, &mut unknown);
+        if let Some(name) = unknown.first() {
+            return Err(format!(
+                "`{name}` is not a known name (a var is `vars.<name>`; quote a string literal)"
+            ));
         }
-        // A quoted literal is always a string; else try numeric, fall back to
-        // a bare string.
-        let (lit_num, lit_str) =
-            if let Some(inner) = rhs.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-                (None, inner.to_string())
-            } else {
-                (rhs.parse::<f64>().ok(), rhs.to_string())
-            };
-        Some(Condition {
-            var: var.to_string(),
-            op,
-            lit_num,
-            lit_str,
+        if vars.is_empty() {
+            return Err("it reads no `vars.<name>`".into());
+        }
+        vars.sort();
+        vars.dedup();
+        Ok(Condition {
+            program: std::sync::Arc::new(program),
+            vars,
         })
     }
 
-    /// The referenced var name (`vars.` already stripped; may be qualified
-    /// `shape.name`). Used by build-time verification to check membership in the
-    /// service's declared `[requests]` vars.
-    pub fn var_name(&self) -> &str {
-        &self.var
+    /// [`Self::compile`], for callers that only need to know it compiles.
+    pub fn parse(s: &str) -> Option<Condition> {
+        Condition::compile(s).ok()
     }
 
-    /// Why this condition could never decide a request, or `None`: a numeric
-    /// literal must be finite (`NaN`, `inf`, `1e400` compare as nothing
-    /// useful), and an ordering comparison needs a number (an ordering
-    /// against `80usd` or a quoted string is never true, see [`Self::eval`]).
-    pub fn never_fires(&self) -> Option<&'static str> {
-        match self.lit_num {
-            Some(n) if !n.is_finite() => Some("its literal is not a finite number"),
-            None if matches!(self.op, CmpOp::Gt | CmpOp::Lt | CmpOp::Ge | CmpOp::Le) => {
-                Some("an ordering comparison needs a numeric literal")
+    /// The vars it reads (`vars.` stripped; may be qualified `shape.name`).
+    /// Used by build-time verification to check membership in the service's
+    /// declared `[requests]` vars.
+    pub fn var_names(&self) -> &[String] {
+        &self.vars
+    }
+
+    /// Evaluate against the request vars: `true` only for a CEL `true`.
+    pub fn eval(&self, vars: &VarMap) -> bool {
+        // Only the vars this condition reads go into its context (a GraphQL
+        // `request` can be large). `vars.<shape>.<name>` reads a nested map,
+        // so a qualified key nests.
+        let reads = |k: &str| {
+            self.vars.iter().any(|v| {
+                v == k
+                    || v.strip_prefix(k).is_some_and(|r| r.starts_with('.'))
+                    || k.strip_prefix(v.as_str()).is_some_and(|r| r.starts_with('.'))
+            })
+        };
+        let mut tree = serde_json::Map::new();
+        let mut keys: Vec<&String> = vars.keys().filter(|k| reads(k)).collect();
+        keys.sort();
+        for k in keys {
+            match k.split_once('.') {
+                None => {
+                    tree.entry(k.clone()).or_insert_with(|| vars[k].clone());
+                }
+                Some((shape, name)) => {
+                    let slot = tree
+                        .entry(shape.to_string())
+                        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+                    if !slot.is_object() {
+                        *slot = serde_json::Value::Object(Default::default());
+                    }
+                    if let Some(obj) = slot.as_object_mut() {
+                        obj.insert(name.to_string(), vars[k].clone());
+                    }
+                }
             }
+        }
+        let mut ctx = cel::Context::default();
+        if ctx.add_variable("vars", serde_json::Value::Object(tree)).is_err() {
+            return false;
+        }
+        matches!(self.program.execute(&ctx), Ok(cel::Value::Bool(true)))
+    }
+}
+
+/// Collect the `vars.<a>[.<b>]` a CEL expression reads, and any other free
+/// name (a comprehension's own variables are bound inside it).
+fn walk_names(
+    e: &cel::IdedExpr,
+    bound: &mut Vec<String>,
+    vars: &mut Vec<String>,
+    unknown: &mut Vec<String>,
+) {
+    use cel::common::ast::{EntryExpr, Expr};
+    let vars_path = |e: &cel::IdedExpr| -> Option<String> {
+        let Expr::Select(outer) = &e.expr else { return None };
+        match &outer.operand.expr {
+            Expr::Ident(id) if id == "vars" => Some(outer.field.clone()),
+            Expr::Select(inner) => match &inner.operand.expr {
+                Expr::Ident(id) if id == "vars" => Some(format!("{}.{}", inner.field, outer.field)),
+                _ => None,
+            },
             _ => None,
         }
+    };
+    if let Some(path) = vars_path(e) {
+        vars.push(path);
+        return;
     }
-
-    /// Evaluate against the request vars. An undefined var → `false` (P3: the
-    /// rule simply doesn't match; the engine invents no decision). Ordering
-    /// comparisons need both sides numeric; equality falls back to string.
-    pub fn eval(&self, vars: &VarMap) -> bool {
-        let Some(value) = vars.get(&self.var) else {
-            return false;
-        };
-        // Trim so a padded amount (`"100 "`, `"\t80"`) that the upstream still
-        // reads as a number can't slip under a threshold gate by failing our
-        // parse; reject non-finite (NaN/inf) so exotic encodings don't compare
-        // in surprising ways. A value that still isn't a finite number stays
-        // `None` → an ordering condition is false (the base rule keeps gating).
-        let value_num = value.trim().parse::<f64>().ok().filter(|n| n.is_finite());
-        match self.op {
-            CmpOp::Eq => match self.lit_num {
-                Some(n) => value_num == Some(n),
-                None => value == &self.lit_str,
-            },
-            CmpOp::Ne => match self.lit_num {
-                Some(n) => value_num != Some(n),
-                None => value != &self.lit_str,
-            },
-            // Ordering: only meaningful when both sides are numbers. A
-            // non-numeric value (or a non-numeric literal) can't satisfy `>`,
-            // so the condition is false — never an error, never a grant.
-            CmpOp::Gt | CmpOp::Lt | CmpOp::Ge | CmpOp::Le => match (value_num, self.lit_num) {
-                (Some(v), Some(n)) => match self.op {
-                    CmpOp::Gt => v > n,
-                    CmpOp::Lt => v < n,
-                    CmpOp::Ge => v >= n,
-                    CmpOp::Le => v <= n,
-                    _ => unreachable!(),
-                },
-                _ => false,
-            },
+    // CEL's type denotations (`type(x) == string`) are names too.
+    const TYPES: &[&str] = &[
+        "int", "uint", "double", "bool", "string", "bytes", "list", "map", "null_type", "type",
+    ];
+    match &e.expr {
+        Expr::Ident(name) => {
+            if name != "vars" && !bound.contains(name) && !TYPES.contains(&name.as_str()) {
+                unknown.push(name.clone());
+            }
         }
+        // `vars["x"]` reads a var the checks can't name: only `vars.x` is.
+        Expr::Call(c)
+            if (c.func_name == "_[_]" || c.func_name == "_[?_]")
+                && c.args.first().is_some_and(|a| match &a.expr {
+                    Expr::Ident(id) => id == "vars",
+                    Expr::Select(sel) => matches!(&sel.operand.expr, Expr::Ident(id) if id == "vars"),
+                    _ => false,
+                }) =>
+        {
+            unknown.push("vars[…]".into());
+        }
+        Expr::Select(s) => walk_names(&s.operand, bound, vars, unknown),
+        Expr::Call(c) => {
+            if let Some(t) = &c.target {
+                walk_names(t, bound, vars, unknown);
+            }
+            for a in &c.args {
+                walk_names(a, bound, vars, unknown);
+            }
+        }
+        Expr::Comprehension(c) => {
+            walk_names(&c.iter_range, bound, vars, unknown);
+            let n = bound.len();
+            bound.push(c.iter_var.clone());
+            bound.extend(c.iter_var2.clone());
+            bound.push(c.accu_var.clone());
+            for x in [&c.accu_init, &c.loop_cond, &c.loop_step, &c.result] {
+                walk_names(x, bound, vars, unknown);
+            }
+            bound.truncate(n);
+        }
+        Expr::List(l) => {
+            for x in &l.elements {
+                walk_names(x, bound, vars, unknown);
+            }
+        }
+        Expr::Map(m) => {
+            for entry in &m.entries {
+                if let EntryExpr::MapEntry(me) = &entry.expr {
+                    walk_names(&me.key, bound, vars, unknown);
+                    walk_names(&me.value, bound, vars, unknown);
+                }
+            }
+        }
+        Expr::Struct(st) => {
+            for entry in &st.entries {
+                if let EntryExpr::StructField(f) = &entry.expr {
+                    walk_names(&f.value, bound, vars, unknown);
+                }
+            }
+        }
+        Expr::Literal(_) | Expr::Unspecified => {}
     }
 }
 
@@ -840,6 +905,26 @@ pub(crate) fn pattern_matches(pattern: &str, method: &str, path: &str) -> bool {
         }
     }
     path_matches(rule_path, path_no_query)
+}
+
+/// The text a rule's `body` regex is matched against: the body as sent, and,
+/// when it is JSON, also its decoded form (parsed and written back out), on a
+/// line of its own. A JSON string can spell any character as an escape, and
+/// the upstream acts on the decoded value, so a rule must see that value too.
+/// A rule fires when either form matches.
+pub fn policy_body_view(raw: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    // Without a backslash there is no escape to decode.
+    if !raw.contains('\\') {
+        return Cow::Borrowed(raw);
+    }
+    match serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| serde_json::to_string(&v).ok())
+    {
+        Some(decoded) if decoded != raw => Cow::Owned(format!("{raw}\n{decoded}")),
+        _ => Cow::Borrowed(raw),
+    }
 }
 
 /// Check if a single rule matches the given request.
@@ -882,12 +967,29 @@ fn matches_rule(
     // `when` field condition: an unparseable predicate or an undefined/failing
     // var means the rule does NOT match (P3 — never fabricate a decision).
     if let Some(ref cond) = rule.when {
-        match Condition::parse(cond) {
+        match compiled_condition(cond) {
             Some(c) if c.eval(vars) => {}
             _ => return false,
         }
     }
     true
+}
+
+/// A `when` compiled once per distinct text: a policy's rules are few and
+/// change rarely, and every brokered request evaluates them.
+fn compiled_condition(text: &str) -> Option<Condition> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<Condition>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(text).cloned()) {
+        return hit;
+    }
+    let compiled = Condition::parse(text);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(text.to_string(), compiled.clone());
+    }
+    compiled
 }
 
 // ── Policy Evaluation ──────────────────────────────────────────────────────────
@@ -1939,36 +2041,51 @@ mod tests {
     // ── `when` field conditions (Phase 2) ────────────────────────────────────
     #[test]
     fn condition_parses_and_evaluates() {
+        use serde_json::json;
         let mut vars = VarMap::new();
-        vars.insert("amount".into(), "100".into());
-        vars.insert("merchant".into(), "acme".into());
+        vars.insert("amount".into(), json!(100));
+        vars.insert("merchant".into(), json!("acme"));
+        let eval = |w: &str, v: &VarMap| Condition::parse(w).unwrap().eval(v);
 
-        assert!(Condition::parse("vars.amount > 80").unwrap().eval(&vars));
-        assert!(!Condition::parse("vars.amount > 200").unwrap().eval(&vars));
-        assert!(Condition::parse("vars.amount >= 100").unwrap().eval(&vars));
-        assert!(Condition::parse("vars.amount <= 100").unwrap().eval(&vars));
-        assert!(Condition::parse(r#"vars.merchant == "acme""#)
-            .unwrap()
-            .eval(&vars));
-        assert!(Condition::parse(r#"vars.merchant != "evil""#)
-            .unwrap()
-            .eval(&vars));
+        assert!(eval("vars.amount > 80", &vars));
+        assert!(!eval("vars.amount > 200", &vars));
+        assert!(eval("vars.amount >= 100", &vars));
+        assert!(eval("vars.amount <= 100", &vars));
+        assert!(eval(r#"vars.merchant == "acme""#, &vars));
+        assert!(eval("vars.merchant != 'evil'", &vars));
         // Undefined var → false (P3), never a panic.
-        assert!(!Condition::parse("vars.missing > 0").unwrap().eval(&vars));
-        // A padded numeric string still compares (can't evade a threshold by
-        // whitespace); non-finite never satisfies an ordering.
+        assert!(!eval("vars.missing > 0", &vars));
+        // `||` still decides on the side it can read.
+        assert!(eval("vars.missing > 0 || vars.amount > 80", &vars));
+        // A type that doesn't compare → false, not an error.
+        assert!(!eval("vars.merchant > 0", &vars));
+        // double() reads a number sent as a string.
+        let mut text = VarMap::new();
+        text.insert("amount".into(), json!("150"));
+        assert!(!eval("vars.amount > 100", &text));
+        assert!(eval("double(vars.amount) > 100.0", &text));
+        // A qualified var reads one shape's value.
+        let mut q = VarMap::new();
+        q.insert("purchase.amount".into(), json!(5));
+        q.insert("amount".into(), json!(5));
+        assert!(eval("vars.purchase.amount == 5", &q));
+        // Malformed or not about vars → no condition (build-time rejects;
+        // runtime treats it as a non-match).
+        assert!(Condition::parse("amount > 80").is_none());
+        assert!(Condition::parse("vars.amount ~ 80").is_none());
+        assert!(Condition::parse("1 == 1").is_none());
+        assert!(Condition::parse("vars.amount == bare").is_none());
+        assert!(Condition::parse("vars['amount'] > 1").is_none());
+        // A type test, and a number sent as text read either way.
+        let c = Condition::parse("!(type(vars.amount) in [int, uint, double]) || vars.amount > 100").unwrap();
+        assert!(c.eval(&text));
         let mut padded = VarMap::new();
-        padded.insert("amount".into(), " 100 ".into());
-        assert!(Condition::parse("vars.amount > 80").unwrap().eval(&padded));
-        let mut naan = VarMap::new();
-        naan.insert("amount".into(), "NaN".into());
-        assert!(!Condition::parse("vars.amount > 80").unwrap().eval(&naan));
-        // Ordering against a non-numeric value → false, not an error.
-        assert!(!Condition::parse("vars.merchant > 0").unwrap().eval(&vars));
-        // Malformed → None (build-time rejects; runtime treats as non-match).
-        assert!(Condition::parse("amount > 80").is_none()); // no vars. prefix
-        assert!(Condition::parse("vars.amount ~ 80").is_none()); // unknown op
-        assert!(Condition::parse("vars. > 80").is_none()); // empty var
+        padded.insert("amount".into(), json!(" 500"));
+        assert!(c.eval(&padded));
+        let mut listed = VarMap::new();
+        listed.insert("amount".into(), json!([500]));
+        assert!(c.eval(&listed));
+        assert!(!c.eval(&vars), "the number 100 is not over 100");
     }
 
     #[test]
@@ -1997,9 +2114,9 @@ mod tests {
             },
         ];
         let mut big = VarMap::new();
-        big.insert("amount".into(), "100".into());
+        big.insert("amount".into(), serde_json::json!(100));
         let mut small = VarMap::new();
-        small.insert("amount".into(), "50".into());
+        small.insert("amount".into(), serde_json::json!(50));
 
         assert_eq!(
             evaluate(
@@ -2042,5 +2159,30 @@ mod tests {
             ),
             AccessLevel::Ask
         );
+    }
+
+    #[test]
+    fn body_rules_also_see_the_decoded_json() {
+        let view = policy_body_view(r#"{"query":"mutation { service\u0044elete(id: \"x\") }"}"#);
+        let p = BodyPattern::compile("serviceDelete").unwrap();
+        assert_eq!(p.is_match(&view), Some(true));
+        let gh = BodyPattern::compile(r#""private"\s*:\s*false"#).unwrap();
+        assert_eq!(gh.is_match(&policy_body_view(r#"{"priv\u0061te": false}"#)), Some(true));
+        // Plain JSON and non-JSON pass through unchanged.
+        assert!(matches!(policy_body_view(r#"{"a":1}"#), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(policy_body_view("not json"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn when_tests_a_list_var_with_cel_macros() {
+        let c = Condition::parse("vars.fields.exists(f, f in ['serviceDelete', 'projectDelete'])").unwrap();
+        let mut vars = VarMap::new();
+        vars.insert("fields".into(), serde_json::json!(["serviceInstanceRedeploy", "projectDelete"]));
+        assert!(c.eval(&vars));
+        vars.insert("fields".into(), serde_json::json!(["serviceDeleteX", "variableUpsert"]));
+        assert!(!c.eval(&vars));
+        assert!(!c.eval(&VarMap::new()), "undefined var: no match");
+        // The macro's own variable is not a free name.
+        assert!(Condition::parse("vars.fields.exists(f, f == g)").is_none());
     }
 }

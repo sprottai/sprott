@@ -3435,7 +3435,7 @@ mod tests {
         let decide = |method: &str, path: &str, amount: Option<&str>| {
             let mut vars = crate::core::policy::VarMap::new();
             if let Some(a) = amount {
-                vars.insert("amount".into(), a.into());
+                vars.insert("amount".into(), serde_json::from_str(a).unwrap());
             }
             state
                 .evaluate_request_decision(
@@ -3600,7 +3600,7 @@ scope = ["amount"]
         )
         .unwrap();
         let rs = def
-            .extract_request_scope("POST", "/buy", Some("force=1"), Some(r#"{"amount":5}"#))
+            .extract_request_scope("POST", "/buy", Some("force=1"), Some(br#"{"amount":5}"#))
             .expect("shape matches");
         let rule = |when: Option<&str>, body: Option<&str>| RuleConfig {
             match_pattern: Some("POST /buy".into()),

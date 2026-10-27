@@ -36,11 +36,13 @@ level = "ask"
 
 # Over the small-value ceiling, confirm every spend, bound to amount + merchant.
 # Composes by most-restrictive-wins (a purchase over the threshold matches both
-# rules → ask-always beats ask). `vars.amount` is the bound field; an undefined
-# amount → this rule doesn't fire and the base `ask` still gates (never a bypass).
+# rules → ask-always beats ask). `vars.amount` is the bound field. An amount
+# that isn't a JSON number is confirmed every time too: a server may read
+# " 500", "1_500" or [500] as a number this rule can't. An undefined amount → this rule doesn't fire and
+# the base `ask` still gates (never a bypass).
 [[rule]]
 id = "purchase-large"
 label = "Confirm a purchase over $100 (bound to amount + merchant)"
 match = "POST /v2/purchase"
-when = "vars.amount > 100"
+when = "!(type(vars.amount) in [int, uint, double]) || vars.amount > 100"
 level = "ask-always"

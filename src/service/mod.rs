@@ -7,8 +7,10 @@
 /// routing/transport is declared: the phantom is the sole intent carrier and
 /// the request already carries the real upstream URL.
 pub mod gate;
+pub mod graphql;
 pub mod limits;
 pub mod source;
+pub mod strict_json;
 
 use crate::auth::oauth2::OAuthStyle;
 use std::collections::HashMap;
@@ -168,40 +170,53 @@ impl ServiceDef {
     /// declared vars — the join point that feeds both a policy `when` and the
     /// approval binding/consent. `None` when no shape matches (⇒ no vars, an
     /// empty scope: the Phase-1 path-only grant). Selection is deterministic
-    /// (see below); shapes should not overlap. Body is parsed as JSON
-    /// once; a non-JSON body or a pointer that misses leaves that var undefined
-    /// (per P3, an undefined var makes a `when` simply not fire, and it is
-    /// omitted from the bound set).
+    /// (see below); shapes should not overlap.
+    ///
+    /// Each source is read the way its standard says a server reads it: the
+    /// body as strict JSON (strict_json.rs), the query as
+    /// `application/x-www-form-urlencoded`, a GraphQL body as the operation the
+    /// server runs (graphql.rs). A source a var needs that can't be read that
+    /// way sets `unreadable`, and the request is refused with that status: a
+    /// server would refuse it too, and deciding on a guess could let it past a
+    /// rule. A value that is simply absent leaves its var undefined (per P3,
+    /// an undefined var makes a `when` simply not fire, and it is omitted from
+    /// the bound set).
     pub fn extract_request_scope(
         &self,
         method: &str,
         path: &str,
         query: Option<&str>,
-        body: Option<&str>,
+        body: Option<&[u8]>,
     ) -> Option<RequestScope> {
-        // Deterministic selection: `requests` is a HashMap, so iterate its keys
-        // in a STABLE (sorted) order — otherwise two overlapping shapes would
-        // pick a random winner per process, making the bound digest unstable
-        // (a legit replay could hash a different shape than approve did →
-        // spurious re-prompt). Shapes should not overlap; this makes "they
-        // shouldn't, but if they do" harmless and repeatable.
-        let mut names: Vec<&String> = self.requests.keys().collect();
-        names.sort();
-        let (shape_name, shape) = names.into_iter().find_map(|n| {
-            let s = &self.requests[n];
-            s.match_pattern
-                .iter()
-                .any(|p| crate::core::policy::pattern_matches(p, method, path))
-                .then_some((n, s))
-        })?;
-        let body_json: Option<serde_json::Value> = body.and_then(|b| serde_json::from_str(b).ok());
-        let mut vars = crate::core::policy::VarMap::new();
-        for (name, def) in &shape.vars {
-            if let Some(v) = def.resolve(body_json.as_ref(), query) {
-                // Bare name for the common single-shape case; qualified
-                // `shape.name` so a rule spanning several shapes can disambiguate.
-                vars.insert(format!("{}.{}", shape_name, name), v.clone());
-                vars.insert(name.clone(), v);
+        let (shape_name, shape) = self.request_shape(method, path)?;
+        let mut declared: Vec<String> = shape.vars.keys().cloned().collect();
+        declared.sort();
+        let mut scope = RequestScope {
+            consent: shape.consent.clone(),
+            shape: shape_name.clone(),
+            declared,
+            binds: shape.scope.clone(),
+            ..Default::default()
+        };
+        let mut reads = Reads::new(body, query);
+        // Sorted, so which unreadable source is reported is stable.
+        let mut defs: Vec<(&String, &VarDef)> = shape.vars.iter().collect();
+        defs.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, def) in defs {
+            match def.resolve(&mut reads) {
+                Ok(Some(v)) => {
+                    // Bare name for the common single-shape case; qualified
+                    // `shape.name` so a rule spanning several shapes can
+                    // disambiguate.
+                    scope.vars.insert(format!("{}.{}", shape_name, name), v.clone());
+                    scope.vars.insert(name.clone(), v);
+                }
+                Ok(None) => {}
+                Err(why) => {
+                    scope.vars.clear();
+                    scope.unreadable = Some(why);
+                    return Some(scope);
+                }
             }
         }
         // The bound subset: scope vars that actually resolved, sorted for a
@@ -211,21 +226,34 @@ impl ServiceDef {
         // otherwise it would bloat the op that travels the approval relay
         // (approve.rs would 413). approve and redeem apply the SAME cap, so the
         // grant identity is unchanged; only the display degrades to a summary.
-        let mut bound: Vec<(String, String)> = shape
+        scope.bound = shape
             .scope
             .iter()
-            .filter_map(|k| vars.get(k).map(|v| (k.clone(), cap_bound_value(v))))
+            .filter_map(|k| {
+                let v = json_scalar_to_string(scope.vars.get(k)?)?;
+                Some((k.clone(), cap_bound_value(&v)))
+            })
             .collect();
-        bound.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut declared: Vec<String> = shape.vars.keys().cloned().collect();
-        declared.sort();
-        Some(RequestScope {
-            vars,
-            bound,
-            consent: shape.consent.clone(),
-            shape: shape_name.clone(),
-            declared,
-            binds: shape.scope.clone(),
+        scope.bound.sort_by(|a, b| a.0.cmp(&b.0));
+        Some(scope)
+    }
+
+    /// The `[requests]` shape a request on `method` + `path` matches, with its
+    /// name. Deterministic: `requests` is a HashMap, so keys are tried in a
+    /// STABLE (sorted) order. Otherwise two overlapping shapes would pick a
+    /// random winner per process, making the bound digest unstable (a legit
+    /// replay could hash a different shape than approve did → spurious
+    /// re-prompt). Shapes should not overlap; this makes "they shouldn't, but
+    /// if they do" harmless and repeatable.
+    pub fn request_shape(&self, method: &str, path: &str) -> Option<(&String, &RequestShape)> {
+        let mut names: Vec<&String> = self.requests.keys().collect();
+        names.sort();
+        names.into_iter().find_map(|n| {
+            let s = &self.requests[n];
+            s.match_pattern
+                .iter()
+                .any(|p| crate::core::policy::pattern_matches(p, method, path))
+                .then_some((n, s))
         })
     }
 
@@ -529,7 +557,9 @@ pub struct RequestShape {
     )]
     pub match_pattern: Vec<String>,
     /// `name → address`. A bare string addresses a body JSON Pointer; the table
-    /// form `{ in = "query", at = "<param>" }` addresses a query parameter.
+    /// form `{ in = "query", at = "<param>" }` addresses a query parameter, and
+    /// `{ in = "graphql", at = "request" | "calls" | "fields" }` reads the body
+    /// as the GraphQL operation a server would run (graphql.rs).
     #[serde(default)]
     pub vars: HashMap<String, VarDef>,
     /// The subset of `vars` whose VALUES bind the grant identity. Absent/empty ⇒
@@ -600,7 +630,15 @@ pub fn consent_tokens(template: &str) -> Vec<String> {
 pub enum VarLoc {
     Body,
     Query,
+    /// The body read as the GraphQL operation a server would run: `at` is
+    /// `request` (every top-level call with its arguments, canonical JSON: what
+    /// an approval binds), `calls` (the same, shortened for a person to read)
+    /// or `fields` (the list of called field names).
+    Graphql,
 }
+
+/// The `at` values a `graphql` var may take.
+pub const GRAPHQL_AT: &[&str] = &["request", "calls", "fields"];
 
 /// A var's address into the request. Untagged: a bare string is the common
 /// case (a body JSON Pointer); the table form spells the location out.
@@ -624,38 +662,132 @@ pub struct VarAt {
 }
 
 impl VarDef {
-    /// Resolve this var's value (as a string) from the parsed body / raw query.
-    /// `None` = absent / unparseable (an undefined var).
-    fn resolve(&self, body: Option<&serde_json::Value>, query: Option<&str>) -> Option<String> {
+    /// Resolve this var's value, keeping its JSON type. `Ok(None)` = absent
+    /// (an undefined var; a JSON null too); `Err` = its source can't be read
+    /// the standard way.
+    fn resolve(&self, reads: &mut Reads<'_>) -> Result<Option<serde_json::Value>, Unreadable> {
+        use serde_json::Value as Json;
         match self {
-            VarDef::BodyPointer(ptr) => from_body(body, ptr),
-            VarDef::Located(VarAt {
+            VarDef::BodyPointer(ptr)
+            | VarDef::Located(VarAt {
                 location: VarLoc::Body,
-                at,
-            }) => from_body(body, at),
+                at: ptr,
+            }) => Ok(reads
+                .json()?
+                .and_then(|b| b.pointer(ptr))
+                .filter(|v| !v.is_null())
+                .cloned()),
             VarDef::Located(VarAt {
                 location: VarLoc::Query,
                 at,
-            }) => from_query(query, at),
+            }) => Ok(reads.query_param(at)?.map(Json::String)),
+            VarDef::Located(VarAt {
+                location: VarLoc::Graphql,
+                at,
+            }) => {
+                let Some(op) = reads.graphql()? else {
+                    return Ok(None);
+                };
+                Ok(match at.as_str() {
+                    "request" => Some(Json::String(op.request_var())),
+                    "calls" => Some(Json::String(op.calls_var(BOUND_VALUE_CAP))),
+                    "fields" => Some(Json::from(op.fields())),
+                    _ => None,
+                })
+            }
         }
     }
 }
 
-fn from_body(body: Option<&serde_json::Value>, ptr: &str) -> Option<String> {
-    json_scalar_to_string(body?.pointer(ptr)?)
+/// A request a shape needs to read but can't, the way a server would refuse
+/// it: the HTTP status (400 unreadable, 422 a GraphQL document that fails
+/// validation) and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unreadable {
+    pub status: u16,
+    pub message: String,
 }
 
-fn from_query(query: Option<&str>, name: &str) -> Option<String> {
-    let urldecode = |s: &str| {
-        urlencoding::decode(s)
-            .map(|c| c.into_owned())
-            .unwrap_or_else(|_| s.to_string())
-    };
-    query?.split('&').find_map(|pair| {
-        let mut it = pair.splitn(2, '=');
-        let k = it.next()?;
-        (urldecode(k) == name).then(|| urldecode(it.next().unwrap_or("")))
-    })
+impl From<graphql::Refusal> for Unreadable {
+    fn from(r: graphql::Refusal) -> Self {
+        Unreadable {
+            status: r.status,
+            message: r.message,
+        }
+    }
+}
+
+/// One request's sources, each parsed at most once and only when a var asks.
+struct Reads<'a> {
+    body: Option<&'a [u8]>,
+    query: Option<&'a str>,
+    json: Option<Result<Option<serde_json::Value>, Unreadable>>,
+    gql: Option<Result<Option<graphql::Operation>, Unreadable>>,
+}
+
+impl<'a> Reads<'a> {
+    fn new(body: Option<&'a [u8]>, query: Option<&'a str>) -> Self {
+        Reads {
+            body,
+            query,
+            json: None,
+            gql: None,
+        }
+    }
+
+    /// The body as strict JSON; `None` for an empty body (nothing to read).
+    fn json(&mut self) -> Result<Option<&serde_json::Value>, Unreadable> {
+        let body = self.body;
+        self.json
+            .get_or_insert_with(|| match body {
+                Some(b) if !b.iter().all(u8::is_ascii_whitespace) => strict_json::parse(b)
+                    .map(Some)
+                    .map_err(|e| Unreadable {
+                        status: 400,
+                        message: format!("the request body is not valid JSON: {e}"),
+                    }),
+                _ => Ok(None),
+            })
+            .as_ref()
+            .map(Option::as_ref)
+            .map_err(Clone::clone)
+    }
+
+    /// The body as the GraphQL operation a server would run.
+    fn graphql(&mut self) -> Result<Option<&graphql::Operation>, Unreadable> {
+        if self.gql.is_none() {
+            let read = match self.json() {
+                Ok(Some(body)) => graphql::read(body).map(Some).map_err(Unreadable::from),
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            };
+            self.gql = Some(read);
+        }
+        self.gql
+            .as_ref()
+            .expect("set above")
+            .as_ref()
+            .map(Option::as_ref)
+            .map_err(Clone::clone)
+    }
+
+    /// A query parameter, decoded as `application/x-www-form-urlencoded`
+    /// (WHATWG URL). Given twice it is ambiguous (servers differ on which one
+    /// counts), so it is refused.
+    fn query_param(&self, name: &str) -> Result<Option<String>, Unreadable> {
+        let Some(q) = self.query else {
+            return Ok(None);
+        };
+        let mut found = url::form_urlencoded::parse(q.as_bytes()).filter(|(k, _)| k == name);
+        let first = found.next().map(|(_, v)| v.into_owned());
+        if found.next().is_some() {
+            return Err(Unreadable {
+                status: 400,
+                message: format!("the query parameter {name} is given more than once"),
+            });
+        }
+        Ok(first)
+    }
 }
 
 /// A JSON value → the string used for `when` comparison and grant binding. A
@@ -689,6 +821,9 @@ pub struct RequestScope {
     /// The matched shape's `scope`: the var names whose values bind an
     /// approval of a request on this path.
     pub binds: Vec<String>,
+    /// Set when a source a var needs can't be read the standard way: the
+    /// request is refused with this status before policy.
+    pub unreadable: Option<Unreadable>,
 }
 
 impl RequestScope {
@@ -702,7 +837,7 @@ impl RequestScope {
 /// that carries it (through the approval relay) stays small. 8 KiB keeps a
 /// normal email/JSON field verbatim (the console renders it legibly) while a
 /// message with a big attachment degrades to a summary instead of 413-ing.
-const BOUND_VALUE_CAP: usize = 8 * 1024;
+pub(crate) const BOUND_VALUE_CAP: usize = 8 * 1024;
 
 /// Cap a bound value: verbatim if small, else `sha256:<hex>#<len>` — applied
 /// identically at op-create AND at redeem, so the grant identity is stable; the
@@ -2132,13 +2267,19 @@ secrets = ["GITHUB_TOKEN"]
             .expect("railway policy.toml must parse and yield rules")
             .to_vec();
         let policy = Policy::default();
+        let def = r.get("railway").expect("railway service");
         let eval = |body: &str| {
-            // The whole API is one POST endpoint; the mutation name lives in the body.
+            // The whole API is one POST endpoint; the mutation name lives in the
+            // body and reaches policy as `vars.fields` through [requests.graphql].
+            let rs = def
+                .extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
+                .expect("the graphql shape covers every POST");
+            assert!(rs.unreadable.is_none(), "unreadable: {body}");
             evaluate(
                 "POST",
                 "/graphql/v2",
                 Some(body),
-                &crate::core::policy::VarMap::new(),
+                &rs.vars,
                 Some(&rules),
                 None,
                 &policy,
@@ -2202,6 +2343,177 @@ secrets = ["GITHUB_TOKEN"]
             eval(r#"{"query":"mutation { sshPublicKeyCreate(input: {}) }"}"#),
             AccessLevel::AskAlways
         );
+        // The field is read from the parsed request, so an alias, a fragment,
+        // a JSON escape or a second call can't hide it.
+        for hidden in [
+            r#"{"query":"mutation { x: serviceDelete(id: \"s\") }"}"#,
+            r#"{"query":"mutation { ...F } fragment F on Mutation { serviceDelete(id: \"s\") }"}"#,
+            r#"{"query":"mutation { service\u0044elete(id: \"s\") }"}"#,
+            r#"{"query":"mutation { serviceInstanceRedeploy(serviceId: \"a\") serviceDelete(id: \"s\") }"}"#,
+            r#"{"query":"mutation D($i: String!) { serviceDelete(id: $i) }","variables":{"i":"s"}}"#,
+        ] {
+            assert_eq!(eval(hidden), AccessLevel::AskAlways, "{hidden}");
+        }
+        // A name in a comment or a string is not a call.
+        assert_eq!(
+            eval(r##"{"query":"# serviceDelete\nmutation { variableUpsert(input: {name: \"serviceDelete\"}) }"}"##),
+            AccessLevel::Allow
+        );
+    }
+
+    /// Evaluate a compiled service's default policy on one request, with the
+    /// vars its `[requests]` shape reads.
+    fn eval_compiled(service: &str, method: &str, path: &str, body: &str) -> crate::core::policy::AccessLevel {
+        use crate::core::policy::{evaluate, Policy};
+        let r = ServiceRegistry::load();
+        let rules = r.default_policy_rules(service).expect("policy").to_vec();
+        let def = r.get(service).expect("service");
+        let vars = def
+            .extract_request_scope(method, path, None, Some(body.as_bytes()))
+            .map(|rs| {
+                assert!(rs.unreadable.is_none(), "unreadable: {body}");
+                rs.vars
+            })
+            .unwrap_or_default();
+        evaluate(method, path, Some(body), &vars, Some(&rules), None, &Policy::default(), &["dev".into()])
+    }
+
+    #[test]
+    fn compiled_github_make_public_reads_the_visibility_fields() {
+        use crate::core::policy::AccessLevel;
+        let eval = |body: &str| eval_compiled("github", "PATCH", "/repos/o/r", body);
+        for public in [
+            r#"{"private": false}"#,
+            r#"{"visibility": "public"}"#,
+            r#"{"name": "x", "priv\u0061te": false}"#,
+        ] {
+            assert_eq!(eval(public), AccessLevel::AskAlways, "{public}");
+        }
+        for routine in [r#"{"private": true}"#, r#"{"description": "private: false"}"#, r#"{"visibility": "internal"}"#] {
+            assert_eq!(eval(routine), AccessLevel::Allow, "{routine}");
+        }
+    }
+
+    /// Every Railway mutation that deletes, mints a credential or changes who
+    /// can get in is gated; routine ones with the same words ride the floor.
+    /// Names from introspection of backboard.railway.com (2026-10-27).
+    #[test]
+    fn compiled_railway_policy_classifies_the_consequential_mutations() {
+        use crate::core::policy::AccessLevel;
+        let eval = |field: &str| {
+            eval_compiled(
+                "railway",
+                "POST",
+                "/graphql/v2",
+                &serde_json::json!({ "query": format!("mutation {{ {field} }}") }).to_string(),
+            )
+        };
+        for gated in [
+            "workspaceDelete", "projectDelete", "projectScheduleDelete", "projectScheduleDeleteForce",
+            "serviceDelete", "environmentDelete", "volumeDelete", "volumeInstanceBackupDelete",
+            "volumeInstanceBackupRestore", "signalDelete", "userDelete", "apiTokenCreate",
+            "projectTokenCreate", "clearanceTokenCreate", "projectMemberAdd", "projectMemberRemove",
+            "projectLeave", "workspaceUserRemove", "workspaceLeave", "workspaceInviteCodeUse",
+            "inviteCodeUse", "accessGroupUpdate", "accessGroupMemberRemove", "twoFactorInfoCreate",
+            "databasePasswordReset", "bucketCredentialsReset", "usageLimitRemove",
+        ] {
+            assert_eq!(eval(gated), AccessLevel::AskAlways, "{gated}");
+        }
+        for routine in [
+            "serviceInstanceRedeploy", "variableUpsert", "variableDelete", "customDomainDelete",
+            "deploymentRemove", "apiTokenDelete", "projectTokenDelete", "projectScheduleDeleteCancel",
+            "volumeInstancePITRRestore", "clearanceTokenRevoke", "environmentPatchCommitStaged",
+        ] {
+            assert_eq!(eval(routine), AccessLevel::Allow, "{routine}");
+        }
+    }
+
+    /// A service, volume or bucket deleted through an environment change is
+    /// gated; any other environment change is routine.
+    #[test]
+    fn compiled_railway_policy_gates_deletion_through_an_environment_change() {
+        use crate::core::policy::AccessLevel;
+        let eval = |field: &str, arg: &str, patch: serde_json::Value| {
+            let q = format!("mutation($p: EnvironmentConfig) {{ {field}(environmentId: \"e\", {arg}: $p) }}");
+            let body = serde_json::json!({ "query": q, "variables": { "p": patch } }).to_string();
+            eval_compiled("railway", "POST", "/graphql/v2", &body)
+        };
+        let delete = serde_json::json!({"services": {"0b1c": {"isDeleted": true}}});
+        let tweak = serde_json::json!({"services": {"0b1c": {"variables": {"isDeleted": {"value": "true"}}}}});
+        assert_eq!(eval("environmentPatchCommit", "patch", delete.clone()), AccessLevel::AskAlways);
+        assert_eq!(eval("environmentStageChanges", "input", delete), AccessLevel::AskAlways);
+        assert_eq!(eval("environmentPatchCommit", "patch", tweak), AccessLevel::Allow);
+        let body = serde_json::json!({"query": "mutation($c: JSON) { environmentApplyChangeSet(input: $c) }", "variables": {"c": {}}}).to_string();
+        assert_eq!(eval_compiled("railway", "POST", "/graphql/v2", &body), AccessLevel::AskAlways);
+    }
+
+    #[test]
+    fn compiled_github_policy_covers_every_spelling_of_a_repository() {
+        use crate::core::policy::AccessLevel;
+        for (method, path, body) in [
+            ("DELETE", "/repositories/1296269", ""),
+            ("PATCH", "/repositories/1296269", r#"{"private": false}"#),
+            ("POST", "/repos/o/r", r#"{"visibility": "public"}"#),
+            ("PUT", "/repositories/1296269/collaborators/x", "{}"),
+            ("POST", "/repositories/1296269/transfer", "{}"),
+            ("PUT", "/organizations/9919/actions/secrets/X", "{}"),
+        ] {
+            assert_eq!(
+                eval_compiled("github", method, path, body),
+                AccessLevel::AskAlways,
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_openai_expensive_model_reads_the_model() {
+        use crate::core::policy::AccessLevel;
+        for path in ["/v1/chat/completions", "/v1/responses"] {
+            let eval = |body: &str| eval_compiled("openai", "POST", path, body);
+            assert_eq!(eval(r#"{"model": "o3-pro", "input": "hi"}"#), AccessLevel::Ask);
+            assert_eq!(eval(r#"{"model": "gpt-4.5-preview"}"#), AccessLevel::Ask);
+            assert_eq!(eval(r#"{"model": "ft:o4-mini-2025:acme::x"}"#), AccessLevel::Ask);
+            // A prompt that mentions a model is not the model.
+            assert_eq!(eval(r#"{"model": "gpt-4o-mini", "input": "compare with o3"}"#), AccessLevel::Allow);
+        }
+    }
+
+    #[test]
+    fn railway_graphql_shape_binds_and_refuses_what_it_cannot_read() {
+        let r = ServiceRegistry::load();
+        let def = r.get("railway").expect("railway service");
+        let scope = |body: &str| {
+            def.extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
+                .unwrap()
+        };
+        let rs = scope(r#"{"query":"mutation { serviceDelete(id: \"3ec1\") }"}"#);
+        assert!(rs.unreadable.is_none());
+        let call = r#"[{"args":{"id":"3ec1"},"field":"serviceDelete"}]"#.to_string();
+        assert_eq!(
+            rs.bound,
+            vec![
+                ("calls".to_string(), call.clone()),
+                ("fields".to_string(), r#"["serviceDelete"]"#.to_string()),
+                ("request".to_string(), call),
+            ]
+        );
+        assert_eq!(rs.consent.as_deref(), Some("{{ vars.calls | graphql }}"));
+        // A different target is a different approval.
+        let other = scope(r#"{"query":"mutation { serviceDelete(id: \"9999\") }"}"#);
+        assert_ne!(rs.digest(), other.digest());
+        // A request a server would refuse is refused with the server's status.
+        for (body, status) in [
+            (r#"[{"query":"mutation { serviceDelete(id: \"s\") }"}]"#, 400),
+            (r#"{"query":"mutation { serviceDelete(id: \"s\") "}"#, 400),
+            ("not json", 400),
+            (r#"{"query":"query { me { id } }","query":"mutation { serviceDelete(id: \"s\") }"}"#, 400),
+            (r#"{"query":"mutation { ...Missing }"}"#, 422),
+        ] {
+            assert_eq!(scope(body).unreadable.map(|u| u.status), Some(status), "{body}");
+        }
+        // An empty body has nothing to read: no vars, not a refusal.
+        assert!(scope("").unreadable.is_none());
     }
 
     #[test]
@@ -2323,16 +2635,16 @@ consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
         let def = snaplii_def();
         let body = r#"{"amount": 80, "merchant_id": "m_1", "nonce": "xyz"}"#;
         let rs = def
-            .extract_request_scope("POST", "/v2/purchase", Some("force=true"), Some(body))
+            .extract_request_scope("POST", "/v2/purchase", Some("force=true"), Some(body.as_bytes()))
             .expect("purchase shape matches");
         // Bare + qualified names both present, values stringified.
-        assert_eq!(rs.vars.get("amount").map(String::as_str), Some("80"));
+        assert_eq!(rs.vars.get("amount"), Some(&serde_json::json!(80)));
         assert_eq!(
-            rs.vars.get("purchase.amount").map(String::as_str),
-            Some("80")
+            rs.vars.get("purchase.amount"),
+            Some(&serde_json::json!(80))
         );
-        assert_eq!(rs.vars.get("merchant").map(String::as_str), Some("m_1"));
-        assert_eq!(rs.vars.get("force").map(String::as_str), Some("true"));
+        assert_eq!(rs.vars.get("merchant"), Some(&serde_json::json!("m_1")));
+        assert_eq!(rs.vars.get("force"), Some(&serde_json::json!("true")));
         // Bound = the scope subset, sorted; the query `force` and body `nonce`
         // are NOT bound (not in scope).
         assert_eq!(
@@ -2361,9 +2673,9 @@ consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
             .is_none());
         // Missing body field → that var is simply absent (not an error).
         let rs = def
-            .extract_request_scope("POST", "/v2/purchase", None, Some(r#"{"amount": 5}"#))
+            .extract_request_scope("POST", "/v2/purchase", None, Some(br#"{"amount": 5}"#))
             .unwrap();
-        assert_eq!(rs.vars.get("amount").map(String::as_str), Some("5"));
+        assert_eq!(rs.vars.get("amount"), Some(&serde_json::json!(5)));
         assert!(rs.vars.get("merchant").is_none());
         // Only the resolved scope var is bound.
         assert_eq!(rs.bound, vec![("amount".to_string(), "5".to_string())]);
@@ -2427,7 +2739,7 @@ consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
                 "POST",
                 "/v2/purchase",
                 None,
-                Some(r#"{"amount":80,"merchant_id":"m_1"}"#),
+                Some(br#"{"amount":80,"merchant_id":"m_1"}"#),
             )
             .unwrap();
         let b = def
@@ -2435,7 +2747,7 @@ consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
                 "POST",
                 "/v2/purchase",
                 Some("force=1"),
-                Some(r#"{"merchant_id":"m_1","amount":80,"nonce":"Q"}"#),
+                Some(br#"{"merchant_id":"m_1","amount":80,"nonce":"Q"}"#),
             )
             .unwrap();
         assert_eq!(
@@ -2448,7 +2760,7 @@ consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
                 "POST",
                 "/v2/purchase",
                 None,
-                Some(r#"{"amount":180,"merchant_id":"m_1"}"#),
+                Some(br#"{"amount":180,"merchant_id":"m_1"}"#),
             )
             .unwrap();
         assert_ne!(

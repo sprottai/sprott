@@ -34,10 +34,11 @@ use crate::service::{AuthDef, RequestShape, ServiceDef, ServiceMeta, ServicePoli
 
 /// The filters the console implements for a consent template
 /// (`{{ vars.<name> | <filter> }}`): `email` renders the bound value as a
-/// decoded message card (the approval view in the console). A filter outside
+/// decoded message card, `graphql` renders a GraphQL request's calls as
+/// actions in words (the approval view in the console). A filter outside
 /// this set would show the approver nothing, so a definition naming one is
 /// rejected.
-pub const CONSENT_FILTERS: &[&str] = &["email"];
+pub const CONSENT_FILTERS: &[&str] = &["email", "graphql"];
 
 /// Consent-URL query params the OAuth flow itself controls; an
 /// `authorize_params` map may never set these (the frontend applies the map
@@ -911,6 +912,14 @@ fn check_requests(requests: &HashMap<String, RequestShape>, errs: &mut Vec<Strin
                     what, var
                 ));
             }
+            // `vars.<shape>.<name>` reads one shape's var, so a var named
+            // like a shape would be shadowed by it in a `when`.
+            if requests.contains_key(var) {
+                errs.push(format!(
+                    "{} var '{}' has the name of a [requests] shape; rename one",
+                    what, var
+                ));
+            }
             // A body address is an RFC 6901 pointer (leading '/'); a query
             // `at` is non-empty.
             match &shape.vars[var] {
@@ -920,6 +929,16 @@ fn check_requests(requests: &HashMap<String, RequestShape>, errs: &mut Vec<Strin
                     crate::service::VarLoc::Query => {
                         if at.at.is_empty() {
                             errs.push(format!("{} var '{}' query `at` is empty", what, var));
+                        }
+                    }
+                    crate::service::VarLoc::Graphql => {
+                        if !crate::service::GRAPHQL_AT.contains(&at.at.as_str()) {
+                            errs.push(format!(
+                                "{} var '{}' graphql `at` must be one of {}",
+                                what,
+                                var,
+                                crate::service::GRAPHQL_AT.join(", ")
+                            ));
                         }
                     }
                 },
@@ -949,7 +968,7 @@ fn check_requests(requests: &HashMap<String, RequestShape>, errs: &mut Vec<Strin
         }
 
         if let Some(consent) = &shape.consent {
-            check_consent(&what, consent, &shape.scope, errs);
+            check_consent(&what, consent, shape, errs);
         }
     }
 }
@@ -967,7 +986,8 @@ fn check_pointer(what: &str, var: &str, p: &str, errs: &mut Vec<String>) {
 /// `{{ vars.<name> | <filter> }}` tokens, nothing else. Every referenced var
 /// must be in `scope` (P4 show ⊆ bind) and every filter one the console
 /// implements ([`CONSENT_FILTERS`]).
-fn check_consent(what: &str, template: &str, scope: &[String], errs: &mut Vec<String>) {
+fn check_consent(what: &str, template: &str, shape: &RequestShape, errs: &mut Vec<String>) {
+    let scope = &shape.scope;
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
@@ -1001,6 +1021,23 @@ fn check_consent(what: &str, template: &str, scope: &[String], errs: &mut Vec<St
                     what,
                     f,
                     CONSENT_FILTERS.join(", ")
+                ));
+            }
+            // `graphql` shows a list of calls, so it reads only the calls a
+            // GraphQL request makes, never a field the agent writes freely.
+            let is_calls = |var: &str| {
+                matches!(
+                    shape.vars.get(var),
+                    Some(crate::service::VarDef::Located(crate::service::VarAt {
+                        location: crate::service::VarLoc::Graphql,
+                        at,
+                    })) if at == "calls"
+                )
+            };
+            if f == "graphql" && !expr.strip_prefix("vars.").is_some_and(is_calls) {
+                errs.push(format!(
+                    "{} consent filter 'graphql' reads only a `{{ in = \"graphql\", at = \"calls\" }}` var",
+                    what
                 ));
             }
         }
@@ -1117,19 +1154,11 @@ fn policy_from_file(file: RawPolicyFile, errs: &mut Vec<String>) -> ServicePolic
                     }
                 });
         if let Some(w) = &r.when {
-            match Condition::parse(w) {
-                None => errs.push(format!(
-                    "{}: `when = \"{}\"` is not a valid condition (expected `vars.<name> <op> <literal>`)",
-                    what, w
-                )),
-                Some(c) => {
-                    if let Some(why) = c.never_fires() {
-                        errs.push(format!(
-                            "{}: `when = \"{}\"` can never be true: {}",
-                            what, w, why
-                        ));
-                    }
-                }
+            if let Err(why) = Condition::compile(w) {
+                errs.push(format!(
+                    "{}: `when = \"{}\"` is not a valid CEL condition: {}",
+                    what, w, why
+                ));
             }
         }
         rules.push(PolicyRule {
@@ -1229,7 +1258,9 @@ fn check_rules_against_requests(
             .filter(|(_, shape)| shape_covers_rule(shape, rule))
             .collect();
         if let Some(cond) = rule.when.as_deref().and_then(Condition::parse) {
-            check_when_var(&what, cond.var_name(), requests, &covering, errs);
+            for var in cond.var_names() {
+                check_when_var(&what, var, requests, &covering, errs);
+            }
         }
         if rule.body.is_some()
             && matches!(rule.level, Some(AccessLevel::Ask | AccessLevel::AskAlways))

@@ -19,3 +19,11 @@ hosts = ["api.github.com", "github.com"]
 secrets = ["GITHUB_TOKEN"]
 # Where a human mints the secret (auxiliary; display-only helper link).
 secret_url = "https://github.com/settings/tokens?type=beta"
+
+# A repository's settings change. The visibility fields are read from the
+# parsed body, so policy decides on them and an approval binds them.
+[requests.repo_settings]
+match = ["PATCH /repos/*/*", "PATCH /repositories/*", "POST /repos/*/*", "POST /repositories/*"]
+vars.private    = "/private"
+vars.visibility = "/visibility"
+scope = ["private", "visibility"]

@@ -88,6 +88,9 @@ Sprott reports them because it saw them happen.
 | `ambiguous_phantom` | 400 | A bare phantom on a connection with several values. | Use the per-key phantom, `__sprott__<conn>__<key>__`. |
 | `multi_connection` | 400 | One request named several connections. | Send one connection per request. |
 | `phantom_plain_http` | 400 | Phantoms need HTTPS. | Use an `https://` URL. |
+| `request_unreadable` | 400 | The request can't be read the way its standard says, where a rule needs to read it: a malformed path escape, a body that isn't valid JSON, a GraphQL query that doesn't parse, a query parameter given twice. The message says which. | Fix the request. |
+| `request_invalid` | 422 | A GraphQL query that parses but isn't valid. | Fix the query. |
+| `content_encoding_unsupported` | 415 | The body uses a content coding other than gzip, deflate, br or zstd. | Send it uncompressed or in one of those. |
 | `phantom_renamed` | 400 | The request uses a phantom from before Sprott 2.0 (`__sc__<conn>__`). | Use the name in the message (`__sprott__<conn>__`). |
 | `exposes_unsupported` | 400 | That value can't be produced for this connection. | Use one of the connection's listed phantoms. |
 | `bad_request` | 400 | Malformed request. | Fix the request. |

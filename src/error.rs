@@ -84,6 +84,16 @@ pub enum ScCode {
     /// one succeeds. Data stays on disk.
     LedgerStale,
     BrokerBodyLimit,
+    /// A brokered request whose path, query or body can't be read the way its
+    /// standard says (a malformed path escape, a body that isn't valid JSON, a
+    /// GraphQL query that doesn't parse, a query parameter given twice), where
+    /// policy has to read it. A server would refuse it too.
+    RequestUnreadable,
+    /// A brokered GraphQL request whose document parses but fails validation
+    /// (GraphQL over HTTP answers 422).
+    RequestInvalid,
+    /// A brokered request body in a content coding the proxy can't decode.
+    ContentEncodingUnsupported,
     EgressUnreachable,
     ExposesUnsupported,
     HostForbidden,
@@ -264,6 +274,27 @@ impl ScCode {
                 "Body over broker cap",
                 "configure",
                 "config",
+            ),
+            RequestUnreadable => (
+                400,
+                "request_unreadable",
+                "Request could not be read",
+                "fix_request",
+                "request",
+            ),
+            RequestInvalid => (
+                422,
+                "request_invalid",
+                "Request is not valid",
+                "fix_request",
+                "request",
+            ),
+            ContentEncodingUnsupported => (
+                415,
+                "content_encoding_unsupported",
+                "Unsupported content encoding",
+                "fix_request",
+                "request",
             ),
             EgressUnreachable => (
                 502,
@@ -673,6 +704,9 @@ mod tests {
             AgentNotAdmitted,
             LedgerStale,
             BrokerBodyLimit,
+            RequestUnreadable,
+            RequestInvalid,
+            ContentEncodingUnsupported,
             EgressUnreachable,
             ExposesUnsupported,
             HostForbidden,

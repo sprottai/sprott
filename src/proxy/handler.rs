@@ -219,12 +219,18 @@ impl BrokerHandler {
         // rule written for `DELETE` also decides a `delete`.
         parts.method = normalize_method(&parts.method);
         let method = parts.method.as_str().to_string();
-        let path = parts.uri.path().to_string();
-        let pq = parts
-            .uri
-            .path_and_query()
-            .map(|x| x.as_str().to_string())
-            .unwrap_or_else(|| "/".to_string());
+        // The path is normalized ONCE, here, as Envoy does for path-based
+        // access control (core/path.rs): everything below decides on this form
+        // and a brokered request is forwarded in it, so the upstream runs the
+        // path that was checked. One it can't normalize is refused below if the
+        // request is brokered.
+        let raw_path = parts.uri.path().to_string();
+        let norm_path = crate::core::path::normalize(&raw_path);
+        let path = norm_path.clone().unwrap_or_else(|_| raw_path.clone());
+        let pq = match parts.uri.query() {
+            Some(q) => format!("{path}?{q}"),
+            None => path.clone(),
+        };
 
         // ── gather phantom-bearing scan sites ────────────────────────────────
         let mut phantoms: Vec<Phantom> = Vec::new();
@@ -288,37 +294,30 @@ impl BrokerHandler {
 
         let mut body_bytes: Option<Vec<u8>> = None;
         if scan_body {
-            // `Limited` enforces the cap even without a Content-Length
-            // (chunked transfer) — the declared-length check above is only the
-            // cheap early exit.
-            let limited = http_body_util::Limited::new(
-                orig_body.take().expect("body present before scan"),
-                cap as usize,
-            );
-            match limited.collect().await {
-                Ok(collected) => body_bytes = Some(collected.to_bytes().to_vec()),
-                Err(e)
-                    if e.downcast_ref::<http_body_util::LengthLimitError>()
-                        .is_some() =>
-                {
-                    return body_over_cap(0, cap).into();
-                }
-                Err(e) => {
-                    tracing::warn!("proxy: body collect failed: {}", e);
-                    return err_response(ScCode::UpstreamBody, "failed to read request body")
-                        .into();
-                }
+            let body = orig_body.take().expect("body present before scan");
+            match buffer_body(body, cap).await {
+                Ok(bytes) => body_bytes = Some(bytes),
+                Err(refusal) => return refusal.into(),
             }
         }
+        // A compressed body (RFC 9110 content codings) is decoded in memory so
+        // policy reads what the server will. It goes upstream decoded only when
+        // a `[requests]` shape decided on it (below); otherwise the bytes go
+        // untouched, so a body stored compressed (an upload) stays as sent.
+        let decoded = body_bytes
+            .as_deref()
+            .and_then(|b| decode_content(&parts.headers, b, cap));
+        let readable: Option<&[u8]> = match &decoded {
+            Some(Ok(d)) => Some(d),
+            _ => body_bytes.as_deref(),
+        };
         // One lossy view serves BOTH the phantom scan and policy below, so a
         // binary(ish) body is not a blind spot: rules evaluate against what is
         // actually there. Forwarding still uses the untouched raw bytes.
         // The body view feeds POLICY only (`[requests]` var extraction below).
         // It is deliberately NOT scanned for phantoms: the body is not an
         // injection site, so a phantom there is left inert (see the forward path).
-        let body_text: Option<String> = body_bytes
-            .as_deref()
-            .map(|b| String::from_utf8_lossy(b).into_owned());
+        let body_text: Option<String> = readable.map(|b| String::from_utf8_lossy(b).into_owned());
 
         // No phantom anywhere → forward untouched (rebuild body if we buffered).
         if phantoms.is_empty() {
@@ -347,6 +346,26 @@ impl BrokerHandler {
                 "a phantom requires HTTPS (the proxy only substitutes inside TLS)",
             )
             .into();
+        }
+
+        // A brokered request goes upstream on the normalized path it is
+        // decided on; one whose path can't be normalized is refused.
+        if let Err(e) = norm_path {
+            return err_response(ScCode::RequestUnreadable, &e.to_string()).into();
+        }
+        if path != raw_path {
+            let authority = parts
+                .uri
+                .authority()
+                .map(|a| a.as_str().to_string())
+                .unwrap_or_else(|| dest_host.clone());
+            match format!("https://{}{}", authority, pq).parse::<Uri>() {
+                Ok(u) => parts.uri = u,
+                Err(_) => {
+                    return err_response(ScCode::RequestUnreadable, "the request path is malformed")
+                        .into()
+                }
+            }
         }
 
         // ── one connection per request ───────────────────────────────────────
@@ -624,66 +643,118 @@ impl BrokerHandler {
             return self.widen_deny(&vault_id, &conn, &dest_host, ip).await;
         }
 
-        // ── request scope (Phase 2, design/request-scope.md) ─────────────────────
+        // ── request scope + policy (Phase 2, design/request-scope.md) ─────────
         // Resolve the matching `[requests]` shape and extract its vars from the
-        // SAME buffered body view (unified boundary) + the URL query. Feeds
-        // three consumers: the policy `when` predicate (`vars`), the ask-always
-        // grant identity (`scope_digest`), and the approval consent (via
-        // `req_scope` → captive_portal). Absent shape ⇒ empty vars + `""` digest
-        // = the Phase-1 path-only grant, unchanged.
-        let req_scope = def.as_ref().and_then(|d| {
-            d.extract_request_scope(&method, &path, parts.uri.query(), body_text.as_deref())
-        });
-        let vars: crate::core::policy::VarMap = req_scope
-            .as_ref()
-            .map(|r| r.vars.clone())
-            .unwrap_or_default();
-        let scope_digest = req_scope.as_ref().map(|r| r.digest()).unwrap_or_default();
-
-        // A connection rule edit that decides on a field an approval on this
-        // path does not bind (an unbound `when` var, or the body) is refused
-        // here, by name, rather than asked under.
-        if let Some(rs) = req_scope.as_ref() {
-            if let Some(problem) = self.state.connection_rule_problem(
+        // SAME buffered body (unified boundary) + the URL query. Feeds three
+        // consumers: the policy `when` predicate (`vars`), the ask-always grant
+        // identity (`scope_digest`), and the approval consent (via `req_scope`
+        // → captive_portal). Absent shape ⇒ empty vars + `""` digest = the
+        // Phase-1 path-only grant, unchanged.
+        //
+        // Policy `body` rules see the body text plus its decoded JSON form
+        // (policy_body_view). Op-agent binding: every approval/grant surface
+        // below keys on the requesting agent (the pipeline validated self.key
+        // before secrets).
+        let policy_view = body_text
+            .as_deref()
+            .map(crate::core::policy::policy_body_view);
+        let agent_prefix = self.agent_attribution().unwrap_or_default();
+        type Decided = (
+            Option<crate::service::RequestScope>,
+            (
+                crate::core::policy::AccessLevel,
+                crate::core::policy::DecidedBy,
+                Option<u64>,
+            ),
+        );
+        let decide = |p: &str| -> Result<Decided, Response<Body>> {
+            // A shape reads the body only decoded: one that can't be is refused.
+            // A body that isn't valid in its own coding is refused whatever
+            // reads it: a decoder that stops early may run what this one can't
+            // see, and no client sends one by mistake.
+            if let Some(Err(e)) = &decoded {
+                if matches!(e, DecodeError::Corrupt(_))
+                    || def.as_ref().is_some_and(|d| d.request_shape(&method, p).is_some())
+                {
+                    write_forward_audit(&self.state, &refused, 0, None, Some(e.code()));
+                    return Err(err_response(e.code(), &e.to_string()));
+                }
+            }
+            let req_scope = def
+                .as_ref()
+                .and_then(|d| d.extract_request_scope(&method, p, parts.uri.query(), readable));
+            if let Some(rs) = req_scope.as_ref() {
+                // A request its shape can't read the standard way is refused
+                // with the status a server would give it: the rules on that
+                // shape would otherwise decide on a guess.
+                if let Some(u) = &rs.unreadable {
+                    write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::RequestUnreadable));
+                    let code = if u.status == 422 {
+                        ScCode::RequestInvalid
+                    } else {
+                        ScCode::RequestUnreadable
+                    };
+                    return Err(err_response(code, &u.message));
+                }
+                // A connection rule edit that decides on a field an approval on
+                // this path does not bind (an unbound `when` var, or the body)
+                // is refused here, by name, rather than asked under.
+                if let Some(problem) = self
+                    .state
+                    .connection_rule_problem(&vault_id, &conn, &service_id, &method, p, rs)
+                {
+                    write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::PolicyDenied));
+                    return Err(err_response(ScCode::PolicyDenied, &problem));
+                }
+            }
+            let vars: crate::core::policy::VarMap = req_scope
+                .as_ref()
+                .map(|r| r.vars.clone())
+                .unwrap_or_default();
+            let decision = self.state.evaluate_request_decision(
                 &vault_id,
+                &agent_prefix,
                 &conn,
                 &service_id,
                 &method,
-                &path,
-                rs,
-            ) {
-                write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::PolicyDenied));
-                return err_response(ScCode::PolicyDenied, &problem).into();
-            }
-        }
-
-        // ── policy ───────────────────────────────────────────────────────────
-        // The same lossy view the phantom scan used (unified boundary).
-        let body_for_policy = body_text.as_deref();
-        // Op-agent binding: every approval/grant surface below keys on the
-        // requesting agent (the pipeline validated self.key before secrets).
-        let agent_prefix = self.agent_attribution().unwrap_or_default();
-        let decision = self.state.evaluate_request_decision(
-            &vault_id,
-            &agent_prefix,
-            &conn,
-            &service_id,
-            &method,
-            &path,
-            &dest_host,
-            body_for_policy,
-            &vars,
-            // A declared `[requests]` shape (even with no resolved values) makes
-            // this a scoped path: bind per-value via op_grants, never the coarse
-            // connection-window downgrade.
-            req_scope.is_some(),
-        );
-        let (level, decided_by, ttl) = match decision {
-            Some(d) => d,
-            None => {
-                return err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG).into()
+                p,
+                &dest_host,
+                policy_view.as_deref(),
+                &vars,
+                // A declared `[requests]` shape (even with no resolved values)
+                // makes this a scoped path: bind per-value via op_grants, never
+                // the coarse connection-window downgrade.
+                req_scope.is_some(),
+            );
+            match decision {
+                Some(d) => Ok((req_scope, d)),
+                None => Err(err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG)),
             }
         };
+        // An encoded slash has two readings, and servers differ on which they
+        // take (core/path.rs): decide on both and keep the stricter. The grant
+        // keys, the audit row and the upstream all use the path as normalized.
+        let decided = match crate::core::path::slash_decoded(&path) {
+            Err(e) => {
+                write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::RequestUnreadable));
+                Err(err_response(ScCode::RequestUnreadable, &e.to_string()))
+            }
+            Ok(others) => decide(&path).and_then(|first| {
+                others.iter().try_fold(first, |kept, alt| {
+                    let next = decide(alt)?;
+                    Ok(if next.1 .0.restrictiveness() > kept.1 .0.restrictiveness() {
+                        next
+                    } else {
+                        kept
+                    })
+                })
+            }),
+        };
+        let (req_scope, (level, decided_by, ttl)) = match decided {
+            Ok(d) => d,
+            Err(refusal) => return refusal.into(),
+        };
+        let scope_digest = req_scope.as_ref().map(|r| r.digest()).unwrap_or_default();
 
         use crate::core::policy::AccessLevel;
         if level == AccessLevel::Deny {
@@ -852,9 +923,18 @@ impl BrokerHandler {
 
         // Headers: substitute values, decode/re-encode Basic, strip proxy/agent
         // auth, drop hop-by-hop. The body is never rewritten (not an injection
-        // site), so its content-length is always preserved.
+        // site), so its content-length stays what was set when it was read.
         let new_headers = rewrite_headers(&parts.headers, &values, false);
         parts.headers = new_headers;
+        // A body a shape decided on goes upstream as it was read: decoded.
+        let forward_decoded = match decoded {
+            Some(Ok(d)) if req_scope.is_some() => {
+                parts.headers.remove(header::CONTENT_ENCODING);
+                parts.headers.insert(header::CONTENT_LENGTH, d.len().into());
+                Some(d)
+            }
+            _ => None,
+        };
 
         // Egress guard — never emit an unresolved phantom in a credential
         // position. `substitute` leaves a phantom it can't fill verbatim, so
@@ -885,13 +965,15 @@ impl BrokerHandler {
             .into();
         }
 
-        // Body: forwarded byte-for-byte (never an injection site). A phantom in
-        // the body passes through as inert placeholder text — never substituted
+        // Body: forwarded byte-for-byte, or decoded when a shape decided on it
+        // (never an injection site). A phantom in the body passes through as
+        // inert placeholder text — never substituted
         // (so a real secret can't be written into a persisted/readable field) and
         // never blocked (so discussing the schema in a body stays untouched).
-        let out_body = match body_bytes {
-            Some(bytes) => Body::from(bytes),
-            None => orig_body.take().unwrap_or_else(Body::empty),
+        let out_body = match (forward_decoded, body_bytes) {
+            (Some(d), _) => Body::from(d),
+            (None, Some(bytes)) => Body::from(bytes),
+            (None, None) => orig_body.take().unwrap_or_else(Body::empty),
         };
 
         self.pending = Some(AuditPending {
@@ -1585,6 +1667,103 @@ fn plain(status: StatusCode, msg: &str) -> Response<Body> {
 /// and never an approval prompt over content the user can't read.
 /// `declared = 0` means the length was unknown (chunked) and the cap was hit
 /// while buffering.
+/// Buffer a brokered request's body for policy, at most `cap` bytes.
+async fn buffer_body(body: Body, cap: u64) -> Result<Vec<u8>, Response<Body>> {
+    // `Limited` enforces the cap even without a Content-Length (chunked
+    // transfer); the declared-length check before it is only the cheap early exit.
+    match http_body_util::Limited::new(body, cap as usize).collect().await {
+        Ok(collected) => Ok(collected.to_bytes().to_vec()),
+        Err(e) if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() => {
+            Err(body_over_cap(0, cap))
+        }
+        Err(e) => {
+            tracing::warn!("proxy: body collect failed: {}", e);
+            Err(err_response(ScCode::UpstreamBody, "failed to read request body"))
+        }
+    }
+}
+
+/// Why a compressed body could not be read.
+#[derive(Debug, Clone, PartialEq)]
+enum DecodeError {
+    Unsupported(String),
+    Corrupt(String),
+    OverCap(u64),
+}
+
+impl DecodeError {
+    fn code(&self) -> ScCode {
+        match self {
+            DecodeError::Unsupported(_) => ScCode::ContentEncodingUnsupported,
+            DecodeError::Corrupt(_) => ScCode::RequestUnreadable,
+            DecodeError::OverCap(_) => ScCode::BrokerBodyLimit,
+        }
+    }
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Unsupported(c) => write!(
+                f,
+                "the request body's Content-Encoding {c} is not one of gzip, deflate, br, zstd"
+            ),
+            DecodeError::Corrupt(c) => write!(f, "the request body is not valid {c}"),
+            DecodeError::OverCap(cap) => write!(
+                f,
+                "the request body decodes to more than the broker's inspectable cap ({cap} bytes)"
+            ),
+        }
+    }
+}
+
+/// The body with its content codings (RFC 9110 §8.4) undone, last applied
+/// first, by flate2 / brotli / zstd; `None` when it has none. Coding names
+/// are case-insensitive; a gzip body may hold several members.
+fn decode_content(
+    headers: &HeaderMap,
+    raw: &[u8],
+    cap: u64,
+) -> Option<Result<Vec<u8>, DecodeError>> {
+    use std::io::Read;
+    let codings: Vec<String> = headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .flat_map(|v| v.to_str().unwrap_or("?").split(','))
+        .map(|c| c.trim().to_ascii_lowercase())
+        .filter(|c| !c.is_empty() && c != "identity")
+        .collect();
+    if codings.is_empty() {
+        return None;
+    }
+    let mut data = raw.to_vec();
+    for coding in codings.iter().rev() {
+        let mut out = Vec::new();
+        let read = {
+            let input = &data[..];
+            let reader: Box<dyn Read + '_> = match coding.as_str() {
+                "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(input)),
+                "deflate" => Box::new(flate2::read::ZlibDecoder::new(input)),
+                "br" => Box::new(brotli::Decompressor::new(input, 4096)),
+                "zstd" => match zstd::stream::read::Decoder::new(input) {
+                    Ok(d) => Box::new(d),
+                    Err(_) => return Some(Err(DecodeError::Corrupt(coding.clone()))),
+                },
+                other => return Some(Err(DecodeError::Unsupported(other.to_string()))),
+            };
+            reader.take(cap + 1).read_to_end(&mut out)
+        };
+        if read.is_err() {
+            return Some(Err(DecodeError::Corrupt(coding.clone())));
+        }
+        if out.len() as u64 > cap {
+            return Some(Err(DecodeError::OverCap(cap)));
+        }
+        data = out;
+    }
+    Some(Ok(data))
+}
+
 fn body_over_cap(declared: u64, cap: u64) -> Response<Body> {
     let what = if declared > 0 {
         format!("declared Content-Length ({} bytes)", declared)
@@ -1844,6 +2023,68 @@ mod tests {
         let code = refusal_code(req).await;
         assert_ne!(code.as_deref(), Some("phantom_renamed"), "{code:?}");
         assert_eq!(code.as_deref(), Some("agent_key"), "it reaches the agent check");
+    }
+
+    fn headers_with(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.append(
+                hudsucker::hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    /// A compressed body is read decoded, in every coding and order; an
+    /// unknown coding, a corrupt body and one that inflates past the cap are
+    /// told apart.
+    #[test]
+    fn a_compressed_body_is_read_decoded() {
+        use std::io::Write;
+        let plain = br#"{"query":"mutation { serviceDelete(id: \"s\") }"}"#;
+        let gzip = |b: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(b).unwrap();
+            e.finish().unwrap()
+        };
+        let gz = gzip(plain);
+        let decode = |h: &[(&str, &str)], b: &[u8], cap: u64| decode_content(&headers_with(h), b, cap);
+        assert_eq!(decode(&[], &gz, 1024), None);
+        assert_eq!(decode(&[("content-encoding", "GZIP")], &gz, 1024), Some(Ok(plain.to_vec())));
+        // Two gzip members read as one body.
+        let two = [gzip(&plain[..10]), gzip(&plain[10..])].concat();
+        assert_eq!(decode(&[("content-encoding", "gzip")], &two, 1024), Some(Ok(plain.to_vec())));
+        // Codings undone last first: `gzip, br` was gzip then br.
+        let mut br = Vec::new();
+        brotli::CompressorWriter::new(&mut br, 4096, 5, 22).write_all(&gz).unwrap();
+        assert_eq!(
+            decode(&[("content-encoding", "gzip, br")], &br, 1024),
+            Some(Ok(plain.to_vec()))
+        );
+        let zs = zstd::stream::encode_all(&plain[..], 3).unwrap();
+        assert_eq!(decode(&[("content-encoding", "zstd")], &zs, 1024), Some(Ok(plain.to_vec())));
+        assert!(matches!(
+            decode(&[("content-encoding", "compress")], &gz, 1024),
+            Some(Err(DecodeError::Unsupported(_)))
+        ));
+        assert!(matches!(
+            decode(&[("content-encoding", "gzip")], b"not gzip", 1024),
+            Some(Err(DecodeError::Corrupt(_)))
+        ));
+        assert_eq!(decode(&[("content-encoding", "gzip")], &gz, 16), Some(Err(DecodeError::OverCap(16))));
+    }
+
+    /// A brokered request never upgrades to a WebSocket: hop-by-hop headers are
+    /// dropped, so frames the proxy can't inspect never ride a credential.
+    #[test]
+    fn a_brokered_request_cannot_upgrade() {
+        let mut h = HeaderMap::new();
+        h.insert("upgrade", "websocket".parse().unwrap());
+        h.insert("connection", "Upgrade".parse().unwrap());
+        h.insert("authorization", "Bearer __sprott__railway__".parse().unwrap());
+        let out = rewrite_headers(&h, &HashMap::new(), false);
+        assert!(!out.contains_key("upgrade") && !out.contains_key("connection"));
     }
 
     #[test]
