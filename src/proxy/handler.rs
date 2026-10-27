@@ -673,7 +673,7 @@ impl BrokerHandler {
             // reads it: a decoder that stops early may run what this one can't
             // see, and no client sends one by mistake.
             if let Some(Err(e)) = &decoded {
-                if matches!(e, DecodeError::Corrupt(_))
+                if !matches!(e, DecodeError::Unsupported(_))
                     || def.as_ref().is_some_and(|d| d.request_shape(&method, p).is_some())
                 {
                     write_forward_audit(&self.state, &refused, 0, None, Some(e.code()));
@@ -688,12 +688,12 @@ impl BrokerHandler {
                 // with the status a server would give it: the rules on that
                 // shape would otherwise decide on a guess.
                 if let Some(u) = &rs.unreadable {
-                    write_forward_audit(&self.state, &refused, 0, None, Some(ScCode::RequestUnreadable));
                     let code = if u.status == 422 {
                         ScCode::RequestInvalid
                     } else {
                         ScCode::RequestUnreadable
                     };
+                    write_forward_audit(&self.state, &refused, 0, None, Some(code));
                     return Err(err_response(code, &u.message));
                 }
                 // A connection rule edit that decides on a field an approval on
@@ -740,9 +740,12 @@ impl BrokerHandler {
                 Err(err_response(ScCode::RequestUnreadable, &e.to_string()))
             }
             Ok(others) => decide(&path).and_then(|first| {
+                // The stricter reading wins; on a tie, the one a shape read
+                // (so the approval binds and shows what it can).
                 others.iter().try_fold(first, |kept, alt| {
                     let next = decide(alt)?;
-                    Ok(if next.1 .0.restrictiveness() > kept.1 .0.restrictiveness() {
+                    let (n, k) = (next.1 .0.restrictiveness(), kept.1 .0.restrictiveness());
+                    Ok(if n > k || (n == k && kept.0.is_none() && next.0.is_some()) {
                         next
                     } else {
                         kept
@@ -1717,6 +1720,10 @@ impl std::fmt::Display for DecodeError {
     }
 }
 
+/// The largest zstd window the decoder allots (2^24 = 16 MiB; every default
+/// compression level fits), so a tiny frame can't claim 128 MiB.
+const ZSTD_WINDOW_LOG_MAX: u32 = 24;
+
 /// The body with its content codings (RFC 9110 §8.4) undone, last applied
 /// first, by flate2 / brotli / zstd; `None` when it has none. Coding names
 /// are case-insensitive; a gzip body may hold several members.
@@ -1733,7 +1740,7 @@ fn decode_content(
         .map(|c| c.trim().to_ascii_lowercase())
         .filter(|c| !c.is_empty() && c != "identity")
         .collect();
-    if codings.is_empty() {
+    if codings.is_empty() || raw.is_empty() {
         return None;
     }
     let mut data = raw.to_vec();
@@ -1745,7 +1752,9 @@ fn decode_content(
                 "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(input)),
                 "deflate" => Box::new(flate2::read::ZlibDecoder::new(input)),
                 "br" => Box::new(brotli::Decompressor::new(input, 4096)),
-                "zstd" => match zstd::stream::read::Decoder::new(input) {
+                "zstd" => match zstd::stream::read::Decoder::new(input)
+                    .and_then(|mut d| d.window_log_max(ZSTD_WINDOW_LOG_MAX).map(|_| d))
+                {
                     Ok(d) => Box::new(d),
                     Err(_) => return Some(Err(DecodeError::Corrupt(coding.clone()))),
                 },
@@ -2051,6 +2060,7 @@ mod tests {
         let gz = gzip(plain);
         let decode = |h: &[(&str, &str)], b: &[u8], cap: u64| decode_content(&headers_with(h), b, cap);
         assert_eq!(decode(&[], &gz, 1024), None);
+        assert_eq!(decode(&[("content-encoding", "gzip")], b"", 1024), None);
         assert_eq!(decode(&[("content-encoding", "GZIP")], &gz, 1024), Some(Ok(plain.to_vec())));
         // Two gzip members read as one body.
         let two = [gzip(&plain[..10]), gzip(&plain[10..])].concat();

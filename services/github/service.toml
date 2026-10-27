@@ -27,3 +27,13 @@ match = ["PATCH /repos/*/*", "PATCH /repositories/*", "POST /repos/*/*", "POST /
 vars.private    = "/private"
 vars.visibility = "/visibility"
 scope = ["private", "visibility"]
+
+# The GraphQL API reaches the same consequential actions as the REST routes
+# above. Policy decides on the called mutations; an approval binds the calls.
+[requests.graphql]
+match = "POST /graphql"
+vars.request = { in = "graphql", at = "request" }
+vars.calls   = { in = "graphql", at = "calls" }
+vars.fields  = { in = "graphql", at = "fields" }
+scope   = ["request", "calls", "fields"]
+consent = "{{ vars.calls | graphql }}"

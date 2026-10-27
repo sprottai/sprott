@@ -113,7 +113,7 @@ form that was read, so the upstream acts on exactly what was decided:
 |---|---|---|
 | Path | RFC 3986 §6.2.2 normalization plus merged slashes (Envoy `normalize_path` + `merge_slashes`) | iri-string; the normalized path is decided on AND forwarded |
 | Encoded slash `%2F` / `%5C` | servers differ (Envoy leaves it per backend) | both readings decided, the stricter kept; forwarded as sent |
-| Content-Encoding | RFC 9110 (gzip, deflate, br, zstd) | hudsucker's decoder; forwarded decoded; another coding is 415 |
+| Content-Encoding | RFC 9110 (gzip, deflate, br, zstd) | decoded in memory (flate2, brotli, zstd) for reading; forwarded decoded when a shape decided on it, else as sent; a corrupt or over-cap body is refused; another coding is 415 where a shape needs the body |
 | Query | WHATWG `application/x-www-form-urlencoded` | `form_urlencoded`; a parameter a var reads given twice is 400 |
 | JSON body | RFC 8259 with I-JSON (RFC 7493): UTF-8, no duplicate keys | serde_json with a duplicate-key check; invalid is 400 |
 | GraphQL | GraphQL spec (GetOperation, CollectFields, variable coercion) and GraphQL over HTTP | apollo-compiler parse + schema-free validation; 400 / 422 as a server answers |

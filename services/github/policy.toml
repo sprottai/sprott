@@ -124,3 +124,14 @@ id = "delete-release"
 label = "Delete a release"
 match = ["DELETE /repos/*/*/releases/*", "DELETE /repositories/*/releases/*"]
 level = "ask"
+
+# ── The same gates over GraphQL ──────────────────────────────────────────────
+# Mutation names from GitHub's public schema (docs.github.com/public/fpt/
+# schema.docs.graphql, 2026-10-27). Each is the GraphQL spelling of a REST
+# gate above: branch protection and rulesets, who can access, deleting a ref.
+[[rule]]
+id = "graphql-gated-mutations"
+label = "Change branch protection or rulesets, change who can access, or delete a branch (GraphQL)"
+match = "POST /graphql"
+when = "vars.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef'])"
+level = "ask-always"

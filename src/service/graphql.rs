@@ -104,7 +104,9 @@ impl Operation {
             .iter()
             .map(|c| serde_json::json!({ "field": c.field }))
             .collect();
-        let names = fold(names, |c| c["field"].as_str().unwrap_or_default().to_string());
+        let names = fold(names, |c| {
+            c["field"].as_str().unwrap_or_default().to_string()
+        });
         if fits(&names) {
             return canonical(&Json::Array(names));
         }
@@ -266,8 +268,15 @@ fn shorten(s: String) -> String {
     format!("{start}… ({n} chars)")
 }
 
-/// Read a parsed JSON body as the GraphQL operation a server would execute.
-pub fn read(body: &Json) -> Result<Operation, Refusal> {
+/// How many bytes substituting variables into the calls may cost, relative
+/// to the body they came from: a value used a few times is fine, one used
+/// thousands of times is refused instead of multiplied.
+const SUBSTITUTION_FACTOR: usize = 8;
+const SUBSTITUTION_FLOOR: usize = 64 * 1024;
+
+/// Read a parsed JSON body of `body_len` bytes as the GraphQL operation a
+/// server would execute.
+pub fn read(body: &Json, body_len: usize) -> Result<Operation, Refusal> {
     let obj = body.as_object().ok_or_else(|| {
         bad_request("the body is not a GraphQL request (a JSON object with a query)")
     })?;
@@ -314,7 +323,10 @@ pub fn read(body: &Json) -> Result<Operation, Refusal> {
     }
 
     let op = get_operation(&doc, op_name)?;
-    let vars = variable_values(op, provided)?;
+    let mut vars = variable_values(op, provided)?;
+    vars.budget = body_len
+        .saturating_mul(SUBSTITUTION_FACTOR)
+        .max(SUBSTITUTION_FLOOR);
     let fragments: std::collections::HashMap<&str, &ast::FragmentDefinition> = doc
         .definitions
         .iter()
@@ -404,12 +416,16 @@ fn get_operation<'d>(
     }
 }
 
-/// The operation's variables: the ones it declares, and the values it runs
-/// with.
+/// The operation's variables: the ones it declares, the values it runs with,
+/// and how many bytes substituting them has cost so far against `budget`
+/// (a variable used many times is copied each time).
 #[derive(Default)]
 struct Vars {
     declared: std::collections::HashSet<String>,
     values: Map<String, Json>,
+    sizes: std::collections::HashMap<String, usize>,
+    spent: std::cell::Cell<usize>,
+    budget: usize,
 }
 
 /// The variable values the operation runs with (§6.1.2): the provided value,
@@ -424,6 +440,8 @@ fn variable_values(
         let name = def.name.as_str();
         vars.declared.insert(name.to_string());
         if let Some(v) = provided.get(name) {
+            check_numbers(v)?;
+            vars.sizes.insert(name.to_string(), canonical(v).len());
             vars.values.insert(name.to_string(), v.clone());
         } else if let Some(default) = &def.default_value {
             if let Some(v) = value(default, &Vars::default())? {
@@ -501,12 +519,17 @@ fn collect_fields<'d>(
 /// `@skip(if:)` / `@include(if:)` (§3.13), with the `if` argument a Boolean
 /// literal or a Boolean variable.
 fn included(directives: &ast::DirectiveList, vars: &Vars) -> Result<bool, Refusal> {
+    let mut seen = [false; 2];
     for d in &directives.0 {
         let want = match d.name.as_str() {
             "skip" => false,
             "include" => true,
             _ => continue,
         };
+        // Directives Are Unique Per Location (§5.7.3).
+        if std::mem::replace(&mut seen[want as usize], true) {
+            return Err(invalid(format!("@{} is given twice in one place", d.name)));
+        }
         let cond = d
             .arguments
             .iter()
@@ -536,6 +559,24 @@ fn arguments(
     Ok(out)
 }
 
+/// A variable's value with every integer within what JSON carries exactly
+/// (the same bound a literal gets), so the card shows the number the server
+/// reads.
+fn check_numbers(v: &Json) -> Result<(), Refusal> {
+    match v {
+        Json::Number(n) if !n.is_f64() => {
+            let out = n.as_i64().map_or(true, |i| i.unsigned_abs() > (1u64 << 53));
+            if out {
+                return Err(bad_request(format!("the integer {n} is out of range")));
+            }
+        }
+        Json::Array(a) => a.iter().try_for_each(check_numbers)?,
+        Json::Object(o) => o.values().try_for_each(check_numbers)?,
+        _ => {}
+    }
+    Ok(())
+}
+
 /// A literal as JSON, with variables substituted. `None` = absent (a variable
 /// with no value): an argument or object field it fills is left out, a list
 /// item becomes null. A number past what JSON carries exactly is refused.
@@ -549,7 +590,16 @@ fn value(v: &ast::Value, vars: &Vars) -> Result<Option<Json>, Refusal> {
                 "the query uses ${name}, which its operation doesn't declare"
             )))
         }
-        ast::Value::Variable(name) => return Ok(vars.values.get(name.as_str()).cloned()),
+        ast::Value::Variable(name) => {
+            let spent = vars.spent.get() + vars.sizes.get(name.as_str()).copied().unwrap_or(0);
+            if spent > vars.budget {
+                return Err(bad_request(format!(
+                    "the query substitutes ${name} too many times for its size"
+                )));
+            }
+            vars.spent.set(spent);
+            return Ok(vars.values.get(name.as_str()).cloned());
+        }
         ast::Value::String(s) => Json::String(s.clone()),
         ast::Value::Boolean(b) => Json::Bool(*b),
         ast::Value::Int(i) => {
@@ -577,7 +627,12 @@ fn value(v: &ast::Value, vars: &Vars) -> Result<Option<Json>, Refusal> {
         ast::Value::Object(fields) => {
             let mut obj = Map::new();
             for (k, x) in fields {
-                if let Some(x) = value(x, vars)? {
+                let x = value(x, vars)?;
+                // Input Object Field Uniqueness (§5.6.3).
+                if obj.contains_key(k.as_str()) {
+                    return Err(invalid(format!("the input field {k} is given twice")));
+                }
+                if let Some(x) = x {
                     obj.insert(k.to_string(), x);
                 }
             }
@@ -590,6 +645,10 @@ fn value(v: &ast::Value, vars: &Vars) -> Result<Option<Json>, Refusal> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn read(body: &Json) -> Result<Operation, Refusal> {
+        super::read(body, body.to_string().len())
+    }
 
     fn calls(body: Json) -> String {
         read(&body).unwrap().calls_var(8 * 1024)
@@ -698,8 +757,9 @@ mod tests {
         assert!(shown.contains("(9000 chars)"));
         assert!(op.request_var().contains(&"a".repeat(9000)));
         // Bulky values go before the short ones that name the target.
-        let bulk: serde_json::Map<String, Json> =
-            (0..400).map(|i| (format!("K{i}"), json!("v".repeat(20)))).collect();
+        let bulk: serde_json::Map<String, Json> = (0..400)
+            .map(|i| (format!("K{i}"), json!("v".repeat(20))))
+            .collect();
         let q = "mutation($v: JSON) { variableCollectionUpsert(input: {variables: $v}) serviceDelete(id: \"prod-db\") }";
         let shown = read(&json!({"query": q, "variables": {"v": bulk}}))
             .unwrap()
@@ -713,15 +773,25 @@ mod tests {
         let shown = read(&json!({"query": format!("mutation {{ {many} }}")}))
             .unwrap()
             .calls_var(8192);
-        assert!(!shown.contains("svc-0") || shown.contains("svc-299"), "{shown}");
-        assert!(shown.contains(r#""count":300"#) || shown.contains("svc-299"), "{shown}");
+        assert!(
+            !shown.contains("svc-0") || shown.contains("svc-299"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains(r#""count":300"#) || shown.contains("svc-299"),
+            "{shown}"
+        );
         // A large pile of distinct field names stays quick.
         let wide: String = (0..20_000).map(|i| format!("f{i} ")).collect();
         let started = std::time::Instant::now();
         let op = read(&json!({"query": format!("mutation {{ {wide} }}")})).unwrap();
         assert!(op.calls_var(8192).len() <= 8192);
         assert_eq!(op.fields().len(), 20_000);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
         // Identical padding calls fold into a count; the delete keeps its target.
         let pad: String = (0..400)
             .map(|i| format!("p{i}: serviceInstanceRedeploy(serviceId: \"same\") "))
@@ -731,9 +801,7 @@ mod tests {
         assert!(shown.contains(r#""count":400"#), "{shown}");
         assert!(shown.contains(r#""id":"prod-db""#), "{shown}");
         // A huge batch of distinct fields keeps every name it can, then counts the rest.
-        let many: String = (0..2000)
-            .map(|i| format!("f{i}(id: \"{i}\") "))
-            .collect();
+        let many: String = (0..2000).map(|i| format!("f{i}(id: \"{i}\") ")).collect();
         let shown = read(&json!({"query": format!("mutation {{ {many} }}")}))
             .unwrap()
             .calls_var(8192);
@@ -744,7 +812,8 @@ mod tests {
     #[test]
     fn escapes_are_decoded_before_reading() {
         let body: Json =
-            serde_json::from_str(r#"{"query":"mutation { service\u0044elete(id: \"x\") }"}"#).unwrap();
+            serde_json::from_str(r#"{"query":"mutation { service\u0044elete(id: \"x\") }"}"#)
+                .unwrap();
         assert_eq!(read(&body).unwrap().fields().join("\n"), "serviceDelete");
         let s = calls(json!({"query": "mutation { serviceDelete(id: \"\\u0078\\u{79}\") }"}));
         assert_eq!(s, r#"[{"args":{"id":"xy"},"field":"serviceDelete"}]"#);
@@ -803,6 +872,37 @@ mod tests {
         ] {
             assert_eq!(refused(body.clone()), 422, "{body}");
         }
+    }
+
+    #[test]
+    fn a_variable_used_too_often_for_its_size_is_refused() {
+        let refs: String = (0..10_000).map(|_| "$v, ").collect();
+        let q = format!("mutation($v: String!) {{ f(x: [{refs}]) }}");
+        let body = json!({"query": q, "variables": {"v": "x".repeat(10_000)}});
+        assert_eq!(refused(body), 400);
+        // A small value used often is fine.
+        let body = json!({"query": q, "variables": {"v": "id"}});
+        assert!(read(&body).is_ok());
+    }
+
+    #[test]
+    fn what_the_spec_calls_invalid_is_refused_even_without_a_schema() {
+        assert_eq!(
+            refused(
+                json!({"query": "mutation { serviceDelete(id: \"x\") @skip(if: false) @skip(if: true) }"})
+            ),
+            422
+        );
+        assert_eq!(
+            refused(json!({"query": "mutation { a(i: {k: 1, k: 2}) }"})),
+            422
+        );
+        assert_eq!(
+            refused(
+                json!({"query": "mutation($n: Int) { a(n: $n) }", "variables": {"n": 9007199254740993u64}})
+            ),
+            400
+        );
     }
 
     #[test]

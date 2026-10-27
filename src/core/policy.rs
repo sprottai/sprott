@@ -731,11 +731,19 @@ impl Condition {
         let program = cel::Program::compile(s).map_err(|e| e.to_string())?;
         let mut vars = Vec::new();
         let mut unknown = Vec::new();
-        walk_names(program.expression(), &mut Vec::new(), &mut vars, &mut unknown);
+        let mut calls = Vec::new();
+        walk_names(program.expression(), &mut Vec::new(), &mut vars, &mut unknown, &mut calls);
         if let Some(name) = unknown.first() {
             return Err(format!(
                 "`{name}` is not a known name (a var is `vars.<name>`; quote a string literal)"
             ));
+        }
+        // A function this build doesn't provide would error on every request
+        // and the rule would never fire: refused here instead.
+        calls.sort();
+        calls.dedup();
+        if let Some(f) = calls.iter().find(|f| !function_exists(f)) {
+            return Err(format!("`{f}()` is not a function this policy engine provides"));
         }
         if vars.is_empty() {
             return Err("it reads no `vars.<name>`".into());
@@ -801,13 +809,30 @@ impl Condition {
     }
 }
 
-/// Collect the `vars.<a>[.<b>]` a CEL expression reads, and any other free
-/// name (a comprehension's own variables are bound inside it).
+/// Whether the engine provides a function of this name: called as a plain
+/// function and as a method, with no arguments, it answers "undeclared" in
+/// both forms only when it doesn't exist (a wrong arity or receiver is a
+/// different error).
+fn function_exists(name: &str) -> bool {
+    [format!("{name}()"), format!("''.{name}()")].iter().any(|src| {
+        cel::Program::compile(src).is_ok_and(|probe| {
+            !matches!(
+                probe.execute(&cel::Context::default()),
+                Err(cel::ExecutionError::UndeclaredReference(_))
+            )
+        })
+    })
+}
+
+/// Collect the `vars.<a>[.<b>]` a CEL expression reads, any other free name
+/// (a comprehension's own variables are bound inside it), and the functions
+/// it calls (operators and macros have non-identifier names and are skipped).
 fn walk_names(
     e: &cel::IdedExpr,
     bound: &mut Vec<String>,
     vars: &mut Vec<String>,
     unknown: &mut Vec<String>,
+    calls: &mut Vec<String>,
 ) {
     use cel::common::ast::{EntryExpr, Expr};
     let vars_path = |e: &cel::IdedExpr| -> Option<String> {
@@ -846,43 +871,50 @@ fn walk_names(
         {
             unknown.push("vars[…]".into());
         }
-        Expr::Select(s) => walk_names(&s.operand, bound, vars, unknown),
+        Expr::Select(s) => walk_names(&s.operand, bound, vars, unknown, calls),
         Expr::Call(c) => {
+            let is_ident = |n: &str| {
+                n.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            };
+            if is_ident(&c.func_name) {
+                calls.push(c.func_name.clone());
+            }
             if let Some(t) = &c.target {
-                walk_names(t, bound, vars, unknown);
+                walk_names(t, bound, vars, unknown, calls);
             }
             for a in &c.args {
-                walk_names(a, bound, vars, unknown);
+                walk_names(a, bound, vars, unknown, calls);
             }
         }
         Expr::Comprehension(c) => {
-            walk_names(&c.iter_range, bound, vars, unknown);
+            walk_names(&c.iter_range, bound, vars, unknown, calls);
             let n = bound.len();
             bound.push(c.iter_var.clone());
             bound.extend(c.iter_var2.clone());
             bound.push(c.accu_var.clone());
             for x in [&c.accu_init, &c.loop_cond, &c.loop_step, &c.result] {
-                walk_names(x, bound, vars, unknown);
+                walk_names(x, bound, vars, unknown, calls);
             }
             bound.truncate(n);
         }
         Expr::List(l) => {
             for x in &l.elements {
-                walk_names(x, bound, vars, unknown);
+                walk_names(x, bound, vars, unknown, calls);
             }
         }
         Expr::Map(m) => {
             for entry in &m.entries {
                 if let EntryExpr::MapEntry(me) = &entry.expr {
-                    walk_names(&me.key, bound, vars, unknown);
-                    walk_names(&me.value, bound, vars, unknown);
+                    walk_names(&me.key, bound, vars, unknown, calls);
+                    walk_names(&me.value, bound, vars, unknown, calls);
                 }
             }
         }
         Expr::Struct(st) => {
             for entry in &st.entries {
                 if let EntryExpr::StructField(f) = &entry.expr {
-                    walk_names(&f.value, bound, vars, unknown);
+                    walk_names(&f.value, bound, vars, unknown, calls);
                 }
             }
         }
@@ -914,8 +946,9 @@ pub(crate) fn pattern_matches(pattern: &str, method: &str, path: &str) -> bool {
 /// A rule fires when either form matches.
 pub fn policy_body_view(raw: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    // Without a backslash there is no escape to decode.
-    if !raw.contains('\\') {
+    // Only `\uXXXX` and `\/` can spell a character a rule's pattern names;
+    // the other escapes (`\n`, `\"`, `\\`…) can't hide one.
+    if !raw.contains("\\u") && !raw.contains("\\/") {
         return Cow::Borrowed(raw);
     }
     match serde_json::from_str::<serde_json::Value>(raw)
@@ -2076,6 +2109,11 @@ mod tests {
         assert!(Condition::parse("1 == 1").is_none());
         assert!(Condition::parse("vars.amount == bare").is_none());
         assert!(Condition::parse("vars['amount'] > 1").is_none());
+        // A function this build lacks is refused, not left to fail on every request.
+        assert!(Condition::compile("vars.model.matches('^o3')").is_err());
+        assert!(Condition::compile("vars.model.startswith('o3')").is_err());
+        assert!(Condition::compile("vars.model.startsWith('o3')").is_ok());
+        assert!(Condition::compile("size(vars.fields) > 0 && vars.fields.exists(f, f == 'a')").is_ok());
         // A type test, and a number sent as text read either way.
         let c = Condition::parse("!(type(vars.amount) in [int, uint, double]) || vars.amount > 100").unwrap();
         assert!(c.eval(&text));

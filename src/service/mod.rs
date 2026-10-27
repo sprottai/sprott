@@ -756,8 +756,9 @@ impl<'a> Reads<'a> {
     /// The body as the GraphQL operation a server would run.
     fn graphql(&mut self) -> Result<Option<&graphql::Operation>, Unreadable> {
         if self.gql.is_none() {
+            let len = self.body.map_or(0, <[u8]>::len);
             let read = match self.json() {
-                Ok(Some(body)) => graphql::read(body).map(Some).map_err(Unreadable::from),
+                Ok(Some(body)) => graphql::read(body, len).map(Some).map_err(Unreadable::from),
                 Ok(None) => Ok(None),
                 Err(e) => Err(e),
             };
@@ -2448,6 +2449,17 @@ secrets = ["GITHUB_TOKEN"]
     }
 
     #[test]
+    fn compiled_github_graphql_queries_and_routine_mutations_ride_the_floor() {
+        use crate::core::policy::AccessLevel;
+        for body in [
+            r#"{"query":"query { viewer { login } }"}"#,
+            r#"{"query":"mutation { addComment(input: {subjectId: \"I\", body: \"hi\"}) { clientMutationId } }"}"#,
+        ] {
+            assert_eq!(eval_compiled("github", "POST", "/graphql", body), AccessLevel::Allow, "{body}");
+        }
+    }
+
+    #[test]
     fn compiled_github_policy_covers_every_spelling_of_a_repository() {
         use crate::core::policy::AccessLevel;
         for (method, path, body) in [
@@ -2457,6 +2469,7 @@ secrets = ["GITHUB_TOKEN"]
             ("PUT", "/repositories/1296269/collaborators/x", "{}"),
             ("POST", "/repositories/1296269/transfer", "{}"),
             ("PUT", "/organizations/9919/actions/secrets/X", "{}"),
+            ("POST", "/graphql", r#"{"query":"mutation { deleteBranchProtectionRule(input: {branchProtectionRuleId: \"B\"}) { clientMutationId } }"}"#),
         ] {
             assert_eq!(
                 eval_compiled("github", method, path, body),
