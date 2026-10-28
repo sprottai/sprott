@@ -546,6 +546,29 @@ pub struct RekeyProof {
     pub membership_hash: Vec<u8>,
 }
 
+impl RekeyProof {
+    /// Whether `sig` is a valid signature over [`crate::identity::rekey_sig_input`]
+    /// by the published cred key of `signer_id` ([`KeysetUik::signer_key`]).
+    /// Whether that signer may re-key is the caller's check.
+    pub(crate) fn signature_valid(&self, uik: &KeysetUik, vault_id: &str) -> bool {
+        let Ok(sig) = <[u8; 64]>::try_from(self.sig.as_slice()) else {
+            return false;
+        };
+        let Some(signer_pub) = uik.signer_key(&self.signer_id) else {
+            return false;
+        };
+        let input = crate::identity::rekey_sig_input(
+            vault_id,
+            self.generation,
+            &self.k_commitment,
+            &self.signer_id,
+            self.membership_len,
+            &self.membership_hash,
+        );
+        crate::identity::verify(&signer_pub, &input, &sig)
+    }
+}
+
 /// An owner-signed delegation event — the any-owner, issuance-time-authority half
 /// of the owner-set fold (design/identity-uik-aik.md §4.3,
 /// delegation-log-impl-spec.md §1.2). Appended to [`KeysetUik::delegation_log`]
@@ -1207,14 +1230,6 @@ fn verify_rekey_proof(
     if proof.k_commitment.as_slice() != rekey_commitment(content_key).as_slice() {
         return false;
     }
-    let Ok(sig) = <[u8; 64]>::try_from(proof.sig.as_slice()) else {
-        return false;
-    };
-    // The signer must be a PUBLISHED member key whose id matches the claimed
-    // signer (C.1 anchor) — a backend-minted key isn't in the keyset.
-    let Some(signer_pub) = uik.signer_key(&proof.signer_id) else {
-        return false;
-    };
     // The signer must be an ADMIN in the verified role set (D). (`is_admin`, not a
     // pattern: a legacy `"owner"` grant reads as `LegacyOwner`, also an admin.)
     let admin = membership
@@ -1223,15 +1238,9 @@ fn verify_rekey_proof(
     if !admin {
         return false;
     }
-    let input = crate::identity::rekey_sig_input(
-        vault_id,
-        proof.generation,
-        &proof.k_commitment,
-        &proof.signer_id,
-        proof.membership_len,
-        &proof.membership_hash,
-    );
-    crate::identity::verify(&signer_pub, &input, &sig)
+    // Signed under a PUBLISHED member key whose id matches the claimed signer
+    // (C.1 anchor) — a backend-minted key isn't in the keyset.
+    proof.signature_valid(uik, vault_id)
 }
 
 /// Membership anti-rollback check (delegation-log-review-findings.md C2): the current

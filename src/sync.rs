@@ -6089,39 +6089,34 @@ fn adopt_rekey_meta(
         .transpose()
         .map_err(|e| format!("membership_hash: {}", e))?
         .unwrap_or_default();
-    let Ok(sig) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
-        return Ok(()); // malformed signature → ignore (don't ratchet)
+    let candidate = pv_store::RekeyProof {
+        generation,
+        k_commitment,
+        sig: sig_bytes,
+        signer_id,
+        membership_len,
+        membership_hash,
     };
     // The signer must be an OWNER in the CURRENT folded owner-set. A K-rotation
     // (`generation` bump) is ORTHOGONAL to the role checkpoint (`role_epoch`) under
     // the two-counter model, so the owner-set is folded at the current role_epoch
     // (checkpoint ∘ delegation_log), NOT re-derived at the proposed `generation`. A
     // member's self-signed proof fails here (a member is not an owner).
-    if pv.fold_roles(vault_id).get(&signer_id)
+    if pv.fold_roles(vault_id).get(&candidate.signer_id)
         != Some(&crate::storage::plaintext::MemberRole::Admin)
     {
         return Ok(());
     }
-    // The signer's published sig pubkey (C.1 anchor): a keyset cred whose derived
-    // id matches `signer_id` — a backend-minted key isn't in the keyset.
-    let Some(signer_pub) = pv
+    // Signed under the signer's published sig pubkey (C.1 anchor): a keyset cred
+    // whose derived id matches `signer_id` — a backend-minted key isn't in the
+    // keyset. A malformed or non-verifying signature → ignore (don't ratchet).
+    if !pv
         .keyset
         .uik
         .as_ref()
-        .and_then(|uik| uik.signer_key(&signer_id))
-    else {
+        .is_some_and(|uik| candidate.signature_valid(uik, vault_id))
+    {
         return Ok(());
-    };
-    let input = crate::identity::rekey_sig_input(
-        vault_id,
-        generation,
-        &k_commitment,
-        &signer_id,
-        membership_len,
-        &membership_hash,
-    );
-    if !crate::identity::verify(&signer_pub, &input, &sig) {
-        return Ok(()); // signature does not verify → forged bump → ignore
     }
     // Verified owner-signed proof at `G`: NOW ratchet forward + store the proof.
     let uik = pv
@@ -6129,14 +6124,7 @@ fn adopt_rekey_meta(
         .uik
         .get_or_insert_with(pv_store::KeysetUik::default);
     uik.generation = generation;
-    uik.rekey_proof = Some(pv_store::RekeyProof {
-        generation,
-        k_commitment,
-        sig: sig_bytes,
-        signer_id,
-        membership_len,
-        membership_hash,
-    });
+    uik.rekey_proof = Some(candidate);
     Ok(())
 }
 
