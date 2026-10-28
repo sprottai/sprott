@@ -2013,34 +2013,6 @@ impl PerItemVault {
         Ok(())
     }
 
-    /// Drop every credential seal belonging to member `user_id` (offboarding /
-    /// re-key removes the departed member's access; SM §3.2). No-op on a v1
-    /// keyset. Returns the number of credential seals removed.
-    pub fn remove_uik_member(&mut self, user_id: &str) -> usize {
-        let Some(uik) = self.keyset.uik.as_mut() else {
-            return 0;
-        };
-        let before = uik.creds.len();
-        uik.creds.retain(|_, c| c.user_id != user_id);
-        before - uik.creds.len()
-    }
-
-    /// The current keyset row version for `cid_b64` — the analogue of
-    /// [`item_version`] for the keyset (there is no per-row version stored today,
-    /// so this is a placeholder used only by tests / future CAS). The keyset row
-    /// version lives cloud-side (`vault_keys.version`); the daemon adopts a row
-    /// whenever its pulled version exceeds what it last saw for that cid, tracked
-    /// by the caller (see `sync::pull_keys`), not on-disk.
-    pub fn has_credential(&self, cid_b64: &str) -> bool {
-        let Ok(cid_bytes) = decode_credential_id(cid_b64) else {
-            return false;
-        };
-        self.keyset
-            .credentials
-            .iter()
-            .any(|c| c.credential_id == cid_bytes)
-    }
-
     /// The current CAS version of item `(ns, name)`, or `0` if absent — i.e.
     /// the `base_version` a new write should CAS against (contract §6).
     pub fn item_version<S: PrimitiveSuite>(
@@ -4743,11 +4715,8 @@ pub(crate) mod tests {
         let opened = ruik.open_k(vid, &entry.k_encapped, &entry.k_ct).unwrap();
         assert_eq!(&opened[..], &k[..]);
 
-        // An unknown credential has no seal; offboarding drops the member's rows.
+        // An unknown credential has no seal.
         assert!(loaded.uik_cred("unknown-cid").is_none());
-        let mut pv2 = loaded;
-        assert_eq!(pv2.remove_uik_member(&uik.user_id()), 1);
-        assert!(pv2.uik_cred(&cid_b64).is_none());
     }
 
     #[test]

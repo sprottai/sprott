@@ -1,6 +1,6 @@
 //! Sprott identity & signing layer — Ed25519 principals (UIK / AIK),
 //! self-certifying ids, and the canonical signing-input builders that config
-//! signatures, re-key events, lineage succession, and the server-signed sync
+//! signatures, re-key events, root succession, and the server-signed sync
 //! envelope are all computed over.
 //!
 //! ## Boundary — why this lives here and NOT in the `sudp` crate
@@ -91,8 +91,9 @@ pub const DS_PRINCIPAL_EVENT: &[u8] = b"safeclaw/v1/principal-event";
 /// [`vault_tombstone_input`].
 pub const DS_VAULT_TOMBSTONE: &[u8] = b"safeclaw/v1/vault-tombstone";
 
-/// UIK lineage succession certificate (old UIK signs the new UIK). See
-/// [`succession_input`].
+/// Reserved for a UIK lineage succession certificate (old UIK signs the new
+/// UIK). Nothing signs or verifies one today; the tag stays so it is never
+/// reused for another input.
 pub const DS_SUCCESSION: &[u8] = b"safeclaw/v1/uik-succession";
 
 /// Server-key signature over the whole sync envelope. See [`server_envelope_input`].
@@ -759,9 +760,7 @@ pub fn vault_tombstone_input(vault_id: &str) -> Vec<u8> {
 /// The `new_root_sig_pub` (raw 32 bytes) is bound in the signature so the server
 /// cannot swap in a root pubkey of its choosing; `old_root_id` must equal
 /// `derive_id(current root)` at verification; `role_epoch` must strictly increase
-/// along the chain (rollback guard). This differs from [`succession_input`], which
-/// is a PERSON's key rotation preserving one id — here the root's id CHANGES
-/// (ownership moves to a different principal).
+/// along the chain (rollback guard).
 pub fn root_succession_input(
     vault_id: &str,
     old_root_id: &str,
@@ -776,22 +775,6 @@ pub fn root_succession_input(
     push_lp(&mut out, new_root_id.as_bytes());
     push_lp(&mut out, new_root_sig_pub);
     out.extend_from_slice(&role_epoch.to_be_bytes());
-    out
-}
-
-/// Signing input for a UIK lineage succession certificate: the *old* UIK signs
-/// the new UIK's id + public key so verifiers accept the new key under the old
-/// identity (id continuity across rotation).
-///
-/// ```text
-/// lp(DS_SUCCESSION) ‖ lp(old_id) ‖ lp(new_id) ‖ lp(new_pubkey)
-/// ```
-pub fn succession_input(old_id: &str, new_id: &str, new_pubkey: &[u8; 32]) -> Vec<u8> {
-    let mut out = Vec::new();
-    push_lp(&mut out, DS_SUCCESSION);
-    push_lp(&mut out, old_id.as_bytes());
-    push_lp(&mut out, new_id.as_bytes());
-    push_lp(&mut out, new_pubkey);
     out
 }
 
