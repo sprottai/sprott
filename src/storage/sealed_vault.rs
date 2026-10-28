@@ -969,8 +969,7 @@ fn fold_agent_record(
                 .get("owner")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let is_owner =
-                membership.get(&sid) == Some(&crate::storage::plaintext::MemberRole::Admin);
+            let is_owner = membership.get(&sid).is_some_and(|r| r.is_admin());
             if is_owner || sid == owner {
                 Some(body)
             } else {
@@ -1020,7 +1019,7 @@ fn fold_owner_config_record(
         MembershipTrust::Untrusted => None,
         MembershipTrust::NoUik => Some(body),
         MembershipTrust::Verified(membership) => {
-            if membership.get(&sid) == Some(&crate::storage::plaintext::MemberRole::Admin) {
+            if membership.get(&sid).is_some_and(|r| r.is_admin()) {
                 Some(body)
             } else {
                 None
@@ -1100,10 +1099,7 @@ fn unwrap_verified_config(
             // owner-set. An unsigned legacy-raw body is dropped (a K-holding
             // member could have written it).
             MembershipTrust::Verified(membership) => match signer {
-                Some(signer_id)
-                    if membership.get(&signer_id)
-                        == Some(&crate::storage::plaintext::MemberRole::Admin) =>
-                {
+                Some(signer_id) if membership.get(&signer_id).is_some_and(|r| r.is_admin()) => {
                     Some(data)
                 }
                 _ => None,
@@ -1673,9 +1669,7 @@ fn owner_config_tombstone_honored(
                 sig,
                 signer,
             )
-            .is_some_and(|sid| {
-                membership.get(&sid) == Some(&crate::storage::plaintext::MemberRole::Admin)
-            })
+            .is_some_and(|sid| membership.get(&sid).is_some_and(|r| r.is_admin()))
         }
     }
 }
@@ -2996,7 +2990,7 @@ impl PerItemVault {
             // A junk / non-owner event must NOT consume the seq slot (else it could
             // suppress a legitimate same-seq event — the dup guard would then drop the
             // real one), so `last_seq` advances ONLY AFTER full validation below.
-            if map.get(&e.granter_id) != Some(&MemberRole::Admin) {
+            if !map.get(&e.granter_id).is_some_and(|r| r.is_admin()) {
                 continue;
             }
             // The granter's verifying key rides INLINE and is SELF-CERTIFYING: it must
@@ -3029,7 +3023,8 @@ impl PerItemVault {
             };
             match e.op.as_str() {
                 "remove" => {
-                    if map.get(&e.subject_id) == Some(&MemberRole::Admin) && admin_count(&map) <= 1
+                    if map.get(&e.subject_id).is_some_and(|r| r.is_admin())
+                        && admin_count(&map) <= 1
                     {
                         continue; // last-admin guard: never empty the admin set
                     }
@@ -3038,7 +3033,7 @@ impl PerItemVault {
                 "set" => {
                     // A demote (admin → member) of the last admin would empty it → skip.
                     if !e.role.is_admin()
-                        && map.get(&e.subject_id) == Some(&MemberRole::Admin)
+                        && map.get(&e.subject_id).is_some_and(|r| r.is_admin())
                         && admin_count(&map) <= 1
                     {
                         continue;

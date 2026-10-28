@@ -6102,8 +6102,10 @@ fn adopt_rekey_meta(
     // the two-counter model, so the owner-set is folded at the current role_epoch
     // (checkpoint ∘ delegation_log), NOT re-derived at the proposed `generation`. A
     // member's self-signed proof fails here (a member is not an owner).
-    if pv.fold_roles(vault_id).get(&candidate.signer_id)
-        != Some(&crate::storage::plaintext::MemberRole::Admin)
+    if !pv
+        .fold_roles(vault_id)
+        .get(&candidate.signer_id)
+        .is_some_and(|r| r.is_admin())
     {
         return Ok(());
     }
