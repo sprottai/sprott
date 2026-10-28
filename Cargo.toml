@@ -1,6 +1,6 @@
 [package]
 name = "sprott"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
 # Functional Source License 1.1 (Apache-2.0 future). FSL is not an SPDX id,
@@ -87,8 +87,24 @@ toml = "0.8"
 # gzip for `sc service add github:…`: a source tarball is read in memory
 # (never extracted to disk). Already in the tree via hudsucker's decoder.
 flate2 = "1"
+# The other request content codings policy reads a body through (RFC 9110:
+# br, zstd). Both already in the tree via hudsucker's decoder.
+brotli = "8"
+zstd = "0.13"
 dirs = "5"
+# GraphQL documents in brokered requests (service/graphql.rs): the parser and
+# spec validation Apollo Router builds on. Only the schema-free AST layer is
+# used: the request's operation is read, never executed.
+apollo-compiler = "1.33"
 url = "2"
+# RFC 3986 normalization of the request path the proxy decides on
+# (core/path.rs). Already in the tree via tower-http.
+iri-string = "0.7"
+percent-encoding = "2"
+# Policy `when` conditions are CEL (Common Expression Language, the rule
+# language of Kubernetes admission policies, Envoy RBAC and Google IAM), via
+# cel-rust.
+cel = { version = "0.15", default-features = false }
 urlencoding = "2"
 
 # Misc

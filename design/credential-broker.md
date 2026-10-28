@@ -433,10 +433,11 @@ replace-all-matching strips agent-supplied auth so the agent can't shadow the
 injected credential; `/export` off the agent surface removes the raw-reveal path;
 OAuth is curated-only.
 
-**Approval-cache key includes the resolved host** — an approval for host A must
-not authorize host B within the TTL (host is request-data in this model). Key =
-`(conn_id, rule_id, method, host)`; for single-host connections behaviour is
-unchanged.
+**A permit's key includes the resolved host**: an approval for host A must not
+authorize host B within its window (host is request-data in this model). A
+rule or floor window is keyed `(agent, conn_id, host, unit)` and a
+request-bound permit by the request line, each with the credential set the
+request resolved; for single-host connections behaviour is unchanged.
 
 **New-destination confirmation = higher-friction, exact-FQDN.** First unmatched
 host → a captive-portal one-tap-**widen** that writes an **exact FQDN** as a
@@ -566,28 +567,37 @@ on a paired daemon also names `sc op wait <op_id>` — a waiter that polls
 5 rejected / 3 expired / 4 timeout; 2 stays clap's usage-error code). An
 agent backgrounds it and treats process-exit as its wake-up — the `sc up`
 unlock experience generalized to every approval. Polling never consumes the
-grant (a retry reads the approval cache; only `ask-always` burns it
-single-use), so waiting and re-running can't race. The record's
+permit (only the replay spends a single-use one), so waiting and re-running
+can't race. The record's
 `expires_at` tracks the op's own Valid window, so the waiter 404s
 exactly when the op stops being approvable. Sandboxed agent without `sc` →
 the JSON `poll_url` is the same contract by hand; the reject-and-re-run
 floor is unchanged.
 
-**An `ask-always` approval is a one-shot bound to the request the user saw**
-(v0.9.28): approving mints a grant keyed by the op's `(connection, method,
-host, path)` in `op_grants`, consumed single-use by the replay
-(`op_grant_take`). A replay whose method/host/path differ — the
-approve-$80-then-send-$180 shape rides only as far as the path identity;
-a different endpoint or verb re-prompts — misses WITHOUT consuming, so the
-legitimate replay still works. The ask-always resolve path never reads the
-conn-keyed `entries`, so an unconsumed approval can no longer be spent by an
-unrelated later request on the same connection, and it can't ride allow
-residency or a plain-ask leftover. The redeem window is generous
-(`ASK_ALWAYS_REPLAY_WINDOW_SECS`, 30 min — an agent that replays only when
-its user next prompts it may take minutes); single-use + exact binding is
-the guard, not time. Known boundary (settled 2026-07-09): the request BODY
-is not part of the binding — same method+host+path with a different body
-redeems. Body-field binding is the Phase-2 `[requests]`/vars/scope design.
+**An `ask-always` approval is a one-shot bound to the request the user saw**:
+approving stores a permit keyed by the op's `(connection, method, host, path,
+bound values, tier)` and the credential set the request resolved (its
+service id and the KEYs its phantoms named), spent single-use by the replay.
+The permit carries no value: approving resolves nothing and opens no vault;
+the replay reads its values itself once its permit is found (a sealed value
+is opened only then). A replay whose method/host/path, bound values or
+credentials differ (another or an extra role) misses WITHOUT spending it, so
+the legitimate replay still works. Residency never authorizes: a value held
+in memory serves only a request policy allows or a permit lets through. The
+redeem window is generous (`ASK_ALWAYS_REPLAY_WINDOW_SECS`, 30 min; an agent
+that replays only when its user next prompts it may take minutes); single
+use + exact binding is the guard, not time. Known boundary (settled
+2026-07-09): the request BODY is not part of the binding: same
+method+host+path with a different body redeems. Body-field binding is the
+Phase-2 `[requests]`/vars/scope design.
+
+**A request goes through one pipeline, from one snapshot**: egress floor,
+phantom check (an unknown role is `unknown_role`, a mint input
+`refresh_forbidden`), the request read the standard way, policy (deny
+first), values located (each KEY walked through the store order once per
+snapshot; missing is `secret_not_set`, a store failing ahead of it
+`store_unavailable`; never an approval), host anchor (widen), permit (allow
+needs none), values read, permit spent, forward.
 
 **The agent's env = its SSOT — two dotenv vars, minted as ONE block:**
 

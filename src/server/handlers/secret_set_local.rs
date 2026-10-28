@@ -28,11 +28,13 @@
 //!   - The value rides the LOCAL control plane in plaintext (like
 //!     `op-payload`), never the cloud. When the vault is LOCKED, `K` isn't
 //!     resident: the endpoint answers `{ "written": false, "locked": true }`
-//!     and the CLI falls back to the passkey ceremony (which unlocks + writes).
+//!     and the CLI falls back to the passkey ceremony, whose op a Locked
+//!     vault refuses (`sprott unlock` first; an approval never unlocks).
 //!
 //! Body: `{ "key": "FOO", "value": "…", "hosts": ["api.x.com"]?, "no_broker": bool? }`.
 //! Response: `{ "written": true, "key", "conn", "hosts", "removed_prior_anchor",
-//! "existed", "used_by" }`,
+//! "existed", "used_by" }` (+ `"served": false, "served_message"` when the
+//! vault's store took the value but this device does not serve it yet),
 //! `{ "written": false, "locked": true }`, or
 //! `{ "written": false, "needs_approval": true, "new_hosts": [...] }`.
 
@@ -107,19 +109,19 @@ pub async fn create(
         crate::server::handlers::approve::validate_secret_set(key_raw, &hosts, no_broker)?;
     let conn = key.to_ascii_lowercase();
 
-    // The gate: `K` is resident only while the vault is unlocked. Locked → tell
-    // the CLI to fall back to the passkey ceremony (which unlocks + writes).
-    let Some(k) = state.cloned_state_key(&vault_id) else {
-        return Ok(Json(json!({ "written": false, "locked": true })));
-    };
-
     // Serialize with every other writer that reseals this vault body (connect
     // exchange, oauth rotation, grant-approve writes) — same lock those use.
-    let (removed_prior_anchor, current_anchors, existed, used_by) = {
+    let (removed_prior_anchor, current_anchors, existed, used_by, installed) = {
         let _guard = state
             .vault_write_guard(&vault_id)
             .await
             .map_err(|error| error.app_error())?;
+        // The gate: `K` is resident only while the vault is unlocked. Read under
+        // the write lock (lock runs under it too), so a write that lost the race
+        // to `sprott lock` reads as locked instead of sealing with the evicted K.
+        let Some(k) = state.cloned_state_key(&vault_id) else {
+            return Ok(Json(json!({ "written": false, "locked": true })));
+        };
         let mut view =
             crate::server::handlers::metadata::open_view_with_state_key(&state, &vault_id, &k)?;
         let base = crate::storage::sealed_vault::ViewBase::of(&view)?;
@@ -162,8 +164,14 @@ pub async fn create(
             .connection_claims(&state.services, "")
             .remove(&key)
             .unwrap_or_default();
-        crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
-        (removed, anchors, existed, used_by)
+        let installed = crate::auth::connect::persist_mutated_view(
+            &state,
+            &vault_id,
+            &base,
+            &view,
+            crate::auth::connect::WriteKey::Held(&k),
+        )?;
+        (removed, anchors, existed, used_by, installed)
     };
 
     // Push AFTER the write guard drops — the push path re-takes the (non-
@@ -178,17 +186,20 @@ pub async fn create(
     }
 
     tracing::info!(vault = %vault_id, key = %key, "secret set (unlocked, no passkey)");
-    Ok(Json(json!({
-        "written": true,
-        "key": key,
-        "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
-        // A value-only write echoes the connection's CURRENT (untouched)
-        // anchors so the CLI can show what the key still routes to.
-        "hosts": if hosts.is_empty() { current_anchors } else { hosts },
-        "removed_prior_anchor": removed_prior_anchor,
-        "existed": existed,
-        "used_by": used_by,
-    })))
+    Ok(Json(crate::server::handlers::approve::with_served(
+        json!({
+            "written": true,
+            "key": key,
+            "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
+            // A value-only write echoes the connection's CURRENT (untouched)
+            // anchors so the CLI can show what the key still routes to.
+            "hosts": if hosts.is_empty() { current_anchors } else { hosts },
+            "removed_prior_anchor": removed_prior_anchor,
+            "existed": existed,
+            "used_by": used_by,
+        }),
+        installed,
+    )))
 }
 
 #[cfg(test)]

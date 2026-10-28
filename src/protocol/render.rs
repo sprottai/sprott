@@ -101,6 +101,9 @@ fn render_use(op: &Operation) -> String {
 
     let request = if !method.is_empty() || !host.is_empty() || !path.is_empty() {
         format!("{} {}{}", method, host, path).trim().to_string()
+    } else if op.act.target.contains(", ") {
+        // A request that resolved several KEYs names them all.
+        format!("the secrets at \"{}\"", op.act.target)
     } else {
         format!("the secret at \"{}\"", op.act.target)
     };
@@ -217,6 +220,18 @@ mod tests {
             },
             valid: Valid::single_use(0, Some(300)),
         }
+    }
+
+    /// With no request line, the op names the secrets it uses: one, or
+    /// several (a request that resolved more than one KEY).
+    #[test]
+    fn use_line_without_a_request_names_its_secrets() {
+        let one = render_operation(&use_op(json!({})));
+        assert!(one.starts_with("Use the secret at \"GITHUB_TOKEN\""), "{one}");
+        let mut op = use_op(json!({}));
+        op.act.target = "CF_ACCOUNT, CF_TOKEN".into();
+        let two = render_operation(&op);
+        assert!(two.starts_with("Use the secrets at \"CF_ACCOUNT, CF_TOKEN\""), "{two}");
     }
 
     /// A CLI / headless approver reads the level, the reuse (rule label or

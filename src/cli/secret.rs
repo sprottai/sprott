@@ -85,9 +85,10 @@ pub async fn run_set(args: SetArgs, approval: &ApprovalArgs) -> Result<(), Strin
     }
 
     // Fast-path: while the vault is UNLOCKED the daemon writes the secret
-    // directly under its resident K — no op, no passkey. Only a LOCKED vault
-    // needs the grant ceremony below (which unlocks + writes). The value rides
-    // the local control plane only, never the cloud.
+    // directly under its resident K — no op, no passkey. A new host takes the
+    // grant ceremony below (a LOCKED vault refuses its op: an approval writes,
+    // it never unlocks). The value rides the local control plane only, never
+    // the cloud.
     let (hosts_arg, no_broker_arg) = match &intent {
         BrokerIntent::Unspecified => (Vec::new(), false), // value only, binding untouched
         BrokerIntent::NoHost => (Vec::new(), true),
@@ -146,6 +147,10 @@ pub async fn run_set(args: SetArgs, approval: &ApprovalArgs) -> Result<(), Strin
 /// `used_by`, `hosts` and `removed_prior_anchor` (an older daemon omits the
 /// first two, so the line then says only what is known).
 fn print_set_result(key: &str, conn: &str, intent: &BrokerIntent, result: &serde_json::Value) {
+    if let Some(line) = crate::cli::approve::not_served(result) {
+        eprintln!("{} {}", key, line);
+        return;
+    }
     let strs = |field: &str| -> Vec<String> {
         result
             .get(field)
@@ -351,7 +356,8 @@ pub async fn run_rm(args: RmArgs, approval: &ApprovalArgs) -> Result<(), String>
     )
     .await?;
 
-    let refs: Vec<String> = act_result(&body)
+    let result = act_result(&body);
+    let refs: Vec<String> = result
         .get("referenced_by")
         .and_then(|v| v.as_array())
         .map(|a| {
@@ -368,6 +374,7 @@ pub async fn run_rm(args: RmArgs, approval: &ApprovalArgs) -> Result<(), String>
         );
     }
     println!("key '{}' removed", key);
+    crate::cli::approve::say_not_served(&result);
     Ok(())
 }
 

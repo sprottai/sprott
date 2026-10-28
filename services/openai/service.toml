@@ -9,3 +9,10 @@ hosts = ["api.openai.com"]
 secrets = ["OPENAI_API_KEY"]
 # Where a human mints the secret (auxiliary; display-only helper link).
 secret_url = "https://platform.openai.com/api-keys"
+
+# A generation request names its model in the body; policy decides on it and
+# an approval binds it.
+[requests.generate]
+match = ["POST /v1/chat/completions", "POST /v1/responses", "POST /v1/completions"]
+vars.model = "/model"
+scope = ["model"]

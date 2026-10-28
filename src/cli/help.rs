@@ -23,8 +23,8 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("setup", "Set up this machine and one agent"),
             ("skill", "Install or uninstall the agent skill"),
-            ("login", "Pair this host to your vault"),
-            ("logout", "Unpair this host"),
+            ("login", "Pair this device to your account"),
+            ("logout", "Unpair this device"),
             ("up", "Start the daemon and unlock the vault"),
             ("down", "Stop the daemon"),
             ("restart", "Restart the daemon and re-unlock"),

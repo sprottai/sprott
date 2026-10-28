@@ -160,13 +160,13 @@ pub enum Command {
     /// verify its sha256, and replace the running binary in place. No-op when
     /// already current. This is also how the baked cloud domain changes ship.
     Upgrade(UpgradeArgs),
-    /// Pair this host to your Sprott account: prints a short code and an
-    /// approval link; you approve in the browser, then this host gets its
-    /// cloud-side daemon credential. Writes `~/.sprott/device-key` (0600). Run once per host (re-run to repair/re-pair).
+    /// Pair this device to your Sprott account: prints a short code and an
+    /// approval link; you approve in the browser, then this device gets its
+    /// cloud-side daemon credential. Writes `~/.sprott/device-key` (0600). Run once per device (re-run to repair/re-pair).
     /// `sprott login` then brings the daemon up and unlocks for you; `sprott up` is the
     /// everyday "make sure it's running" afterwards.
     Login(LoginArgs),
-    /// Unpair this host: the inverse of `sprott login`. Stops the daemon, clears the
+    /// Unpair this device: the inverse of `sprott login`. Stops the daemon, clears the
     /// local pairing (active vault, cloud backend, known vaults), removes the
     /// `~/.sprott/device-key`, and revokes that device-key cloud-side (its
     /// plaintext is gone locally, so the server row is dead weight otherwise).
@@ -839,7 +839,7 @@ pub struct UpgradeArgs {
 /// Args for `sprott login`.
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// Friendly label shown for this host in the dashboard's device list.
+    /// Friendly label shown for this device in the console's device list.
     /// Defaults to the machine's hostname, else `agent-device`.
     #[arg(long)]
     pub device_name: Option<String>,
@@ -863,11 +863,11 @@ pub struct LoginArgs {
 /// Args for `sprott logout`.
 #[derive(Debug, Args)]
 pub struct LogoutArgs {
-    /// Keep this host's device-key registered on the server (don't revoke it
+    /// Keep this device's key registered on the server (don't revoke it
     /// cloud-side). By default logout DELETES the cloud-side key too: once the
     /// local `device-key` file is gone its plaintext is unrecoverable, so the
     /// server row could never be used again — leaving it just clutters your
-    /// dashboard's device list. Use `--keep-remote` only if something external
+    /// console's device list. Use `--keep-remote` only if something external
     /// still manages that key.
     #[arg(long)]
     pub keep_remote: bool,

@@ -51,6 +51,18 @@ pub fn unreadable_item_total() -> usize {
         .unwrap_or(0)
 }
 
+/// The rows a fold read and the rows it could not, by wire id
+/// ([`PerItemVault::fold_view_counted`]). A whole-blob vault is one row,
+/// [`WHOLE_BLOB_ROW`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FoldRows {
+    pub readable: std::collections::BTreeSet<String>,
+    pub unreadable: std::collections::BTreeSet<String>,
+}
+
+/// The one row a whole-blob vault (`vault.dat`, no per-item store) counts as.
+pub const WHOLE_BLOB_ROW: &str = "vault.dat";
+
 /// On-disk vault is exactly the sudp sealed-state JSON.
 pub type SealedVault = SealedState;
 
@@ -3032,16 +3044,17 @@ impl PerItemVault {
         Ok(self.fold_view_and_defaults::<S>(keys, vault_id)?.0)
     }
 
-    /// Fold the view and return how many current rows this key could not read.
-    /// Runtime retained-key refreshes use the count to keep serving their old
-    /// complete cache rather than replacing it with a partial fold.
+    /// Fold the view and return the rows this key read and the rows it could
+    /// not. An install ([`crate::state::AppState::install`]) compares them
+    /// with the rows the served cache read: a fold that cannot read one of
+    /// those is not served.
     pub fn fold_view_counted<S: PrimitiveSuite>(
         &self,
         keys: VaultKeys,
         vault_id: &str,
-    ) -> Result<(crate::storage::plaintext::VaultPlaintextView, usize)> {
-        let (view, _, unreadable) = self.fold_view_and_defaults::<S>(keys, vault_id)?;
-        Ok((view, unreadable))
+    ) -> Result<(crate::storage::plaintext::VaultPlaintextView, FoldRows)> {
+        let (view, _, rows) = self.fold_view_and_defaults::<S>(keys, vault_id)?;
+        Ok((view, rows))
     }
 
     /// [`Self::fold_view`], and the owner-config kinds that read their
@@ -3053,7 +3066,7 @@ impl PerItemVault {
     ) -> Result<(
         crate::storage::plaintext::VaultPlaintextView,
         std::collections::BTreeSet<ItemNs>,
-        usize,
+        FoldRows,
     )> {
         use crate::storage::item::rule;
         use crate::storage::plaintext::{VaultAux, VaultPlaintextView};
@@ -3092,7 +3105,10 @@ impl PerItemVault {
             ));
         }
 
-        let mut unreadable = 0usize;
+        let mut rows = FoldRows::default();
+        // The row the legacy `services` record was read from: unreadable if
+        // its body does not parse (after the loop).
+        let mut legacy_services_row: Option<&String> = None;
         for (id_b64, stored) in &self.items {
             // Fold each item independently: a single unreadable/unparseable item
             // (seal-parity mismatch, a body shape from a newer client, a rotated
@@ -3242,16 +3258,23 @@ impl PerItemVault {
                     // LEGACY(services row): unioned under the native items.
                     Read::LegacyUnionNativeWins => {
                         legacy_services = owner_config(payload.body);
+                        legacy_services_row = Some(id_b64);
                     }
                     Read::ConsoleOnly => {}
                 }
                 Ok(())
             })();
-            if let Err(e) = one {
-                // Not a version problem (a too-new vault format is refused before
-                // this, via the signed envelope): this record is unreadable as is.
-                unreadable += 1;
-                tracing::warn!(vault = %vault_id, item = %id_b64, "fold: skipping unreadable item: {}", e);
+            match one {
+                Ok(()) => {
+                    rows.readable.insert(id_b64.clone());
+                }
+                Err(e) => {
+                    // Not a version problem (a too-new vault format is refused
+                    // before this, via the signed envelope): this record is
+                    // unreadable as is.
+                    rows.unreadable.insert(id_b64.clone());
+                    tracing::warn!(vault = %vault_id, item = %id_b64, "fold: skipping unreadable item: {}", e);
+                }
             }
         }
 
@@ -3265,7 +3288,10 @@ impl PerItemVault {
             match serde_json::from_value(v) {
                 Ok(services) => aux.services = services,
                 Err(e) => {
-                    unreadable += 1;
+                    if let Some(id) = legacy_services_row {
+                        rows.readable.remove(id);
+                        rows.unreadable.insert(id.clone());
+                    }
                     tracing::warn!(vault = %vault_id, "fold: skipping the legacy services record: {}", e);
                 }
             }
@@ -3276,8 +3302,8 @@ impl PerItemVault {
         aux.services.extend(native_services);
 
         if let Ok(mut m) = UNREADABLE_ITEMS.lock() {
-            if unreadable > 0 {
-                m.insert(vault_id.to_string(), unreadable);
+            if !rows.unreadable.is_empty() {
+                m.insert(vault_id.to_string(), rows.unreadable.len());
             } else {
                 m.remove(vault_id);
             }
@@ -3294,7 +3320,7 @@ impl PerItemVault {
                 native_secret_notes,
             },
             defaults,
-            unreadable,
+            rows,
         ))
     }
 

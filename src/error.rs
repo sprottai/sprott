@@ -84,8 +84,17 @@ pub enum ScCode {
     /// one succeeds. Data stays on disk.
     LedgerStale,
     BrokerBodyLimit,
+    /// A brokered request whose path, query or body can't be read the way its
+    /// standard says (a malformed path escape, a body that isn't valid JSON, a
+    /// GraphQL query that doesn't parse, a query parameter given twice), where
+    /// policy has to read it. A server would refuse it too.
+    RequestUnreadable,
+    /// A brokered GraphQL request whose document parses but fails validation
+    /// (GraphQL over HTTP answers 422).
+    RequestInvalid,
+    /// A brokered request body in a content coding the proxy can't decode.
+    ContentEncodingUnsupported,
     EgressUnreachable,
-    ExposesUnsupported,
     HostForbidden,
     /// A team reach mask excludes this connection for the calling agent
     /// (team §8.1: visible-but-locked — the connection exists, this agent
@@ -108,9 +117,16 @@ pub enum ScCode {
     PolicyDenied,
     RefreshForbidden,
     SecretEncoding,
+    /// A KEY the request's phantom names is not in any of the vault's stores.
+    SecretNotSet,
+    /// A connection names a vault service definition this device does not
+    /// load (rejected, a conflict copy, or no such service).
+    ServiceNotLoaded,
     StoreUnavailable,
     VaultKeyChanged,
     UnknownConnection,
+    /// A role phantom naming a role its connection does not have.
+    UnknownRole,
     UpstreamBody,
     UpstreamError,
     /// The local daemon is too old for a vault it's brokering — the cloud returned
@@ -265,19 +281,33 @@ impl ScCode {
                 "configure",
                 "config",
             ),
+            RequestUnreadable => (
+                400,
+                "request_unreadable",
+                "Request could not be read",
+                "fix_request",
+                "request",
+            ),
+            RequestInvalid => (
+                422,
+                "request_invalid",
+                "Request is not valid",
+                "fix_request",
+                "request",
+            ),
+            ContentEncodingUnsupported => (
+                415,
+                "content_encoding_unsupported",
+                "Unsupported content encoding",
+                "fix_request",
+                "request",
+            ),
             EgressUnreachable => (
                 502,
                 "egress_unreachable",
                 "Egress unreachable",
                 "configure",
                 "environment",
-            ),
-            ExposesUnsupported => (
-                400,
-                "exposes_unsupported",
-                "Role not mintable",
-                "fix_request",
-                "request",
             ),
             HostForbidden => (403, "host_forbidden", "Host forbidden", "none", "policy"),
             MaskNotEnabled => (
@@ -346,6 +376,20 @@ impl ScCode {
                 "none",
                 "internal",
             ),
+            SecretNotSet => (
+                424,
+                "secret_not_set",
+                "Secret not set",
+                "configure",
+                "vault",
+            ),
+            ServiceNotLoaded => (
+                409,
+                "service_not_loaded",
+                "Service definition not loaded",
+                "configure",
+                "vault",
+            ),
             StoreUnavailable => (
                 502,
                 "store_unavailable",
@@ -364,6 +408,13 @@ impl ScCode {
                 400,
                 "unknown_connection",
                 "Unknown connection",
+                "fix_request",
+                "request",
+            ),
+            UnknownRole => (
+                400,
+                "unknown_role",
+                "Unknown role",
                 "fix_request",
                 "request",
             ),
@@ -409,6 +460,15 @@ pub const VAULT_ACCESS_REVOKED_MSG: &str =
     "This device can no longer use this vault: its account was removed from it.";
 
 pub const VAULT_KEY_CHANGED_MSG: &str = "This connection may have been added after the vault's members changed and its key was replaced. This device doesn't have the new key yet. Run `sprott unlock`.";
+
+/// A write the vault's store took that this device does not serve yet: the
+/// vault locked meanwhile, or its install is refused (the held key cannot
+/// read rows the served cache reads).
+pub const STORED_NOT_SERVED_MSG: &str = "stored; served on this device after `sprott unlock`";
+
+/// The status line of a vault whose last install was refused: what it
+/// serves is behind its store until `sprott unlock` serves the store.
+pub const VAULT_BEHIND_STATUS_MSG: &str = "behind: a change to this vault could not be applied on this device. Run `sprott unlock` to apply it.";
 
 pub const VAULT_KEY_CHANGED_STATUS_MSG: &str = "key changed: this vault's members changed (someone was removed), so it has a new key. Run `sprott unlock` once to see what was added since; existing credentials keep working.";
 
@@ -668,8 +728,10 @@ mod tests {
             AgentNotAdmitted,
             LedgerStale,
             BrokerBodyLimit,
+            RequestUnreadable,
+            RequestInvalid,
+            ContentEncodingUnsupported,
             EgressUnreachable,
-            ExposesUnsupported,
             HostForbidden,
             TeamLeaseExpired,
             HostNotAnchored,
@@ -682,9 +744,12 @@ mod tests {
             PolicyDenied,
             RefreshForbidden,
             SecretEncoding,
+            SecretNotSet,
+            ServiceNotLoaded,
             StoreUnavailable,
             VaultKeyChanged,
             UnknownConnection,
+            UnknownRole,
             UpstreamBody,
             UpstreamError,
             UpgradeRequired,

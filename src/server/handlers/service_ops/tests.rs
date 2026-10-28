@@ -193,8 +193,11 @@ fn mint(state: &AppState, scope: Value) -> std::result::Result<Value, String> {
 }
 
 fn unlock_with(state: &AppState, view: &VaultPlaintextView) {
-    let cache = crate::state::SecretsCache {
-        policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+    let cache = crate::snapshot::Snapshot {
+        inputs: crate::snapshot::PolicyInputs {
+            policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+            custom: Default::default(),
+        },
         service_entries: view.aux.services.clone(),
         connections: view
             .aux
@@ -493,8 +496,11 @@ fn state_with_store(
     crate::storage::sealed_vault::write_per_item_atomic(&path, pv).unwrap();
     let view = crate::server::handlers::metadata::decrypt_vault_view_peritem_with_key(k, pv, vault)
         .unwrap();
-    let cache = crate::state::SecretsCache {
-        policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+    let cache = crate::snapshot::Snapshot {
+        inputs: crate::snapshot::PolicyInputs {
+            policy: crate::core::policy::Policy::effective(view.aux.policy.as_ref()),
+            custom: Default::default(),
+        },
         service_entries: view.aux.services.clone(),
         // As an unlock fills it: the requests the daemon handles after a sync.
         service_requests: view.aux.service_requests.keys().cloned().collect(),
@@ -567,7 +573,14 @@ fn services_are_data_records_on_a_vault_with_members() {
     let req = parse_add(&signed).unwrap();
     let snap = admit_add(&req).unwrap();
     apply_add(&mut view, req, &snap, &signed, &state.services).unwrap();
-    persist(&state, vault, &base, &view, &k).unwrap();
+    persist(
+        &state,
+        vault,
+        &base,
+        &view,
+        crate::auth::connect::WriteKey::Grant(&k),
+    )
+    .unwrap();
     let pv = stored(&state, vault);
     let a1 = crate::storage::item::wire_id_for::<S>(
         keys.id_seed,
@@ -596,7 +609,14 @@ fn services_are_data_records_on_a_vault_with_members() {
     let mut view = open(&state);
     let base = crate::storage::sealed_vault::ViewBase::of(&view).unwrap();
     apply_rm(&mut view, "a1", &rm.act.scope).unwrap();
-    persist(&state, vault, &base, &view, &k).unwrap();
+    persist(
+        &state,
+        vault,
+        &base,
+        &view,
+        crate::auth::connect::WriteKey::Grant(&k),
+    )
+    .unwrap();
     assert!(stored(&state, vault).items[&a1].tombstone);
     assert!(open(&state).aux.services.is_empty());
 }

@@ -331,6 +331,9 @@ pub struct ConnectReport {
     pub completed: Vec<String>,
     pub failed: Vec<(String, String)>,
     pub unreached: Vec<(String, String)>,
+    /// The `completed` connects are stored but this device does not serve
+    /// them yet ([`crate::error::STORED_NOT_SERVED_MSG`]).
+    pub not_served: bool,
 }
 
 impl ConnectReport {
@@ -603,12 +606,14 @@ async fn apply_pending_connects_inner(
     vault_id: &str,
     injected: Option<std::collections::BTreeMap<String, String>>,
 ) -> ConnectReport {
-    let Some(k) = state.cloned_state_key(vault_id) else {
-        return ConnectReport::default(); // Locked — no retained K; next unlock retries.
-    };
-
     let Ok(_guard) = state.vault_write_guard(vault_id).await else {
         return ConnectReport::default();
+    };
+
+    // Read under the write lock (lock runs under it too), so a lock that won
+    // the race leaves nothing to seal with an evicted K.
+    let Some(k) = state.cloned_state_key(vault_id) else {
+        return ConnectReport::default(); // Locked — no retained K; next unlock retries.
     };
 
     // Rotated refresh tokens not stored yet: stored again now.
@@ -694,9 +699,9 @@ async fn apply_pending_connects_inner(
 
     let services = &state.services;
     // Per-vault custom services (`aux.services`) so a user-authored inline
-    // [oauth2] service's connect can resolve — the bootstrap that populates
-    // this cache always runs before us (sync/watch/unlock+write all refresh
-    // the cache, THEN process connects), so it's fresh here.
+    // [oauth2] service's connect can resolve — the install that builds the
+    // snapshot always runs before us (sync/watch/unlock+write all install,
+    // THEN process connects), so it's fresh here.
     let custom = state.custom_services_snapshot(vault_id);
     let st = state.clone();
     let report = run_pending(services, &custom, &mut m, move |_conn, cfg, p| {
@@ -777,12 +782,24 @@ async fn apply_pending_connects_inner(
     };
 
     // Persist (see `write_view`): the per-item store, then the vault.dat
-    // mirror, then the cache from what landed, so /use sees the new
+    // mirror, then the snapshot from what landed, so a request sees the new
     // refresh_token without a manual lock/unlock. A connect the store did not
-    // take is reported failed, never served from memory.
+    // take is reported failed, never served from memory; one it took that
+    // this device does not serve yet is reported so.
     let mut report = report;
-    let not_applied = match write_view(state, vault_id, vault_dat, &m, &view, &k, &base) {
-        Ok(n) => n,
+    let not_applied = match write_view(
+        state,
+        vault_id,
+        vault_dat,
+        &m,
+        &view,
+        WriteKey::Held(&k),
+        &base,
+    ) {
+        Ok((n, installed)) => {
+            report.not_served = !installed.served();
+            n
+        }
         Err(e) => {
             tracing::warn!(vault = %vault_id, "oauth connect: not stored: {}", e);
             let why = format!("the connection could not be stored: {}", e);
@@ -857,12 +874,17 @@ pub(crate) enum RotationStored {
 /// locked meanwhile, a store that cannot be read or written, or the slot's
 /// row unreadable with this session's key (a keyset not caught up with; it is
 /// never written over). A vault with no per-item store (legacy whole-blob)
-/// keeps the full rewrite.
+/// keeps the full rewrite, without an install.
 ///
 /// `old` is the value the rotation replaced. With `if_current`, the token is
 /// written only while the slot still holds `old` (a delayed retry must never
-/// put an older token over a newer one). On success the session cache points
-/// at `new` and nothing stays pending for the slot.
+/// put an older token over a newer one).
+///
+/// Under the vault's build mutex: the store write, then (only while Unlocked)
+/// the served snapshot is patched to hold the stored token at its slot
+/// ([`AppState::patch_rotated_locked`]: no fold, no permit touched), then the
+/// slot's pending entry is dropped. An install that read the store before the
+/// write swaps first, and the patch lands on its snapshot.
 ///
 /// The caller ALREADY HOLDS the per-vault write lock
 /// ([`AppState::vault_write_lock`]); this does NOT take it. `Err` (why) when
@@ -877,6 +899,44 @@ pub(crate) fn persist_rotated_refresh_locked(
     new_refresh_token: &str,
     if_current: bool,
 ) -> Result<RotationStored, String> {
+    let Some(runtime) = state.runtime_if_present(vault_id) else {
+        return Err("the vault is locked".into());
+    };
+    runtime.with_build_lock(|| {
+        let (stored, key) = write_rotated_refresh(
+            state,
+            vault_id,
+            conn_id,
+            role,
+            old,
+            new_refresh_token,
+            if_current,
+        )?;
+        match stored {
+            RotationStored::Written | RotationStored::AlreadyStored => {
+                state.patch_rotated_locked(&runtime, vault_id, &key, new_refresh_token.as_bytes());
+                tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: rotated refresh_token persisted");
+            }
+            RotationStored::Superseded => {
+                tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: a newer refresh_token was stored since; the pending one is dropped");
+            }
+        }
+        state.drop_pending_rotation(vault_id, conn_id, role);
+        Ok(stored)
+    })
+}
+
+/// The store write of [`persist_rotated_refresh_locked`] (its caller holds the
+/// build mutex), and the slot it wrote.
+fn write_rotated_refresh(
+    state: &Arc<AppState>,
+    vault_id: &str,
+    conn_id: &str,
+    role: &str,
+    old: &[u8],
+    new_refresh_token: &str,
+    if_current: bool,
+) -> Result<(RotationStored, String), String> {
     type S = sudp::primitives::StdPrimitives;
     let Some(k) = state.cloned_state_key(vault_id) else {
         return Err("the vault is locked".into());
@@ -886,18 +946,18 @@ pub(crate) fn persist_rotated_refresh_locked(
         .per_item_path(vault_id)
         .ok()
         .map(|path| (crate::storage::sealed_vault::read_per_item(&path), path));
+    // The slot the refresh token was read from: the session's record of the
+    // connection (identity key for a default connection).
+    let rec = state.connection_snapshot(vault_id, conn_id);
+    let key = secret_key_for(rec.as_ref(), role);
     let stored = match store {
         Some((Ok(Some(mut pv)), path)) => {
-            // The slot the refresh token was read from: the session's record
-            // of the connection (identity key for a default connection).
-            let rec = state.connection_snapshot(vault_id, conn_id);
-            let key = secret_key_for(rec.as_ref(), role);
             let keys = crate::storage::item::VaultKeys::from_material(&k);
             let replaces = if_current
                 .then(|| std::str::from_utf8(old).ok())
                 .flatten();
             if if_current && replaces.is_none() {
-                return Ok(RotationStored::Superseded);
+                return Ok((RotationStored::Superseded, key));
             }
             match pv
                 .write_rotated_secret::<S>(keys, vault_id, &key, new_refresh_token, replaces)
@@ -919,25 +979,23 @@ pub(crate) fn persist_rotated_refresh_locked(
         }
         Some((Err(e), _)) => return Err(format!("the vault's store cannot be read: {}", e)),
         _ => {
-            persist_rotated_refresh_whole_blob(state, vault_id, conn_id, role, new_refresh_token, &k)?;
-            RotationStored::Written
+            let key = persist_rotated_refresh_whole_blob(
+                state,
+                vault_id,
+                conn_id,
+                role,
+                new_refresh_token,
+                &k,
+            )?;
+            return Ok((RotationStored::Written, key));
         }
     };
-    match stored {
-        RotationStored::Written | RotationStored::AlreadyStored => {
-            state.cache_replace_value(vault_id, conn_id, old, new_refresh_token.as_bytes());
-            tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: rotated refresh_token persisted");
-        }
-        RotationStored::Superseded => {
-            tracing::info!(vault = %vault_id, conn = %conn_id, "oauth refresh: a newer refresh_token was stored since; the pending one is dropped");
-        }
-    }
-    state.drop_pending_rotation(vault_id, conn_id, role);
-    Ok(stored)
+    Ok((stored, key))
 }
 
 /// [`persist_rotated_refresh_locked`] for a vault with no per-item store: the
-/// whole body is rewritten (and re-sealed into `vault.dat`).
+/// whole body is rewritten (and re-sealed into `vault.dat`), without an
+/// install (the caller patches the snapshot). Returns the slot written.
 fn persist_rotated_refresh_whole_blob(
     state: &Arc<AppState>,
     vault_id: &str,
@@ -945,7 +1003,7 @@ fn persist_rotated_refresh_whole_blob(
     role: &str,
     new_refresh_token: &str,
     k: &[u8],
-) -> Result<(), String> {
+) -> Result<String, String> {
     let vault_dat = match crate::storage::sealed_vault::read(&vault_dat_path(state, vault_id)) {
         Ok(v) => v,
         Err(e) => {
@@ -955,24 +1013,23 @@ fn persist_rotated_refresh_whole_blob(
     };
     let (mut m, base) = open_m_for_write(state, vault_id, k, vault_dat.as_ref())?;
     let rec = aux_map::<Connection>(&m, "connections").remove(conn_id);
-    m.put_secret(
-        secret_key_for(rec.as_ref(), role),
-        new_refresh_token.as_bytes().to_vec(),
-    );
+    let key = secret_key_for(rec.as_ref(), role);
+    m.put_secret(key.clone(), new_refresh_token.as_bytes().to_vec());
     let view = crate::storage::plaintext::VaultPlaintextView::from_protected_state(&m)
         .map_err(|e| format!("view rebuild failed: {}", e))?;
-    let not_applied = write_view(state, vault_id, vault_dat, &m, &view, k, &base)?;
+    let not_applied = write_store(state, vault_id, vault_dat, &m, &view, k, &base)?;
     if !not_applied.is_empty() {
         return Err(sentences(&not_applied));
     }
-    Ok(())
+    Ok(key)
 }
 
 /// A rotated refresh token this device could not store (`why`): the provider
-/// now honors only the new one, so the session uses it (`old` → `new` in the
-/// cache, and in every cache rebuilt from the store until it is stored), the
-/// store is retried on its own timer with backoff ([`crate::auth::retry`]),
-/// after every sync round and at unlock, and the user is told.
+/// now honors only the new one, so the session uses it (every mint input is
+/// followed through the pending entry, [`AppState::current_refresh_token`],
+/// while the snapshot still holds `old` as the store does), the store is
+/// retried on its own timer with backoff ([`crate::auth::retry`]), after every
+/// sync round and at unlock, and the user is told.
 pub(crate) fn rotation_not_stored(
     state: &Arc<AppState>,
     vault_id: &str,
@@ -983,7 +1040,6 @@ pub(crate) fn rotation_not_stored(
     why: &str,
 ) {
     tracing::warn!(vault = %vault_id, conn = %conn_id, "oauth rotate: not stored: {}", why);
-    state.cache_replace_value(vault_id, conn_id, old, new.as_bytes());
     state.note_rotation_pending(vault_id, conn_id, role, old, new, why);
     crate::auth::retry::schedule(state, vault_id, crate::auth::retry::Job::RotationStore);
 }
@@ -1123,30 +1179,35 @@ fn build_m_from_view(
 /// captured BEFORE the caller mutated it: only what the caller changed or
 /// removed relative to it is written, so a row a concurrent pull changed or
 /// adopted (pull does not take the write lock) is neither reverted nor
-/// dropped. `k` is the key material recovered from the grant (via
-/// `open_view_for_grant_keep_key`), so the CLI never touches the PRF-derived
-/// user key — a `sc service` write works over SSH through the plain grant link.
+/// dropped. `key` is the key material recovered from the grant (via
+/// `open_view_for_grant_keep_key`, [`WriteKey::Grant`]), so the CLI never
+/// touches the PRF-derived user key — a `sc service` write works over SSH
+/// through the plain grant link — or the key the unlocked vault holds
+/// ([`WriteKey::Held`]).
 ///
 /// `Err` unless the whole change landed: a store that cannot be written or a
 /// reconcile that fails (`Internal`), or a part of the change refused or set
 /// aside (`Conflict`, saying each; the parts that did land are kept, served
-/// and pushed).
+/// and pushed). `Ok` says whether this device serves the change now
+/// ([`crate::state::Installed`]): a stored change it does not serve yet is
+/// reported as such ([`crate::error::STORED_NOT_SERVED_MSG`]), never as an
+/// error.
 pub(crate) fn persist_mutated_view(
     state: &Arc<AppState>,
     vault_id: &str,
     base: &ViewBase,
     view: &crate::storage::plaintext::VaultPlaintextView,
-    k: &[u8],
-) -> crate::error::Result<()> {
+    key: WriteKey<'_>,
+) -> crate::error::Result<crate::state::Installed> {
     use crate::error::AppError;
     let m = build_m_from_view(view).map_err(AppError::Internal)?;
     let vault_dat = crate::storage::sealed_vault::read(&vault_dat_path(state, vault_id))
         .ok()
         .flatten();
-    let not_applied =
-        write_view(state, vault_id, vault_dat, &m, view, k, base).map_err(AppError::Internal)?;
+    let (not_applied, installed) =
+        write_view(state, vault_id, vault_dat, &m, view, key, base).map_err(AppError::Internal)?;
     if not_applied.is_empty() {
-        Ok(())
+        Ok(installed)
     } else {
         // The caller returns this error before its own push: the parts that
         // did land go out now.
@@ -1174,21 +1235,68 @@ fn vault_dat_path(state: &AppState, vault_id: &str) -> std::path::PathBuf {
         .join("vault.dat")
 }
 
-/// Write a mutated `view` (`m`: the same content as a body) under the
-/// retained key material `k`, relative to `base`, and serve what landed:
+/// The key material a daemon-side write seals under, and whose key its
+/// install serves under ([`crate::state::InstallKey`]).
+#[derive(Clone, Copy)]
+pub(crate) enum WriteKey<'a> {
+    /// The key an approved op's grant delivered: the install serves under it
+    /// and, once served, the vault holds it.
+    Grant(&'a [u8]),
+    /// The key the vault held while unlocked (a write without an approval):
+    /// the install serves under the key the vault holds then.
+    Held(&'a [u8]),
+}
+
+impl<'a> WriteKey<'a> {
+    fn material(self) -> &'a [u8] {
+        match self {
+            WriteKey::Grant(k) | WriteKey::Held(k) => k,
+        }
+    }
+
+    fn install(self) -> crate::state::InstallKey {
+        match self {
+            WriteKey::Grant(k) => {
+                crate::state::InstallKey::Grant(zeroize::Zeroizing::new(k.to_vec()))
+            }
+            WriteKey::Held(_) => crate::state::InstallKey::Held,
+        }
+    }
+}
+
+/// Write a mutated `view` (`m`: the same content as a body) under the key
+/// material in `key`, relative to `base`, and serve what landed:
 ///   1. the per-item store, the content every read serves
 ///      ([`reconcile_per_item_after_connect`]); a store that cannot take the
 ///      change is an `Err`, and nothing below runs;
 ///   2. the whole-blob `vault.dat` mirror, when one backs this vault and `k`
 ///      is the single key it is sealed under (a keyset's key bundle never
 ///      sealed it: it is left as it is);
-///   3. the cache, from the store's fold (or, for a vault with no store,
-///      from `view`, which `vault.dat` now holds).
+///   3. the snapshot, installed from the store as it now is
+///      ([`AppState::install`], under `key`'s rules): served only while the
+///      vault is Unlocked and the fold reads every row the served snapshot
+///      read.
 ///
 /// Returns the parts of the change the store refused or set aside, each
-/// `(item id, sentence)` (also noted for `sc sync` / `sc status`). `Err`
-/// when neither store took the change: the cache is left as it was.
+/// `(item id, sentence)` (also noted for `sc sync` / `sc status`), and what
+/// the install did. `Err` when neither store took the change: the snapshot
+/// is left as it was.
 fn write_view(
+    state: &Arc<AppState>,
+    vault_id: &str,
+    vault_dat: Option<crate::storage::SealedVault>,
+    m: &ProtectedState,
+    view: &crate::storage::plaintext::VaultPlaintextView,
+    key: WriteKey<'_>,
+    base: &ViewBase,
+) -> Result<(Vec<(String, String)>, crate::state::Installed), String> {
+    let not_applied = write_store(state, vault_id, vault_dat, m, view, key.material(), base)?;
+    Ok((not_applied, state.install(vault_id, key.install())))
+}
+
+/// Steps 1 and 2 of [`write_view`] (the stores), without the install: the
+/// parts of the change the store refused or set aside.
+fn write_store(
     state: &Arc<AppState>,
     vault_id: &str,
     vault_dat: Option<crate::storage::SealedVault>,
@@ -1236,28 +1344,11 @@ fn write_view(
         }
         None => {}
     }
-    let (folded, not_applied) = match written {
-        Some(w) => (Some(w.served), w.not_applied),
-        None => (None, Vec::new()),
-    };
-    let cache = crate::server::handlers::approve::bootstrap_cache_from_view(
-        folded.as_ref().unwrap_or(view),
-        state,
-    );
-    state.unlock_vault(
-        vault_id.to_string(),
-        cache,
-        zeroize::Zeroizing::new(k.to_vec()),
-    );
-    Ok(not_applied)
+    Ok(written.map(|w| w.not_applied).unwrap_or_default())
 }
 
 /// What a per-item store write did ([`reconcile_per_item_after_connect`]).
 struct StoreWrite {
-    /// The store's fold after the write: what the cache serves. It can differ
-    /// from the caller's view (a keep-both conflict leaves THEIRS at the
-    /// canonical name and ours in a copy row).
-    served: crate::storage::plaintext::VaultPlaintextView,
     /// The caller's changes the store refused or set aside, each `(item id,
     /// sentence)`.
     not_applied: Vec<(String, String)>,
@@ -1323,10 +1414,7 @@ fn reconcile_per_item_after_connect(
             )
         })?;
     // Fold before writing: a store this key cannot fold is never written.
-    // Fold even when nothing changed: an existing conflict copy (an
-    // idempotent no-op) still means the store differs from `view`.
-    let served = pv
-        .fold_view::<S>(keys, vault_id)
+    pv.fold_view::<S>(keys, vault_id)
         .map_err(|e| format!("the vault's store cannot be read after the change: {}", e))?;
     if !reconciled.changed.is_empty() {
         crate::storage::sealed_vault::write_per_item_atomic(&path, &pv)
@@ -1366,10 +1454,7 @@ fn reconcile_per_item_after_connect(
         not_applied.push((item.clone(), why.clone()));
         state.note_sync(vault_id, item, crate::state::SyncNote::Refused(why.clone()));
     }
-    Ok(Some(StoreWrite {
-        served,
-        not_applied,
-    }))
+    Ok(Some(StoreWrite { not_applied }))
 }
 
 #[cfg(test)]
@@ -2094,7 +2179,7 @@ refresh_token = "REFRESH_TOKEN"
         // The refresh writes only its own secret.
         m.put_secret("GMAIL_REFRESH_TOKEN", b"rt".to_vec());
         let view = crate::storage::plaintext::VaultPlaintextView::from_protected_state(&m).unwrap();
-        let served = reconcile_per_item_after_connect(
+        reconcile_per_item_after_connect(
             &state,
             vid,
             Some(&vault),
@@ -2103,8 +2188,13 @@ refresh_token = "REFRESH_TOKEN"
             ReconcileBase::Since(&base),
         )
         .unwrap()
-        .expect("the store's fold is what the cache serves")
-        .served;
+        .expect("a per-item store backs the vault");
+        // What an install serves: the store's fold.
+        let served = || {
+            crate::server::handlers::metadata::fold_store_with_key(&state, vid, &k)
+                .unwrap()
+                .0
+        };
 
         let pv = crate::storage::sealed_vault::read_per_item(&pi_path)
             .unwrap()
@@ -2112,13 +2202,13 @@ refresh_token = "REFRESH_TOKEN"
         let folded = pv.fold_view::<S>(keys, vid).unwrap();
         assert_eq!(folded.native_secrets["OPENAI_API_KEY"], b"newer");
         assert_eq!(folded.native_secrets["GMAIL_REFRESH_TOKEN"], b"rt");
-        assert_eq!(served.native_secrets, folded.native_secrets);
+        assert_eq!(served().native_secrets, folded.native_secrets);
 
         // Keep-both: the caller (base still "new") now edits OPENAI_API_KEY too.
         // The cache must serve THEIRS at the canonical name, ours as the copy.
         m.put_secret("OPENAI_API_KEY", b"mine".to_vec());
         let view = crate::storage::plaintext::VaultPlaintextView::from_protected_state(&m).unwrap();
-        let served = reconcile_per_item_after_connect(
+        reconcile_per_item_after_connect(
             &state,
             vid,
             Some(&vault),
@@ -2127,8 +2217,8 @@ refresh_token = "REFRESH_TOKEN"
             ReconcileBase::Since(&base),
         )
         .unwrap()
-        .unwrap()
-        .served;
+        .unwrap();
+        let served = served();
         assert_eq!(served.native_secrets["OPENAI_API_KEY"], b"newer");
         assert_eq!(
             served.native_secrets[&crate::storage::item::conflict_copy_name("OPENAI_API_KEY")],
@@ -2188,7 +2278,14 @@ refresh_token = "REFRESH_TOKEN"
         let path = state.vaults.per_item_path(vid).unwrap();
         write_per_item_atomic(&path, &pv).unwrap();
 
-        // `sc secret set B`: the change lands in the store and is served.
+        // `sc secret set B` on the unlocked vault: the change lands in the
+        // store and is served.
+        assert!(state
+            .install(
+                vid,
+                crate::state::InstallKey::Unlock(zeroize::Zeroizing::new(material.to_vec())),
+            )
+            .served());
         let view =
             crate::server::handlers::metadata::open_view_with_state_key(&state, vid, &material)
                 .unwrap();
@@ -2197,7 +2294,11 @@ refresh_token = "REFRESH_TOKEN"
             crate::server::handlers::metadata::open_view_with_state_key(&state, vid, &material)
                 .unwrap();
         changed.native_secrets.insert("B".into(), b"b".to_vec());
-        persist_mutated_view(&state, vid, &base, &changed, &material).unwrap();
+        assert!(
+            persist_mutated_view(&state, vid, &base, &changed, WriteKey::Held(&material))
+                .unwrap()
+                .served()
+        );
         let folded = read_per_item(&path)
             .unwrap()
             .unwrap()
@@ -2239,7 +2340,7 @@ refresh_token = "REFRESH_TOKEN"
         let mut mine = open();
         mine.native_secrets.insert("X".into(), b"mine".to_vec());
         mine.native_secrets.insert("D".into(), b"d".to_vec());
-        match persist_mutated_view(&state, vid, &base2, &mine, &material) {
+        match persist_mutated_view(&state, vid, &base2, &mine, WriteKey::Held(&material)) {
             Err(crate::error::AppError::Conflict(m)) => {
                 assert!(m.starts_with("secret X: this item was changed with a vault key this device does not have"), "{}", m)
             }
@@ -2268,7 +2369,7 @@ refresh_token = "REFRESH_TOKEN"
         let before = std::fs::read(&path).unwrap();
         let mut again = changed;
         again.native_secrets.insert("C".into(), b"c".to_vec());
-        let err = persist_mutated_view(&state, vid, &base, &again, &material)
+        let err = persist_mutated_view(&state, vid, &base, &again, WriteKey::Held(&material))
             .unwrap_err()
             .to_string();
         assert!(err.contains("could not be applied"), "{}", err);
@@ -2314,7 +2415,8 @@ refresh_token = "REFRESH_TOKEN"
     }
 
     /// A store on the re-keyed fixture whose `refresh_token` slot holds
-    /// `value`, the vault unlocked with a cache that holds it too.
+    /// `value`, bound by the raw connection `codex` (so the snapshot serves
+    /// the slot), unlocked.
     fn rotation_fixture(
         value: &str,
     ) -> (
@@ -2325,14 +2427,13 @@ refresh_token = "REFRESH_TOKEN"
         std::path::PathBuf,
         String,
     ) {
-        rotation_fixture_at("refresh_token", value, cache_holding(value))
+        rotation_fixture_at("refresh_token", value)
     }
 
-    /// [`rotation_fixture`] with the slot `slot` and the session `cache`.
+    /// [`rotation_fixture`] with the slot `slot`.
     fn rotation_fixture_at(
         slot: &str,
         value: &str,
-        cache: crate::state::SecretsCache,
     ) -> (
         tempfile::TempDir,
         Arc<AppState>,
@@ -2362,25 +2463,30 @@ refresh_token = "REFRESH_TOKEN"
             )
             .unwrap();
         pv.items.get_mut(&id).unwrap().synced_version = 1;
+        let conn = pv
+            .seal_and_upsert::<S>(
+                keys,
+                vid,
+                ItemNs::Connection,
+                "codex",
+                1,
+                &ItemPayload::live(
+                    ItemNs::Connection,
+                    "codex",
+                    serde_json::json!({ "hosts": ["api.codex.dev"], "secrets": [slot] }),
+                ),
+            )
+            .unwrap();
+        pv.items.get_mut(&conn).unwrap().synced_version = 1;
         let path = state.vaults.per_item_path(vid).unwrap();
         write_per_item_atomic(&path, &pv).unwrap();
-        state.unlock_vault(vid.into(), cache, zeroize::Zeroizing::new(material.clone()));
+        unlock_fixture(&state, vid, &material);
         (dir, state, vid, material, path, id)
     }
 
-    /// A session cache whose `codex` connection holds `value`.
-    fn cache_holding(value: &str) -> crate::state::SecretsCache {
-        let mut cache = crate::state::SecretsCache::default();
-        cache.entries.insert(
-            "codex".into(),
-            crate::state::CacheEntry {
-                value: value.as_bytes().to_vec(),
-                expires_at: None,
-                from_bootstrap: true,
-                agent_prefix: None,
-            },
-        );
-        cache
+    fn unlock_fixture(state: &AppState, vid: &str, material: &[u8]) {
+        let key = crate::state::InstallKey::Unlock(zeroize::Zeroizing::new(material.to_vec()));
+        assert!(state.install(vid, key).served());
     }
 
     fn stored_refresh_token(path: &std::path::Path, material: &[u8], vid: &str) -> Vec<u8> {
@@ -2395,8 +2501,8 @@ refresh_token = "REFRESH_TOKEN"
     }
 
     /// A rotated refresh token lands as ONE durable row of the vault's store,
-    /// at the slot the connection reads it from; the session cache follows,
-    /// and whatever was pending for that slot is dropped.
+    /// at the slot the connection reads it from; the served snapshot is
+    /// patched to it, and whatever was pending for that slot is dropped.
     #[test]
     fn a_rotated_refresh_token_is_one_row_and_settles_the_slot() {
         let (_dir, state, vid, material, path, id) = rotation_fixture("rt-1");
@@ -2409,7 +2515,7 @@ refresh_token = "REFRESH_TOKEN"
         assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-3");
         let pv = crate::storage::sealed_vault::read_per_item(&path).unwrap().unwrap();
         assert_eq!(pv.items[&id].version, 2);
-        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-3");
+        assert_eq!(state.served_native(vid, "refresh_token").unwrap(), b"rt-3");
         assert!(state.take_pending_rotations(vid).is_empty(), "the slot settled");
         assert!(state.sync_note_lines(vid).is_empty());
     }
@@ -2424,22 +2530,27 @@ refresh_token = "REFRESH_TOKEN"
         assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-3");
         assert!(state.take_pending_rotations(vid).is_empty());
         assert!(state.sync_note_lines(vid).is_empty());
-        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-3");
+        assert_eq!(state.served_native(vid, "refresh_token").unwrap(), b"rt-3");
     }
 
-    /// While a rotation is pending, every cache rebuilt from the store (a
-    /// pull, an unlock) serves the rotated token, not the dead one; the retry
-    /// that stores it leaves the cache on it.
+    /// While a rotation is pending, a snapshot rebuilt from the store (a
+    /// pull, an unlock) holds what the store holds, and every mint input is
+    /// followed to the rotated token, never the dead one; the retry that
+    /// stores it patches the snapshot to it.
     #[test]
-    fn a_rebuilt_cache_keeps_serving_the_pending_rotation() {
+    fn a_rebuilt_snapshot_mints_with_the_pending_rotation() {
         let (_dir, state, vid, material, path, _) = rotation_fixture("rt-1");
         state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-1", "rt-2", "disk");
         // A rebuild from the store, which still holds rt-1.
-        state.unlock_vault(vid.into(), cache_holding("rt-1"), zeroize::Zeroizing::new(material.clone()));
-        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-2");
+        unlock_fixture(&state, vid, &material);
+        assert_eq!(state.served_native(vid, "refresh_token").unwrap(), b"rt-1");
+        assert_eq!(
+            state.current_refresh_token(vid, "codex", b"rt-1").unwrap().as_str(),
+            "rt-2"
+        );
         retry_pending_rotations_locked(&state, vid);
         assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
-        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"rt-2");
+        assert_eq!(state.served_native(vid, "refresh_token").unwrap(), b"rt-2");
         assert!(state.take_pending_rotations(vid).is_empty());
     }
 
@@ -2473,9 +2584,11 @@ refresh_token = "REFRESH_TOKEN"
         state.note_rotation_pending(vid, "codex", "refresh_token", b"rt-0", "rt-1", "disk");
         let hash: String = Sha256::digest(b"rt-1").iter().map(|b| format!("{:02x}", b)).collect();
         state.oauth_access_insert(vid, &hash, b"at-1".to_vec(), u64::MAX);
-        let minted = crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "gmail", b"rt-0")
-            .await
-            .unwrap();
+        let auth = state.services.get("gmail").unwrap().auth.clone().unwrap();
+        let minted =
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "gmail", &auth, b"rt-0")
+                .await
+                .unwrap();
         assert_eq!(minted, b"at-1");
     }
 
@@ -2540,14 +2653,12 @@ refresh_token = "ACME_REFRESH_TOKEN"
             }
             _ => panic!("an oauth2 def"),
         }
-        let mut cache = cache_holding("rt-0");
-        cache.custom_services.insert("acme".into(), def);
-        let (_dir, state, vid, material, path, _) =
-            rotation_fixture_at("ACME_REFRESH_TOKEN", "rt-0", cache);
+        let auth = def.auth.clone().unwrap();
+        let (_dir, state, vid, material, path, _) = rotation_fixture_at("ACME_REFRESH_TOKEN", "rt-0");
 
         let (a, b) = tokio::join!(
-            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0"),
-            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0"),
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", &auth, b"rt-0"),
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", &auth, b"rt-0"),
         );
         assert_eq!(a.unwrap(), b"at-1");
         assert_eq!(b.unwrap(), b"at-1");
@@ -2561,9 +2672,10 @@ refresh_token = "ACME_REFRESH_TOKEN"
             .fold_view::<S>(crate::storage::item::VaultKeys::from_material(&material), vid)
             .unwrap();
         assert_eq!(stored.native_secrets["ACME_REFRESH_TOKEN"], b"rt-1");
-        let again = crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", b"rt-0")
-            .await
-            .unwrap();
+        let again =
+            crate::server::broker_flow::resolve_auth_value(&state, vid, "codex", "acme", &auth, b"rt-0")
+                .await
+                .unwrap();
         assert_eq!(again, b"at-1");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -2629,7 +2741,7 @@ refresh_token = "ACME_REFRESH_TOKEN"
         // The store is back and the vault unlocks: the retry stores it.
         std::fs::remove_dir(&path).unwrap();
         std::fs::write(&path, good).unwrap();
-        state.unlock_vault(vid.into(), cache_holding("rt-1"), zeroize::Zeroizing::new(material.clone()));
+        unlock_fixture(&state, vid, &material);
         retry_pending_rotations_locked(&state, vid);
         assert_eq!(stored_refresh_token(&path, &material, vid), b"rt-2");
         assert!(!state.has_pending_rotations(vid));
@@ -2653,30 +2765,20 @@ refresh_token = "ACME_REFRESH_TOKEN"
             .armed(crate::auth::retry::Job::RotationStore));
     }
 
-    /// A rotated refresh token whose store failed stays in use: the session
-    /// holds the new token in place of the old, it is kept to store again on
-    /// its own retry timer, and the user is told; once stored, the note
-    /// settles.
+    /// A rotated refresh token whose store failed stays in use: the snapshot
+    /// keeps what the store holds, every mint input is followed to the new
+    /// token, it is kept to store again on its own retry timer, and the user
+    /// is told; once stored, the note settles.
     #[test]
     fn a_rotated_token_not_stored_stays_in_use_and_pending() {
         let (_dir, state) = temp_state();
         state.open_ledger_for_tests(&[]);
         let vid = "v-rotate";
-        let mut cache = crate::state::SecretsCache::default();
-        cache.entries.insert(
-            "codex".into(),
-            crate::state::CacheEntry {
-                value: b"old-rt".to_vec(),
-                expires_at: None,
-                from_bootstrap: true,
-                agent_prefix: None,
-            },
+        state.unlock_vault(
+            vid.into(),
+            crate::snapshot::Snapshot::default(),
+            zeroize::Zeroizing::new(vec![0u8; 32]),
         );
-        cache.allow_secrets.insert(
-            "codex".into(),
-            [("REFRESH_TOKEN".to_string(), b"old-rt".to_vec())].into(),
-        );
-        state.unlock_vault(vid.into(), cache, zeroize::Zeroizing::new(vec![0u8; 32]));
         rotation_not_stored(
             &state,
             vid,
@@ -2686,10 +2788,9 @@ refresh_token = "ACME_REFRESH_TOKEN"
             "new-rt",
             "the store failed",
         );
-        assert_eq!(state.cache_lookup(vid, "codex").unwrap(), b"new-rt");
         assert_eq!(
-            state.cache_lookup_secrets(vid, "codex").unwrap()["REFRESH_TOKEN"],
-            b"new-rt"
+            state.current_refresh_token(vid, "codex", b"old-rt").unwrap().as_str(),
+            "new-rt"
         );
         assert!(state.sync_note_lines(vid).iter().any(|l| l.starts_with(
             "connection codex: the provider's new refresh token could not be stored"
@@ -2720,8 +2821,7 @@ refresh_token = "ACME_REFRESH_TOKEN"
         .unwrap();
         let mut report = ConnectReport {
             completed: vec!["gmail".into(), "github".into()],
-            failed: Vec::new(),
-            unreached: Vec::new(),
+            ..Default::default()
         };
         fail_refused_connects(
             &mut report,

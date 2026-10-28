@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, Result};
 use crate::server::handlers::op::validate_vault_id;
-use crate::state::{AppState, VaultState};
+use crate::state::AppState;
 
 /// Per-store live-list timeout. Short enough that a stalled GCP call
 /// doesn't hang the page load, long enough that a normal cross-region
@@ -52,17 +52,13 @@ pub async fn secret_keys(
     // network work — list() is async and we don't want to hold the
     // vault-states mutex across an await.
     let (mut native_keys, external_stores, init_errors) = {
-        let runtime = state
-            .runtime_if_present(&vault_id)
-            .ok_or(AppError::VaultLocked)?;
-        let runtime_state = runtime.state.lock().unwrap();
-        let cache = match &*runtime_state {
-            VaultState::Unlocked { cache, .. } => cache,
-            _ => return Err(AppError::VaultLocked),
-        };
-        let native: Vec<String> = cache.native_keys.iter().cloned().collect();
-        let external = cache.external_stores.clone();
-        (native, external, cache.external_store_errors.clone())
+        let snapshot = state.snapshot(&vault_id).ok_or(AppError::VaultLocked)?;
+        let native: Vec<String> = snapshot.native_names().cloned().collect();
+        (
+            native,
+            snapshot.stores.adapters.clone(),
+            snapshot.stores.errors.clone(),
+        )
     };
     native_keys.sort();
 
@@ -75,8 +71,8 @@ pub async fn secret_keys(
     }
 
     for (store_id, (store, adapter)) in external_stores {
-        // The session cache holds ONE live adapter per store (built at
-        // unlock, OAuth token cached inside) — list through it instead of
+        // The snapshot holds ONE live adapter per store (built at install,
+        // OAuth token cached inside) — list through it instead of
         // constructing a throwaway instance per page load.
         match tokio::time::timeout(LIST_TIMEOUT, adapter.list()).await {
             Ok(Ok(mut names)) => {

@@ -57,47 +57,64 @@ Still required BEFORE this design ships (blockers for D1 and D2):
 
     intent_key = SHA-256( "safeclaw/v1/intent" || JCS({
         redeemer: op.bind.redeemer, recipient: op.bind.recipient,
-        act: op.act, level: pc.level, ttl: pc.ttl_seconds }) )
+        act: op.act, level: pc.level, ttl: pc.ttl_seconds
+        [, policy: hex(pc.policy_fp)] }) )
 
 `r`, `valid.*` excluded. `op.act` for Use carries connection_id, service,
-host, method, path (query string and port excluded, same as existing grant
-keys), agent, scoped, scope_vars, consent; no body, no nonce, so retries of
-the same request are byte-identical. PolicyContext level+ttl are included so
-ops minted under different policy (single-use op_grant vs 15-min window)
-never merge.
+host, method, path (query string and port excluded, same as permit keys),
+agent, scoped, scope_vars, consent; no body, no nonce, so retries of the
+same request are byte-identical. Its `target` is the credential set's KEYs
+joined with ", " (the KEYs the request's phantoms resolved), so a retry with
+other credentials is another intent. PolicyContext level+ttl are included so
+ops minted under different policy (single-use permit vs 15-min window) never
+merge, and so is a window's mint-time policy fingerprint (`policy`, present
+only for `exact` / `rule` / `floor`).
 
 **Policy level and reuse are signed and shown.** The Use op scope carries
-`level: "ask" | "ask-always" | "allow"`, `reuse`, and `window_s` (integer
-seconds; JCS rejects floats) exactly when the reuse has a window. Being in
-`op.act.scope` they are in β. `reuse` states what approving lets the daemon
-serve again without a new approval; one classifier
-(`core src/approval/reuse.rs`) is used by the proxy to stamp it, by apply to
-pick the grant store, and by the approve-time assertion:
+`level: "ask" | "ask-always"`, `reuse`, and `window_s` (integer seconds; JCS
+rejects floats) exactly when the reuse has a window. Being in `op.act.scope`
+they are in β. `reuse` states what approving lets the daemon serve again
+without a new approval; one classifier (`core src/approval/reuse.rs`) is used
+by the proxy to stamp it, by apply to key the permit, and by the approve-time
+assertion. An `allow`-level request mints no op.
 
-| minted under | `reuse` (+ fields) | `window_s` | what apply writes |
+| minted under | `reuse` (+ fields) | `window_s` | the permit apply stores |
 |---|---|---|---|
-| `ask-always` | `none` | absent | a single-use grant bound to this request (its replay only) |
-| `ask` decided by a rule with no id (scoped path or not) | `none` | absent | a single-use grant bound to this request |
-| `ask` on a scoped path (`[requests]` shape; with or without bound values) | `exact` | ttl | a grant bound to this request, these values and the deciding unit, reused within the window |
-| `ask` decided by a rule | `rule` + `reuse_rule` (id) + `reuse_label` (if the rule has one) | ttl | an ask-grant ledger entry for that rule and the request's class |
-| `ask` decided by a default floor | `floor` + `reuse_class` (`read` / `write`) | ttl | an ask-grant ledger entry for that floor class |
-| `allow` (cache miss) | `none` | absent | the value held for allow-level traffic; no ledger entry |
+| `ask-always` | `none` | absent | single-use, bound to this request (its replay only) |
+| `ask` decided by a rule with no id (scoped path or not) | `none` | absent | single-use, bound to this request |
+| `ask` on a scoped path (`[requests]` shape; with or without bound values) | `exact` | ttl | a window bound to this request, these values and the deciding unit |
+| `ask` decided by a rule | `rule` + `reuse_rule` (id) + `reuse_label` (if the rule has one) | ttl | a window for that rule and the request's class |
+| `ask` decided by a default floor | `floor` + `reuse_class` (`read` / `write`) | ttl | a window for that floor class |
 
-Authorization is decoupled from value residency. Every ledger entry is keyed
-`(agent, connection, host, unit)`; a rule's unit is its id and the request's
-class (read: `GET`/`HEAD`/`OPTIONS`; anything else is a write), read from the
-signed `method`. A later ask-level request is served without asking only when
-the policy, re-run on it, is decided by the same unit (the same rule id,
-`when` included, and class, or the same floor class) for the same agent,
-connection and host. Approving rule A never serves rule B, a read (rule or
-floor) never serves a write, and an allow-level miss serves no ask. A value
-being resident in memory (bootstrap, or held after an approval) only serves
-requests the policy allows.
+A permit carries no value: approving resolves nothing and opens no vault.
+Every permit is keyed by what it was approved for and by the credential set
+the request resolved (its service id and the sorted KEYs its phantoms named:
+a role's KEY, a minted connection's mint-input KEY, an `exposes` role's KEY),
+so a replay with another or an extra role, or after the connection was
+rebound to other KEYs, asks again; a value change does not. A rule or floor
+window is keyed `(agent, connection, host, unit)`; a rule's unit is its id
+and the request's class (read: `GET`/`HEAD`/`OPTIONS`; anything else is a
+write), read from the signed `method`. A later request is served without
+asking only when its own decision, re-run on it, yields the same key with a
+live permit (the same rule id, `when` included, and class, or the same floor
+class, for the same agent, connection, host and credentials). Approving rule
+A never serves rule B, and a read (rule or floor) never serves a write.
+Whether a value is held in memory never authorizes anything.
 
-A request-bound grant carries the tier that minted it (ask-always, `exact`
+A request-bound permit carries the tier that minted it (ask-always, `exact`
 under its unit, or a single-use ask from a rule with no id) and is redeemed
 only by a request whose own decision yields that tier, so no tier spends or
-reads another tier's grant for the same request line. On a scoped path the
+reads another tier's permit for the same request line. Permits live only
+while the vault is Unlocked: a lock, park or close drops them all, and
+approving a Use op on a Locked vault marks it approved and stores nothing
+(its replay answers `vault_locked`). Any policy change ends the vault's
+windows (`exact`, `rule`, `floor`); single-use permits are kept.
+
+**Apply may grant less than the card renders, never more.** A window is
+stored only if the op's mint-time policy fingerprint (its approval record)
+equals the policy of the snapshot the vault serves at approve; otherwise the
+op is approved and no window is stored, and the replay asks again. On a
+Locked vault nothing is stored. On a scoped path the
 proxy refuses a request covered by a connection rule edit that decides on a
 field the approval cannot bind (a `when` on a var outside the shape's
 `scope`, or a `body` match); the policy is sealed and written by the console,
@@ -105,8 +122,7 @@ so the check runs where the request is decided.
 
 The console renders the reuse (none: this one request; exact: this identical
 request for N min; rule: this agent's "<rule label or id>" requests for N
-min; floor: this agent's reads (or writes) on the connection for N min). An
-allow-level `none` shows no reuse line.
+min; floor: this agent's reads (or writes) on the connection for N min).
 
 At apply the daemon asserts the signed `level` equals the record's
 PolicyContext level, the signed reuse fields equal the classifier's answer

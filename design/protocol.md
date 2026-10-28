@@ -729,68 +729,65 @@ session token 等），不要求 SUDP grant。audit row 不含 secret 值，泄�
 | Layer | 字段 | 作用 |
 |---|---|---|
 | Operation 自身有效期 | `o.valid.expiry` | 单次 op 的 validity（本 profile = freshness TTL）|
-| Policy cache TTL | `policy.rules[].ttl` | "approve 一次后，N 秒内**同 scope** 自动放行"（scope = `(service, rule, method)`）|
-| Memory residence TTL | `services.<name>.memory_ttl` | secret 在 daemon 内存里的存活时间 |
+| Permit 窗口 | rule / floor 的 `ttl` | approve 一次后 N 秒内，同一单元、同一 credentials 的请求放行（§6.4）|
+| 单次 permit 的重放期限 | `ASK_ALWAYS_REPLAY_WINDOW_SECS` | ask-always / 无 id rule 的 ask：被批准的那个请求在期限内重放一次 |
 
-**TTL 不在 SUDP `o` 里**。它们是 deployment-level 配置。SUDP `Policy(cid_c, o)` 是 stateful predicate，本 profile 显式声明 Policy 持有 TTL cache state。
+**TTL 不在 SUDP `o` 里**。它们是 deployment-level 配置。值在内存里以什么形态存在（§6.2）不是 TTL，也从不决定授权。
 
-**Grant scope（fast-path 的边界）**：approve 一次后的自动放行**严格绑定** `(service, matched_rule_id, method)`：
+**Permit 的作用域**：approve 一次留下一个**不带值**的 permit，key = 它批准的东西 + credential set：
 
-- 必须命中一条具名 policy rule —— rule 的 path pattern 即该 grant 的路径作用域。**category/service 默认级的 Ask（无 rule 命中）不进 cache**，每次都重新 approve；否则一次 approve 等于 blanket 整个 service。
-- **method 是 key 的一部分** —— approve 一个 `GET` 永远不会让窗口内的 `POST`/`DELETE` 自动放行。
+- 请求本身（ask-always、无 id rule 的 ask、scoped ask 的 `exact`）：`(agent, connection, method, host, path, bound values, tier)`；
+- 或 policy 单元（无 shape 的 rule / floor ask）：`(agent, connection, host, unit)`，unit = rule id + 请求的 read/write 类，或 floor 的 read/write 类；
+- credential set = service id + 请求的 phantom 解析出的 KEY（排序；role phantom 的 KEY、minted 连接 access phantom 的 mint-input KEY、`exposes` role 的 KEY）。换 role、多一个 role、连接改绑到别的 KEY，都要重新批准；值变了不需要（能写值的人本来就知道这个值）。
 
-这把 "approve 一次" 钉死在"用户实际看到并批准的那一类请求"上，杜绝 read-approval 被借去 smuggle write。**没有引入 per-grant 次数上限或其它新配置维度** —— 作用域完全由已有的 rule + method 推导。
+**method 类是 key 的一部分**：approve 一个 `GET` 永远不会让窗口内的 `POST`/`DELETE` 放行。作用域完全由已有的 rule + method 类 + credentials 推导，没有新的配置维度。
 
-### 6.2 Memory residence default + override
+### 6.2 Memory residence：只决定明文，不决定授权
 
-**Daemon 内存 layout**（unlocked 状态）：
+**Daemon 内存 layout**（unlocked 状态，`VaultState::Unlocked`）：
 
 ```
-Runtime metadata (无 secret，可一直驻留):
-  - policy rules
-  - service definitions
-  - peer_keks (per-credential W_c)
-  - preferences
+snapshot: Arc<Snapshot>   每次 install 构建一次，此后不变（per-KEY walk memo 除外）
+  - connection records、vault 自己的 service 定义、agents 表
+  - PolicyInputs（Decide 读的一切：policy 树、vault 定义的 policy 与 [requests] shapes）
+    + 它的 fingerprint
+  - 外部 store 的 adapter（只有外部 store；用完整 fold 构建）、构建失败、有效 store_order
+  - native 值：resident KEY = 明文；其它被连接绑定的 KEY = AEAD(S, AAD = (vault id, KEY))；
+    没有连接绑定的 KEY 只存名字
+  - 本次 fold 读到的行 id
+permits:       不带值（§6.4）
+oauth_access:  铸造的 access token，按 sha256(refresh token)；install 不清空
+external_keys: console 用的外部 store key 名
+K（state key）、S（seal key，随 Unlocked 状态的生命周期，K 轮换后仍保留）
 
-Secrets cache (per-service):
-  HashMap<service_name, (auth_value, expires_at)>
-  ├─ allow 服务: unlock bootstrap 时填，按 memory_ttl evict
-  ├─ ask 服务: approval-confirm 后填，按 rule.ttl evict
-  └─ ask-always 服务: 永不进 cache
-
-NOT in memory:
-  - M plaintext as a single object（解构后丢）
-  - K (DEK)，W_c (userKey)：unwrap 后立即 zeroize
-  - 任何 ask/ask-always 服务的 auth（未在 cache 时）
+NOT in memory between requests:
+  - M plaintext as a single object（fold 后构建 snapshot，明文显式擦除）
+  - 非 resident KEY 的明文：只在获准的那个请求里打开，转发后擦除
 ```
 
-**Default `memory_ttl`**（按 **effective level** 派生 —— 即 rule 的 `level`，或 floor 决策，§6.4）:
+**Residency 规则**（founder 保留，v0.9.8；只作为值缓存规则）：一个 KEY 是 resident，当且仅当它被至少一个连接（含隐式默认连接）绑定，且该连接的 GET floor 按 Decide 自身的求值是 `allow`（不含 rule；raw 连接取同名内置 service 的 recipe 与 tags，vault 定义取其更严的 defaults）。native 名字大小写不敏感，external key 精确匹配。连接绑定一个 KEY 的唯一函数是 `snapshot::bindings`（secrets ∪ exposes ∪ mint input，经 `secret_key_for`），residency、phantom 校验和取值都用它。
 
-| effective level | 默认 `memory_ttl` | secrets_cache 行为 |
-|---|---|---|
-| `allow` | `-1` (∞，等于 unlocked 期间) | bootstrap 即填 |
-| `ask` | = `rule.ttl` | approval-confirm 后填，TTL 到 evict |
-| `ask-always` | `0` | 不进 cache（含默认下的 `high`/`critical`）|
-| `deny` | N/A | 永远拒（仅用户显式映射时出现）|
+Resident 从不授权：allow 请求不需要 permit，其它请求需要 permit，与值是否驻留无关。对能读进程内存的攻击者，安全性不变（K 常驻，见 §9.2）；规则保留的是对"一个 bug 在没有 K 的情况下暴露了缓存"的纵深防御，所以 `Snapshot`、`VaultState`、S、K、permit 查询结果和取出的值都有不打印内容的 `Debug`。
 
-User 可在 vault `services.<name>.memory_ttl` 显式覆盖。
-
-**Invariant**: `services.<name>.memory_ttl >= rule.ttl` for any matching `ask` rule（写 vault 时 validate）。
+Unlocked 期间仍存在的明文（如实列出）：每次 install 的 fold（构建后擦除）；daemon 写入、connect exchange、整 blob rotation、vault-unlock op 打开又丢弃的整库视图；`op_payload` 寄存的值（在 `AppState` 上，lock 后仍在，同以前）；`oauth_access` 里的 access token（token 的有效期内，所有层级）；`oauth_rotated_to`（一小时，lock 后仍在）；未存下的 pending rotation；外部 store adapter 里的凭证；被批准的 Export 的值（在 approval record 上直到 waiter 取走）。
 
 ### 6.3 Vault state semantics (Locked / Unlocked)
 
 | State | 行为 |
 |---|---|
-| **Unlocked** | 接受 op；按 policy 走；secrets_cache 各 entry 独立 expire |
-| **Locked** | 仅接受 **lifecycle bypass** op（`Enroll` + `Custom("vault-unlock")`）；其余 op 创建直接 409 `vault locked — unlock first`；proxy（`/use`）返 auto-formatted "vault locked" 响应 |
+| **Unlocked** | 接受 op；请求从一个 snapshot 决策、取值；permits 只存在于此状态 |
+| **Locked** | 仅接受 **lifecycle bypass** op（`Custom("vault-unlock")`）；其余 op 创建直接 409 `vault locked — unlock first`；proxy 返回 `vault_locked` |
 
 **State transitions** — 都是标准 sudp `Custom(String)` op，走 `POST /v/{vid}/op` + `POST /op/{op_id}/approve` 标准两步：
 
 | Op | Effect |
 |---|---|
-| `Custom("vault-unlock")` | 解锁：decrypt M（用 grant 携带的 W_c），bootstrap secrets_cache（对 default-read=`allow` 的 service，把 resolved auth 装进 mem），把所有 target plaintexts 返给 requester（user 编辑器复用此响应，免一次额外 ceremony）。进入 Unlocked。 |
-| `Custom("vault-lock")` | 锁定：清空 secrets_cache + 进入 Locked。Grant required —— lock 本身是 daemon state mutation，SUDP 不变量"U-attested state changes only" 同样适用（否则任何持 session token 的 attacker 可以 DOS-lock）。 |
-| `Enroll` | First-time setup：建 vault 后 **auto-unlock**（W_c 已在 grant 里，inline bootstrap，省一次 ceremony）。 |
+| `Custom("vault-unlock")` | 解锁：用 grant 交付的 K 打开 vault，install snapshot，进入 Unlocked；不返回任何明文。已 Unlocked 时再次 unlock 保留 permits、`oauth_access` 和 S。 |
+| `Custom("vault-lock")` | 锁定：丢弃 K、S、snapshot、permits、`oauth_access`，进入 Locked，清除 key-changed 与 behind。Grant required —— lock 本身是 daemon state mutation，SUDP 不变量"U-attested state changes only" 同样适用（否则任何持 session token 的 attacker 可以 DOS-lock）。device park 与 vault close 同样如此。 |
+
+**只有 `vault-unlock` 能进入 Unlocked。** 其余构建 snapshot 的路径（sync 拉取后的刷新、本机写入、approved write、connect exchange）共用一个 install：同一 vault 的 install 由一把 build mutex 串行（read store + K → fold → build → swap；锁序 write lock → build mutex → state lock）；swap 时在 state lock 下检查 ledger gate 与 `is_closed`，vault 已是 Locked 就丢弃这次结果，绝不重新解锁。install 只替换 snapshot，不动 permits 和 `oauth_access`；唯一例外：新 snapshot 的 policy fingerprint 与当前不同，就在同一次 swap 里清掉所有窗口 permit（`exact` 与 rule/floor 单元；单次 permit 保留）。非解锁的 install 只在"不倒退"时生效：当前 snapshot 读得到的行在新 fold 里变成读不出，就保留当前 snapshot、置 key-changed。被拒的 install（vault Unlocked 时，任何原因）置 **behind**：served snapshot 落后于 store；状态行显示它，`sprott unlock` 在 Unlocked 的 vault 上也会继续；每次 served install 清掉它。写入已落盘但这次 install 没有生效时，回报 "stored; served on this device after `sprott unlock`"，approved write 仍保持 approved。
+
+**OAuth rotation 存下后不 install**：在调用方的 write lock 下，build mutex → 写 store →（仅 Unlocked）把当前 snapshot 复制一份、只改那一个槽（resident KEY 存明文，否则用 S 重新封存）、丢掉该 KEY 的 walk memo 记录 → 换上 → 清除该槽的 pending。permits、`oauth_access`、behind 都不动。pending 条目只表示"还没存下"；每个 mint input 都先经 `current_refresh_token`。
 
 **Custom 变体的 paper 定位**：SUDP 协议层只承诺 6 个 core acts (Use/Export/Write/Rotate/Enroll/Revoke) 的语义+安全证明；`Custom(name)` 是 deployment 扩展槽，享受 grant machinery 但 dispatch 自定义。Sprott 用 `vault-unlock` / `vault-lock` 表达 lifecycle 而非污染 SUDP 表面。
 
@@ -806,30 +803,35 @@ User 可在 vault `services.<name>.memory_ttl` 显式覆盖。
 `level`；该间接层已删除——recipe 作者直接在动作上写决策。）
 
 一个连接的有效 rule 集 = 该连接 *service* recipe 的内置 rule ⊕ 用户的
-`M.policy.connections.<conn>.rules`（按 id override，或带 `match` 的新增）。
+`M.policy.connections.<conn>.rules`（按 id override，或带 `match` 的新增）。Decide 是纯
+policy：不查任何批准。
 
 ```
-T.policy_state = {
-  approval_cache: HashMap<(conn_id, rule_id, method), (approved_at, ttl)>,
-  ...
-}
-
-Policy(conn_id, o):
+Decide(conn_id, o):          // PolicyInputs only; no approval is consulted
   rules = merge(recipe_rules(service_of(conn_id)), M.policy.connections[conn_id].rules)
   // Conflict resolution = DENY-OVERRIDE / most-restrictive wins (fail-safe,
   // à la IAM/Cedar). Among ALL matching rules, pick the strictest effective
-  // level; specificity only tiebreaks (for a deterministic ask-cache scope).
+  // level; specificity only tiebreaks.
   level = max_by_restrictiveness( r.level for r in rules if matches(r, o) and r.level != null )
           ?? connection_default ?? category_default ?? global_default ?? "ask-always"
-  case level:
-    "allow"       => admit
-    "deny"        => reject
-    "ask-always"  => not admitted (must trigger approval flow each time)
-    "ask"         =>
-       if approval_cache contains (conn_id, rule.id, method) and not expired:
-         admit
-       else:
-         not admitted (must trigger approval flow)
+
+Request(o), from one snapshot taken with the lock check:
+  1. egress floor (private addresses)
+  2. phantom check: every explicit role exists on the connection (else unknown_role);
+     a mint input is refused (refresh_forbidden)
+  3. the request read the standard way; connection rule problems; Decide. deny → reject
+  4. values present and located: each KEY walked through store_order once per snapshot
+     (memo); none opened. missing → secret_not_set (vault_key_changed when the key changed);
+     a store failing ahead of it → store_unavailable. never an op
+  5. host anchor: unanchored → widen op (behind → vault_key_changed, naming the host)
+  6. permit (allow: none): key = (what Decide says the approval permits, credential set);
+     a window only if the request's snapshot has the current policy fingerprint.
+     none → mint op (its record carries the credential set and, for a window, the
+     fingerprint) and open the portal
+  7. values read only now: resident as held; sealed opened under S, under the state lock
+  8. every request: the vault still Unlocked; a single-use permit removed atomically
+     (lost race → portal)
+  9. forward
 ```
 
 一条 `level` 为空的 rule（畸形）无法决策 → 跳过，落到 floor。**deny 从不做出厂默认**——
@@ -895,7 +897,7 @@ require base64url_decode(client_data_json.challenge) == β
 
 ### 9.2 Memory residency vs. process compromise
 
-Daemon 跑在 user 自己的 process 内。一个能读 `/proc/$pid/mem` 的 attacker 可以在 secrets_cache 里看到任意 hot/warm secret。本 profile 跟 v0.5.0 一致，**不主张** memory-resident attacker 抵抗（future work）。
+Daemon 跑在 user 自己的 process 内，unlocked 期间 K 常驻。一个能读 `/proc/$pid/mem` 的 attacker 可以读到 K 进而读到任意 secret。本 profile 跟 v0.5.0 一致，**不主张** memory-resident attacker 抵抗（future work）。§6.2 的 residency 规则只是纵深防御：snapshot 只为 allow-floor 连接的 KEY 保存明文，其余用 S 封存。
 
 ### 9.3 Audit log integrity
 
@@ -920,9 +922,10 @@ v1 不主动 rotation HPKE 静态 keypair。Future work:
 
 ### 9.7 Concurrent operations
 
-- `with_vault_mut` 用 `state.write_mutex` 串行化 write/enroll/revoke ops（per-process mutex）
-- `Custom("vault-unlock")` 是幂等的：重复 unlock 刷新 secrets_cache + `unlocked_at`（最后一次 win，覆盖前一次的 cache）
-- `Custom("vault-lock")` 是 idempotent + atomic：清空 cache 一次性
+- 每个 vault 一把 async write lock 串行化写入（approve、本机写、connect、rotation）；一把 build mutex 串行化 install 与 rotation 的 patch；锁序 write lock → build mutex → state lock，install 从不拿 write lock
+- `Custom("vault-unlock")` 是幂等的：在 Unlocked 的 vault 上重复 unlock 重建 snapshot，保留 permits、`oauth_access` 与 S
+- `Custom("vault-lock")`（以及 device park、vault close）在 state lock 下一次性进入 Locked：K、S、snapshot、permits、`oauth_access` 一起丢弃；install 在同一把锁下检查，所以不会被并发的 sync、写入或批准撤销
+- 一个请求的 permit 查找（step 6）与消费（step 8）各在一次 state lock 内；单次 permit 原子移除，两个并发重放只有一个被放行，另一个进 portal；step 6 与 step 8 之间 lock → `vault_locked`，不铸 op
 - 同一时刻只允许一个 grant 在 II.3 → III 之间（避免对同一个 r 的并发消费——`ChallengeStore.take` 有 atomic 语义）
 
 ---

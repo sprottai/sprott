@@ -228,7 +228,7 @@ async fn require_agent(
         .and_then(|rest| rest.split('/').next())
         .filter(|vid| !vid.is_empty());
     match crate::principal_ledger::authorize_agent(state, verified.as_deref(), vault).await {
-        Ok(ag) => Ok(ag),
+        Ok((ag, _)) => Ok(ag),
         Err(AgentRefusal::Device(e)) => {
             let (code, msg) = e.code();
             Err(problem(code, &msg))
@@ -423,13 +423,13 @@ mod tests {
                 .map(str::to_string)
         };
         // The vault lists the agent.
-        let mut cache = crate::state::SecretsCache::default();
-        cache.agents.insert(ag.clone(), Default::default());
+        let mut snapshot = crate::snapshot::Snapshot::default();
+        snapshot.agents.insert(ag.clone(), Default::default());
         // Admitted by the ledger (a parked device holds no K) and listed: served.
         state.open_ledger_for_tests(&[&ag]);
         state.unlock_vault(
             "v1".into(),
-            cache,
+            snapshot,
             zeroize::Zeroizing::new(vec![0x42u8; 32]),
         );
         assert_eq!(

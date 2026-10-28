@@ -939,12 +939,14 @@ pub enum AgentRefusal {
 /// The one agent admission rule (W3), shared by the proxy and the API face: this
 /// device serves, the agent proved its AIK, the account ledger admits its `ag_`
 /// (no later revoke), and the vault's authorized-agents table lists it (`vault`
-/// `None` = an account-scoped read: any unlocked vault). Returns the `ag_`.
+/// `None` = an account-scoped read: any unlocked vault). Returns the `ag_`, and
+/// for a named vault the snapshot it serves, taken in the one state-lock section
+/// that checks it is unlocked; the table is read from that snapshot.
 pub async fn authorize_agent(
     state: &Arc<AppState>,
     agent: Option<&str>,
     vault: Option<&str>,
-) -> Result<String, AgentRefusal> {
+) -> Result<(String, Option<Arc<crate::snapshot::Snapshot>>), AgentRefusal> {
     if let Some(e) = state.ledger_refusal() {
         return Err(AgentRefusal::Device(e));
     }
@@ -955,21 +957,25 @@ pub async fn authorize_agent(
     if agent_not_admitted(state, ag).await {
         return Err(AgentRefusal::NotAdmitted);
     }
-    let locked = match vault {
-        Some(v) => state.is_vault_locked(v),
-        None => !state.has_unlocked_vault(),
+    let snapshot = match vault {
+        Some(v) => {
+            let snapshot = state.snapshot(v).ok_or(AgentRefusal::Locked)?;
+            if !snapshot.agents.contains_key(ag) {
+                return Err(AgentRefusal::NotAuthorized);
+            }
+            Some(snapshot)
+        }
+        None => {
+            if !state.has_unlocked_vault() {
+                return Err(AgentRefusal::Locked);
+            }
+            if !state.agent_is_authorized_any(ag) {
+                return Err(AgentRefusal::NotAuthorized);
+            }
+            None
+        }
     };
-    if locked {
-        return Err(AgentRefusal::Locked);
-    }
-    let listed = match vault {
-        Some(v) => state.agent_is_authorized(v, ag),
-        None => state.agent_is_authorized_any(ag),
-    };
-    if !listed {
-        return Err(AgentRefusal::NotAuthorized);
-    }
-    Ok(ag.to_string())
+    Ok((ag.to_string(), snapshot))
 }
 
 /// The refusal for a request with no verified agent identity.
@@ -1379,7 +1385,7 @@ mod tests {
         state.open_ledger_for_tests(&[]);
         state.unlock_vault(
             "v1".into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(vec![0x42u8; 32]),
         );
         assert!(state.ledger_refusal().is_none());
@@ -1444,7 +1450,7 @@ mod tests {
         state.open_ledger_for_tests(&[]);
         state.unlock_vault(
             "v1".into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(vec![0x42u8; 32]),
         );
 

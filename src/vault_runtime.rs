@@ -106,6 +106,11 @@ pub struct VaultRuntime {
     pub shared: Mutex<Option<bool>>,
     pub upgrade_required: AtomicBool,
     pub key_changed: AtomicBool,
+    /// The last install was refused while Unlocked: the served snapshot is
+    /// behind the store (an approved widen, say, is stored but not served).
+    /// Cleared by every served install, never by a rotation's patch; shown on
+    /// the status line so `sprott unlock` proceeds on an Unlocked vault.
+    pub behind: AtomicBool,
     pub sync_conflicts: Mutex<BTreeMap<String, SyncNote>>,
     pub catch_up_failure: Mutex<Option<String>>,
     pub pending_rotations: Mutex<BTreeMap<(String, String), crate::state::PendingRotation>>,
@@ -116,6 +121,17 @@ pub struct VaultRuntime {
     pub oauth_reauth_needed: Mutex<HashSet<String>>,
     pub live_ceremony_ops: Mutex<HashMap<String, String>>,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Held across every install, from reading the store and the key to the
+    /// swap ([`AppState::install`]), and across a stored rotation's store
+    /// write and snapshot patch (`crate::auth::connect::persist_rotated_refresh_locked`),
+    /// so an install that read the store earlier never swaps over a later
+    /// one. Lock order: `write_lock` → this → `state`. Only taken through
+    /// [`Self::with_build_lock`]; never held across an await.
+    build: Mutex<()>,
+    /// Tests: run once by the next install, under the build mutex, right
+    /// before its swap.
+    #[cfg(test)]
+    pub before_swap: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pub watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub watcher_cell: Mutex<Option<Arc<crate::sync_stream::WakeCell>>>,
     pub access_probe: AtomicBool,
@@ -134,6 +150,7 @@ impl VaultRuntime {
             shared: Mutex::new(None),
             upgrade_required: AtomicBool::new(false),
             key_changed: AtomicBool::new(false),
+            behind: AtomicBool::new(false),
             sync_conflicts: Mutex::new(BTreeMap::new()),
             catch_up_failure: Mutex::new(None),
             pending_rotations: Mutex::new(BTreeMap::new()),
@@ -143,6 +160,9 @@ impl VaultRuntime {
             oauth_reauth_needed: Mutex::new(HashSet::new()),
             live_ceremony_ops: Mutex::new(HashMap::new()),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            build: Mutex::new(()),
+            #[cfg(test)]
+            before_swap: Mutex::new(None),
             watcher: Mutex::new(None),
             watcher_cell: Mutex::new(None),
             access_probe: AtomicBool::new(false),
@@ -168,6 +188,32 @@ impl VaultRuntime {
             _runtime: self.clone(),
             _guard: guard,
         })
+    }
+
+    /// Run `f` holding the build mutex. The wait and `f` (a store read and
+    /// fold) are blocking work: on a multi-thread runtime's worker they run
+    /// off the async executor (`block_in_place`), elsewhere as they are.
+    pub fn with_build_lock<R>(&self, f: impl FnOnce() -> R) -> R {
+        let locked = || {
+            let _build = self.build.lock().unwrap_or_else(|e| e.into_inner());
+            f()
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(locked)
+            }
+            _ => locked(),
+        }
+    }
+
+    /// Lock this vault: K, S, the snapshot, the permits and the minted access
+    /// tokens go with the Unlocked state, and the key-changed and behind
+    /// notes are cleared (the next served install sets whichever applies).
+    /// Lock, a device park and close all end here.
+    pub fn set_locked(&self) {
+        *self.state.lock().unwrap() = VaultState::Locked;
+        self.key_changed.store(false, Ordering::Release);
+        self.behind.store(false, Ordering::Release);
     }
 
     pub(crate) fn mark_closed(&self) {
@@ -212,7 +258,7 @@ impl VaultRuntime {
         // A writer which entered before close may finish; taking the same lock
         // makes dropping K and the audit fd the final local action.
         let _write = self.write_lock.lock().await;
-        *self.state.lock().unwrap() = VaultState::Locked;
+        self.set_locked();
         self.audit.lock().unwrap().take();
     }
 }

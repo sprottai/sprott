@@ -31,23 +31,28 @@ key label the relay row was registered with). All three are DISPLAY ONLY
 ## 1. Daemon ↔ CLI (local loopback)
 
 ### Use op scope (signed, in β) — new keys
-- `level`: `"ask"` | `"ask-always"` | `"allow"` (from PolicyContext.level at
-  mint). `"allow"` = an allow-level request whose secret was not resident (a
-  cache miss); approving it holds the value for allow-level traffic only and
-  serves no ask. Never default-checked.
+- `level`: `"ask"` | `"ask-always"` (from PolicyContext.level at mint). An
+  allow-level request mints no op. A daemon before this change could stamp
+  `"allow"` (a value that was not resident); it is never default-checked.
 - `reuse`: `"none"` | `"exact"` | `"rule"` | `"floor"`, what approving lets
   the daemon serve again without a new approval (approvals-inbox.md D1
-  table): `ask-always` and `allow` → `none`; an `ask` on a scoped path →
+  table): `ask-always` → `none`; an `ask` on a scoped path →
   `exact`; an `ask` decided by a rule → `rule`, with `reuse_rule` (the rule
   id) and `reuse_label` (its label, when it has one); an `ask` decided by a
   default floor → `floor`, with `reuse_class` (`"read"` | `"write"`, by
   method).
 - `window_s`: integer seconds (= pc.ttl_seconds), present exactly when
   `reuse != "none"`.
+- `act.target`: the KEYs the request's phantoms resolved, joined with ", "
+  (one KEY for a one-secret request). The permit an approval stores is keyed
+  by them and the connection's service id; it carries no value.
 Apply asserts `scope.level == pc.level`, the reuse fields == what apply
 grants for that context, and `window_s` present iff that reuse has one and
 equal to `pc.ttl_seconds`; a signed `level` without `reuse`, or any mismatch
-→ refuse (BadRequest, plain arm; BatchVerify in batch arm).
+→ refuse (BadRequest, plain arm; BatchVerify in batch arm). Apply may then
+store less than the card renders, never more: no permit while the vault is
+Locked, and no window when the policy changed since the op was minted (the
+op is approved either way; its replay asks again).
 
 ### `POST /v/{vid}/op` (Export create) response
 `{ op_id, r, expires_at, waiter_secret }` — `waiter_secret` = 32 random bytes,

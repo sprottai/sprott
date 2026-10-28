@@ -124,48 +124,28 @@ pub fn register_pending_use(
     Ok((op_id, r, expires_at))
 }
 
-/// Resolve the credential value the proxy injects for a phantom before egress.
-/// For a static service this is a no-op (returns the stored bytes). For a
-/// MINTED mechanism (`[auth]`) the `raw` bytes are the mint's INPUT (oauth2
-/// refresh token / snaplii api key), not the wire token the upstream wants:
-/// exchange them at the mechanism's token endpoint (or reuse a still-valid
-/// cached token) and return the fresh token. The token cache lives on
-/// `AppState::oauth_access`, keyed by connection (never persisted). On an
-/// invalid input credential the connection is flagged needs-reauth and an
-/// `Unauthorized` propagates.
+/// Mint the credential a minted connection's access phantom injects. The
+/// `raw` bytes are the mint's INPUT (oauth2 refresh token / snaplii api key),
+/// not the wire token the upstream wants: exchange them at the mechanism's
+/// token endpoint (or reuse a still-valid cached token) and return the fresh
+/// token. `auth` is the mechanism of the definition the request was decided
+/// on (its snapshot's, custom-first), so the mint never disagrees with the
+/// pipeline about which config backs the connection. The token cache lives
+/// on the Unlocked state's `oauth_access`, keyed by the input (never
+/// persisted). On an invalid input credential the connection is flagged
+/// needs-reauth and an `Unauthorized` propagates.
 pub async fn resolve_auth_value(
     state: &Arc<crate::state::AppState>,
     vault_id: &str,
     conn_id: &str,
     service_id: &str,
+    auth: &crate::service::AuthDef,
     raw: &[u8],
 ) -> Result<Vec<u8>> {
-    // Resolve the mechanism from the SAME sources the pipeline used to decide
-    // this is a minted connection: the vault's custom services (aux.services)
-    // AND the compiled registry. A custom def lives only in the former —
-    // looking only at the compiled registry would miss it and fall through to
-    // returning `raw`, i.e. the mint input, straight to the upstream. That
-    // must never happen.
-    // custom-FIRST (see proxy::handler): mint against the vault-authored def when
-    // present — the SAME precedence the forward path uses, so the two never
-    // disagree about which config backs a connection.
-    let auth = state
-        .custom_service(vault_id, service_id)
-        .and_then(|s| s.auth.clone())
-        .or_else(|| state.services.get(service_id).and_then(|s| s.auth.clone()));
-    let Some(auth) = auth else {
-        // The pipeline only calls this for a minted ACCESS phantom (mint_input
-        // was Some from the resolved def). Not finding a mechanism here means
-        // the two disagree — fail closed, never leak the input as a fallback.
-        return Err(AppError::Internal(format!(
-            "connection '{}' resolved as minted but service '{}' exposes no [auth] mechanism",
-            conn_id, service_id
-        )));
-    };
 
     // The connection's CURRENT refresh token: whatever path produced `raw`
-    // (the session cache, or a ceremony's fresh decrypt from the store, which
-    // may still hold a replaced value), it is followed through every rotation
+    // (the request's snapshot, or a ceremony's fresh decrypt from the store,
+    // which may still hold a replaced value), it is followed through every rotation
     // made since (stored or still pending), because the provider honors only
     // the newest. This is the one place every mint input passes through.
     let current = state.current_refresh_token(vault_id, conn_id, raw);
@@ -328,7 +308,7 @@ pub async fn resolve_auth_value(
                 new_rt,
                 false,
             ) {
-                // Landed durably in the store (the session cache now holds
+                // Landed durably in the store (the served snapshot now holds
                 // it, nothing is pending for the slot): sent to the cloud once
                 // this lock drops.
                 Ok(_) => crate::auth::connect::spawn_push(state, vault_id),

@@ -27,6 +27,41 @@ use crate::state::AppState;
 use crate::storage::sealed_vault::{self, SealedVault};
 use crate::sync_stream::{Mode, StreamHealth, WakeCell, Work};
 
+/// Tests that point `HOME` at a temp dir: the variable is process-wide and
+/// the CLI config lives under it, so they run one at a time.
+#[cfg(test)]
+mod test_home {
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `HOME` set to `dir` until dropped (then restored), holding the lock.
+    pub(super) struct HomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        pub(super) fn set(dir: &std::path::Path) -> HomeGuard {
+            // A test that panicked while holding it left HOME restored.
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", dir);
+            HomeGuard {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 const REVOKED_REASON: &str =
     "this device can no longer use this vault: its account was removed from it";
@@ -355,8 +390,8 @@ pub async fn sync_vault_now(state: &Arc<AppState>, vault_id: &str) -> Result<Syn
     // The keyset now rides `/keys` (NOT the whole-blob `/blob`, which is a
     // keyset-lifecycle marker only); pull it FIRST so the item fold below sees a
     // fresh K-wrap layer. Best-effort — a 404 (endpoint not live) or a
-    // not-yet-per-item vault is a no-op. On item adoption, refresh the cache from
-    // the folded item view so the new rows are served without a re-unlock.
+    // not-yet-per-item vault is a no-op. On item adoption, install the snapshot
+    // from the folded item view so the new rows are served without a re-unlock.
     if let Some(cloud2) = cfg.cloud_backend.as_deref().filter(|s| !s.is_empty()) {
         if let Some(dk2) = device_key() {
             let lock = StoreLock::Take(state);
@@ -604,58 +639,23 @@ pub(crate) async fn pull_items_now(state: &Arc<AppState>, vault_id: &str) -> Res
     Ok(())
 }
 
-/// The per-item store of `vault` folded under `key` (`None`: no store, or
-/// it does not fold; logged).
-pub(crate) fn fold_with_key(
-    state: &AppState,
-    vault: &str,
-    key: &[u8],
-) -> Option<crate::storage::plaintext::VaultPlaintextView> {
-    let pv = read_per_item_store(&state.config.state_dir, vault)?;
-    match crate::server::handlers::metadata::decrypt_vault_view_peritem_complete_with_key(
-        key, &pv, vault,
-    ) {
-        Ok(view) => {
-            state.clear_vault_key_changed(vault);
-            Some(view)
-        }
-        Err(e) => {
-            state.mark_vault_key_changed(vault);
-            tracing::warn!(vault = %vault, "fold after the unlock pull failed (serving the view opened at unlock): {}", e);
-            None
-        }
-    }
-}
-
-/// After a per-item pull adopted new rows, refresh the in-memory cache for an
-/// UNLOCKED vault by folding the per-item store with the retained `K` — no
-/// passkey. Locked vault (no K) → no-op (the next unlock folds the new rows). A
-/// rotated `K` that can't unseal → log + leave the cache (graceful).
+/// After a per-item pull adopted new rows, install the snapshot of an
+/// UNLOCKED vault from the store, under the key it holds — no passkey
+/// ([`AppState::install`]). Locked vault → nothing (the next unlock folds the
+/// new rows). A fold that cannot read a row the served snapshot reads (a
+/// rotated `K`) leaves the snapshot and notes the key change.
 pub(crate) fn refresh_after_item_pull(state: &Arc<AppState>, vault: &str) {
-    let Some(k) = state.cloned_state_key(vault) else {
-        return;
-    };
-    let Some(pv) = read_per_item_store(&state.config.state_dir, vault) else {
-        return;
-    };
-    match crate::server::handlers::metadata::decrypt_vault_view_peritem_complete_with_key(
-        &k, &pv, vault,
-    ) {
-        Ok(view) => {
-            state.clear_vault_key_changed(vault);
-            let cache = crate::server::handlers::approve::bootstrap_cache_from_view(&view, state);
-            state.unlock_vault(vault.to_string(), cache, k);
-            tracing::info!(vault = %vault, "per-item pull: cache refreshed from item rows");
+    match state.install(vault, crate::state::InstallKey::Held) {
+        crate::state::Installed::Served => {
+            tracing::info!(vault = %vault, "per-item pull: snapshot installed from item rows");
             // The console's install requests, handled as `sc service add`.
             crate::server::handlers::service_ops::requests::after_sync(state, vault);
         }
-        Err(_) => {
-            state.mark_vault_key_changed(vault);
-            tracing::warn!(
-                vault = %vault,
-                "per-item pull: retained K can't unseal a row (rotated K?); lock+unlock to see new state"
-            );
-        }
+        crate::state::Installed::Refused => tracing::warn!(
+            vault = %vault,
+            "per-item pull: not served, the store could not be folded or the held key can't read rows the snapshot reads (rotated K?); lock+unlock to see new state"
+        ),
+        crate::state::Installed::NotUnlocked => {}
     }
 }
 
@@ -1689,47 +1689,19 @@ fn personal_tombstone_verified(
     crate::identity::verify(&pk, &crate::identity::vault_tombstone_input(vault), &sig)
 }
 
-/// After a runtime pull wrote a new `vault.dat`, refresh the in-memory cache
-/// for an UNLOCKED vault using the retained state key `K` — no passkey. If the
-/// vault is Locked (no retained `K`), nothing is cached to refresh; the next
-/// unlock reads the new file. If the new ciphertext was sealed under a ROTATED
-/// `K`, `K` can't open it — leave the cache and log (graceful: lock+unlock to
-/// see new state), mirroring the post-write refresh path.
+/// After a runtime pull wrote a new `vault.dat`, install the snapshot of an
+/// UNLOCKED vault from the store, under the key it holds — no passkey
+/// ([`AppState::install`]). If the vault is Locked, there is nothing to
+/// refresh; the next unlock reads the new file. If the new ciphertext was
+/// sealed under a ROTATED `K`, the held `K` can't open it — the snapshot stays
+/// and the key change is noted (lock+unlock to see new state), mirroring the
+/// post-write refresh path.
 fn refresh_after_pull(state: &Arc<AppState>, vault: &str) {
-    let Some(k) = state.cloned_state_key(vault) else {
-        return; // Locked — no retained K
-    };
-    let vault_path = state
-        .config
-        .state_dir
-        .join("vaults")
-        .join(vault)
-        .join("vault.dat");
-    let sealed = match sealed_vault::read(&vault_path) {
-        Ok(Some(v)) => v,
-        _ => return,
-    };
-    match crate::server::handlers::metadata::decrypt_vault_view_with_key(&k, &sealed) {
-        Ok(view) => {
-            let has_per_item = state
-                .vaults
-                .per_item_path(vault)
-                .ok()
-                .is_some_and(|p| p.exists());
-            if !has_per_item {
-                state.clear_vault_key_changed(vault);
-            }
-            let cache = crate::server::handlers::approve::bootstrap_cache_from_view(&view, state);
-            state.unlock_vault(vault.to_string(), cache, k);
-            tracing::info!(vault = %vault, "cloud sync: cache refreshed after pull (no re-unlock)");
-        }
-        Err(_) => {
-            state.mark_vault_key_changed(vault);
-            tracing::warn!(
-                vault = %vault,
-                "cloud sync: retained key can't open pulled ciphertext (rotated K?); lock+unlock to see new state"
-            );
-        }
+    if state
+        .install(vault, crate::state::InstallKey::Held)
+        .served()
+    {
+        tracing::info!(vault = %vault, "cloud sync: snapshot installed after pull (no re-unlock)");
     }
 }
 
@@ -6712,8 +6684,7 @@ mod peritem_tests {
         use base64::Engine as _;
 
         let home = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
+        let _home = super::test_home::HomeGuard::set(home.path());
         let state_dir = home.path().join("state");
         let state = Arc::new(AppState::new(test_config(&state_dir)));
         state.open_ledger_for_tests(&[]);
@@ -6727,7 +6698,7 @@ mod peritem_tests {
         .unwrap();
         state.unlock_vault(
             vault.into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(vec![7; 32]),
         );
         state.record_cloud_contact(vault);
@@ -6779,7 +6750,7 @@ mod peritem_tests {
         assert!(state.is_vault_locked(vault));
         state.unlock_vault(
             vault.into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(vec![8; 32]),
         );
         assert!(state.is_vault_locked(vault));
@@ -6906,11 +6877,6 @@ mod peritem_tests {
         assert!(attached_membership_excludes_us(&state, removed, Some(&membership)));
         revoke_vault_access(&state, removed, Some(membership)).await;
         assert!(!state.vaults.dir_for(removed).unwrap().exists(), "a creator-signed remove deletes the local copy");
-
-        match previous_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     /// §15 W1: a vault with a keyset drops only on a VERIFIED owner tombstone.
@@ -7006,10 +6972,17 @@ mod peritem_tests {
         )
         .unwrap();
         write_per_item_store(dir.path(), vault, &pv).unwrap();
+        state.open_ledger_for_tests(&[]);
+        let unlock = |k: &[u8]| {
+            state.install(
+                vault,
+                crate::state::InstallKey::Unlock(zeroize::Zeroizing::new(k.to_vec())),
+            )
+        };
 
-        assert!(fold_with_key(&state, vault, &old).is_none());
+        assert!(unlock(&old).served());
         assert!(state.is_vault_key_changed(vault));
-        assert!(fold_with_key(&state, vault, &new).is_some());
+        assert!(unlock(&new).served());
         assert!(!state.is_vault_key_changed(vault));
     }
 
@@ -10082,8 +10055,7 @@ mod tests {
         use crate::cli::active::{self, CliConfig, KnownVault};
         let home = tempdir().unwrap();
         // active.rs resolves config via dirs::home_dir() → $HOME.
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
+        let _home = super::test_home::HomeGuard::set(home.path());
 
         let cfg = CliConfig {
             daemon: Some("http://localhost:1".into()),
@@ -10138,10 +10110,5 @@ mod tests {
         // The next successful pairing/selection clears the breadcrumb.
         active::put_active("http://localhost:1", "vid-C").unwrap();
         assert!(active::load().unwrap().vault_deleted_upstream.is_none());
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
     }
 }

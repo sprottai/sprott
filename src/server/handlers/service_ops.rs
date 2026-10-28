@@ -41,7 +41,7 @@ use crate::service::source::{
     card, ServiceSource, StoredService, MAX_SOURCE_DEFINITION_BYTES, MAX_SOURCE_SERVICES,
 };
 use crate::service::{gate, ServiceDef, ServiceRegistry};
-use crate::state::{AppState, VaultState};
+use crate::state::AppState;
 use crate::storage::plaintext::Connection;
 
 /// A `service-add` op's request fields.
@@ -156,18 +156,17 @@ type Session = (
 );
 
 fn session(state: &AppState, vault_id: &str) -> std::result::Result<Session, String> {
-    let runtime = state
-        .runtime_if_present(vault_id)
-        .ok_or_else(|| "vault locked".to_string())?;
-    let runtime_state = runtime.state.lock().unwrap();
-    match &*runtime_state {
-        VaultState::Unlocked { cache, .. } => Ok((
-            cache.service_entries.clone(),
-            cache.connections.clone(),
-            cache.policy.allow_installed_services,
-        )),
-        _ => Err(crate::error::VAULT_LOCKED_MSG.to_string()),
+    if state.runtime_if_present(vault_id).is_none() {
+        return Err("vault locked".to_string());
     }
+    let snapshot = state
+        .snapshot(vault_id)
+        .ok_or_else(|| crate::error::VAULT_LOCKED_MSG.to_string())?;
+    Ok((
+        snapshot.service_entries.clone(),
+        snapshot.connections.clone(),
+        snapshot.inputs.policy.allow_installed_services,
+    ))
 }
 
 /// LEGACY(aux addressing, services row): one step of the migration on a
@@ -361,9 +360,9 @@ pub(crate) fn persist(
     vault_id: &str,
     base: &crate::storage::sealed_vault::ViewBase,
     view: &crate::storage::plaintext::VaultPlaintextView,
-    k: &[u8],
-) -> Result<()> {
-    crate::auth::connect::persist_mutated_view(state, vault_id, base, view, k)
+    key: crate::auth::connect::WriteKey<'_>,
+) -> Result<crate::state::Installed> {
+    crate::auth::connect::persist_mutated_view(state, vault_id, base, view, key)
 }
 
 /// Apply a `service-add`: the stored definitions of the source become exactly

@@ -37,7 +37,7 @@ use crate::core::host::{phantoms_for, phantoms_for_raw, resolved_hosts};
 use crate::error::Result;
 use crate::server::handlers::op::validate_vault_id;
 use crate::service::{ServiceDef, ServiceRegistry};
-use crate::state::{AppState, VaultState};
+use crate::state::AppState;
 use crate::storage::plaintext::{secret_key_for, Connection};
 
 /// The current registry wire version.
@@ -538,25 +538,24 @@ pub fn vault_registry_value(
             return Err(gone);
         }
         // A read: no runtime means locked here, and listing must not create one.
-        let runtime = state.runtime_if_present(vault_id);
-        let runtime_state = runtime.as_ref().map(|r| r.state.lock().unwrap());
-        match runtime_state.as_deref() {
-            Some(VaultState::Unlocked { cache, .. }) => {
-                let mut custom: Vec<(String, ServiceDef)> = cache
-                    .custom_services
+        match state.snapshot(vault_id) {
+            Some(snapshot) => {
+                let mut custom: Vec<(String, ServiceDef)> = snapshot
+                    .inputs
+                    .custom
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 custom.sort_by(|a, b| a.0.cmp(&b.0));
                 (
-                    cache.native_keys.clone(),
-                    cache.external_keys.lock().unwrap().clone(),
+                    snapshot.native_names().cloned().collect(),
+                    state.external_key_names(vault_id),
                     custom,
-                    cache.connections.clone(),
+                    snapshot.connections.clone(),
                     false,
                 )
             }
-            _ => (
+            None => (
                 HashSet::new(),
                 HashSet::new(),
                 Vec::new(),

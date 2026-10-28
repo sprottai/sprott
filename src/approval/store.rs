@@ -46,15 +46,15 @@ pub struct ApprovalRecord {
     /// to prevent brute-force on expensive crypto operations.
     pub fail_count: u32,
     /// Policy decision context captured when the op was created. Used by
-    /// approve.rs to write into the rule-approvals cache after a
-    /// successful Use op — so the `ask`-with-TTL semantic kicks in on the
-    /// next matching request. Daemon-internal: never appears on the wire,
-    /// never signed into the grant.
+    /// approve.rs to store the permit an approved Use op leaves, so the
+    /// `ask`-with-TTL semantic kicks in on the next matching request.
+    /// Daemon-internal: never appears on the wire, never signed into the
+    /// grant.
     pub policy_context: Option<PolicyContext>,
     /// Prefix of the agent api-key that TRIGGERED this op (op-agent binding,
     /// team §C1) — the daemon-side enforcement handle. Every agent-facing
-    /// consumption surface (proxy op poll, op_grants redeem, ask-cache
-    /// write/read) compares the acting key against this. The same value rides
+    /// consumption surface (proxy op poll, the permit an approval stores and
+    /// its lookup) compares the acting key against this. The same value rides
     /// in `o.act.scope.agent` so the human's signature covers it; this copy
     /// exists so enforcement never re-parses the signed op. `None` = op not
     /// created by an agent request (ceremonies) — no agent gate applies.
@@ -97,11 +97,19 @@ pub struct PolicyContext {
     /// the matched rule's `ttl`, the service / tag default's
     /// `ask_ttl`, or `Policy.timeout` as last resort.
     pub ttl_seconds: u64,
-    /// Resolved destination host of the request that created this op. The
-    /// ask-grant ledger is host-scoped (an approval for host A must not
-    /// authorize host B in the TTL), so the approve handler reads this when it
-    /// writes `record_ask_grant`. Stamped by the proxy at op-create.
+    /// Resolved destination host of the request that created this op. A
+    /// permit is host-scoped (an approval for host A must not authorize host
+    /// B in the TTL), so the approve handler reads this when it stores the
+    /// permit. Stamped by the proxy at op-create.
     pub host: Option<String>,
+    /// The credentials the request resolved (its service id and KEYs): the
+    /// permit an approval stores is keyed by them, so it serves only a replay
+    /// that uses the same ones.
+    pub credentials: Option<crate::state::CredentialSet>,
+    /// For a window approval (`exact`, `rule`, `floor`): the policy
+    /// fingerprint of the snapshot the op was minted from. Approve stores the
+    /// window only while the served snapshot has the same one.
+    pub policy_fp: Option<[u8; 32]>,
 }
 
 impl ApprovalRecord {
@@ -128,23 +136,29 @@ impl ApprovalRecord {
 pub const INTENT_TAG: &[u8] = b"safeclaw/v1/intent";
 
 /// The intent key of a `use` op (design/approvals-inbox.md D1):
-/// SHA-256(INTENT_TAG ‖ JCS({redeemer, recipient, act, level, ttl})).
+/// SHA-256(INTENT_TAG ‖ JCS({redeemer, recipient, act, level, ttl[, policy]})).
 /// `r` and `valid.*` are excluded, so byte-identical retries of one request
 /// collide; the PolicyContext level + ttl are included so ops minted under
-/// different policy never merge. `None` for any other kind, or when the op
-/// can't be canonicalized (floats) — such an op simply never chains.
+/// different policy never merge, and so is a window's mint-time policy
+/// fingerprint (`policy`, hex). The act's `target` names the credentials the
+/// request resolved. `None` for any other kind, or when the op can't be
+/// canonicalized (floats) — such an op simply never chains.
 pub fn intent_key(op: &Operation, pc: &PolicyContext) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     if op.act.kind != crate::protocol::operation::ActType::Use {
         return None;
     }
-    let v = serde_json::json!({
+    let mut v = serde_json::json!({
         "redeemer": op.bind.redeemer,
         "recipient": op.bind.recipient,
         "act": op.act,
         "level": pc.level.to_string(),
         "ttl": pc.ttl_seconds,
     });
+    if let Some(fp) = pc.policy_fp {
+        let hex: String = fp.iter().map(|b| format!("{:02x}", b)).collect();
+        v["policy"] = serde_json::Value::String(hex);
+    }
     let bytes = sudp::canonical::canonicalize_strict(&v).ok()?;
     let mut h = Sha256::new();
     h.update(INTENT_TAG);
@@ -505,6 +519,12 @@ impl ApprovalStore {
         self.inner.get_mut(id)
     }
 
+    /// Tests: every op held, whatever its status.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Drop expired and consumed records.
     pub fn cleanup(&mut self) {
         self.inner
@@ -602,11 +622,34 @@ mod tests {
             },
             ttl_seconds: ttl,
             host: Some("api.github.com".into()),
+            credentials: None,
+            policy_fp: None,
         }
     }
 
     fn ask() -> PolicyContext {
         pc(crate::core::policy::AccessLevel::Ask, 900)
+    }
+
+    /// A window's mint-time policy fingerprint joins the intent key: ops
+    /// minted under different policies never chain; an op without one keys
+    /// as before (the fixture below).
+    #[test]
+    fn a_window_intent_key_carries_its_policy_fingerprint() {
+        let op = use_op("/user", "v1");
+        let plain = intent_key(&op, &ask());
+        let a = PolicyContext {
+            policy_fp: Some([1u8; 32]),
+            ..ask()
+        };
+        let b = PolicyContext {
+            policy_fp: Some([2u8; 32]),
+            ..ask()
+        };
+        assert!(plain.is_some());
+        assert_ne!(intent_key(&op, &a), plain);
+        assert_ne!(intent_key(&op, &a), intent_key(&op, &b));
+        assert_eq!(intent_key(&op, &a), intent_key(&op, &a.clone()));
     }
 
     /// Pins the intent-key DEFINITION: tag directly concatenated (no

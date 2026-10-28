@@ -804,7 +804,7 @@ mod tests {
         // in force. This is the exact regime that must NOT reach Export.
         state.unlock_vault(
             "v1".into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(Vec::new()),
         );
 
@@ -879,7 +879,7 @@ mod tests {
         if state.is_vault_locked("v1") {
             state.unlock_vault(
                 "v1".into(),
-                crate::state::SecretsCache::default(),
+                crate::snapshot::Snapshot::default(),
                 zeroize::Zeroizing::new(Vec::new()),
             );
         }
@@ -900,7 +900,7 @@ mod tests {
         if state.is_vault_locked("v1") {
             state.unlock_vault(
                 "v1".into(),
-                crate::state::SecretsCache::default(),
+                crate::snapshot::Snapshot::default(),
                 zeroize::Zeroizing::new(Vec::new()),
             );
         }

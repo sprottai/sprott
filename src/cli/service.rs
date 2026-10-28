@@ -343,7 +343,7 @@ pub async fn run_start_systemd(force: bool) -> Result<(), String> {
     if !env_lines.is_empty() {
         eprintln!("  env:      {} SPROTT_* var(s) embedded", env_lines.len());
     }
-    eprintln!("  broker:   requires an agent key (synced from your account); mint one with `sprott agent add` or the dashboard's \"Connect a new agent\"");
+    eprintln!("  broker:   requires an agent key (synced from your account); mint one with `sprott agent add` or the console's \"Connect a new agent\"");
     eprintln!();
     eprintln!("  next: `sprott login` to connect this machine to your Sprott account");
     eprintln!("        `sprott log -f` to tail, `sprott down` to stop, `sprott restart` to reload");

@@ -10,7 +10,6 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use zeroize::Zeroize as _;
 
 use axum::{
     extract::{Path, State},
@@ -25,13 +24,13 @@ use serde_json::{json, Value};
 
 use crate::approval::ApprovalStatus;
 use crate::audit::{STATUS_APPROVED, STATUS_REJECTED};
+use crate::auth::connect::WriteKey;
 use crate::error::{AppError, Result};
 use crate::passkey::PasskeyEntry;
 use crate::protocol::grant::{delivery_form, DeliveredVaultKey, DeliveryForm};
 use crate::protocol::operation::{as_export_path, decode_credential_id, discriminator, ActType};
 use crate::protocol::{render_operation, validate_batch_grant, validate_grant, Grant};
-use crate::state::{AppState, ApprovalEvent, SecretsCache};
-use crate::storage::plaintext::{Category, VaultPlaintextView};
+use crate::state::{AppState, ApprovalEvent};
 use crate::storage::sealed_vault::{
     find_pubkey, find_pubkey_in_registry, read as read_vault, read_per_item, write_atomic,
     ApprovalAuthority, PerItemVault,
@@ -1085,11 +1084,11 @@ pub async fn approve_op(
     // Captured here for the audit row finalize at the bottom (Use's upstream
     // status code; None for all other act kinds).
     let audit_upstream_status: Option<i64> = None;
-    // A Use apply's grant/cache write is DEFERRED until the op is actually
-    // marked approved (step 5): any status flip that bypasses the vault write
-    // lock (a user reject, a requester withdrawal, the reaper, an auto-reject)
-    // can land between dispatch and approve, and must never leave a live
-    // grant behind an op that reads rejected.
+    // A Use apply's permit is DEFERRED until the op is actually marked
+    // approved (step 5): any status flip that bypasses the vault write lock
+    // (a user reject, a requester withdrawal, the reaper, an auto-reject) can
+    // land between dispatch and approve, and must never leave a live permit
+    // behind an op that reads rejected.
     let mut deferred_grant: Option<DeferredGrant> = None;
     let (response, cached_value) = match &validated.op.act.kind {
         // Retired (refused at op creation and before validation above): a vault
@@ -1169,23 +1168,13 @@ pub async fn approve_op(
             }
         }
         ActType::Use => {
-            // Read seam (per-item first, whole-blob Option fallback) lives inside
-            // the broker resolve call — so a web-enrolled per-item vault
-            // (no vault.dat) resolves without the old "vault not initialized" bail.
             // Phantom-only: an approved Use op is ALWAYS authorize_only — the
-            // resident proxy serves live traffic and retries the real request
-            // after approval. Resolve the connection's primary secret with the
-            // verified grant and stash it so the retry fast-paths; never forward
-            // here (there is no buffered request on the op plane).
-            let s_o = crate::server::broker::resolve_use_primary(
-                &validated.op,
-                validated.key(),
-                &validated.credential_id_bytes,
-                existing_vault.as_ref(),
-                &state,
-                &vault_id,
-            )
-            .await?;
+            // resident proxy serves live traffic and the agent retries the
+            // real request after approval. Approving leaves a permit that
+            // carries no value (the replay reads the values itself, once its
+            // permit is found): no vault is opened and nothing is resolved
+            // here, and nothing is forwarded (there is no buffered request on
+            // the op plane).
             let scope = &validated.op.act.scope;
             let (pc, grant_agent) = {
                 let store = state.approvals.lock().unwrap();
@@ -1199,11 +1188,11 @@ pub async fn approve_op(
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            deferred_grant = plan_use_grant(pc.as_ref(), scope, &vault_id, &grant_agent, s_o, now);
+            deferred_grant = plan_use_grant(pc.as_ref(), scope, &vault_id, &grant_agent, now);
             if deferred_grant.is_none() {
                 tracing::warn!(
                     vault = %vault_id, op = %op_id,
-                    "use approve without a full binding — grant not stored (replay will re-prompt)"
+                    "use approve without a full binding: no permit stored (the replay asks again)"
                 );
             }
             (
@@ -1212,15 +1201,13 @@ pub async fn approve_op(
             )
         }
         ActType::Custom(name) => match name.as_str() {
-            // Lifecycle op (H3 / PROTOCOL.md §6.3): decrypt vault, bootstrap
-            // secrets_cache for allow-policy services, transition to Unlocked,
-            // and return all target plaintexts to the requester (the same
-            // shape Export-with-target="env" returned, so /try's editor
-            // doesn't need a separate reveal call).
+            // Lifecycle op (H3 / PROTOCOL.md §6.3): open the vault, install
+            // its snapshot, transition to Unlocked. Returns no secret.
             "vault-unlock" => {
-                // Read seam: per-item store first (a web-enrolled vault has only
-                // vault.per-item.json, no vault.dat), whole-blob as Option fallback.
-                let (mut view, unlock_key) =
+                // The grant opens the vault (read seam: per-item store first,
+                // a web-enrolled vault has only vault.per-item.json, no
+                // vault.dat; whole-blob as Option fallback): its key `K`.
+                let (_, unlock_key) =
                     crate::server::handlers::metadata::open_view_for_grant_keep_key(
                         &state,
                         &vault_id,
@@ -1229,39 +1216,14 @@ pub async fn approve_op(
                         &validated.credential_id_bytes,
                         existing_vault.as_ref(),
                     )?;
-                // The read seam's view may be partial: a row this key can't open
-                // (or a body shape from a newer client) is skipped, never a reason
-                // to refuse the unlock. `complete` records whether every current
-                // row opened, which decides the key-changed note once K is held.
-                let has_per_item = state
-                    .vaults
-                    .per_item_path(&vault_id)
-                    .ok()
-                    .is_some_and(|p| p.exists());
-                let mut complete = !has_per_item;
-                if has_per_item {
-                    if let Some(v) = crate::sync::fold_with_key(&state, &vault_id, &unlock_key) {
-                        view = v;
-                        complete = true;
-                    }
-                }
                 // Before the vault serves: every held row is offered again under
                 // the key, then the cloud is pulled. A failed pull keeps
                 // retrying in the background and is reported (`sc status`).
-                let (adopted, pull_error) =
+                let (_, pull_error) =
                     crate::sync::catch_up_at_unlock(&state, &vault_id, &unlock_key).await;
-                if adopted {
-                    match crate::sync::fold_with_key(&state, &vault_id, &unlock_key) {
-                        Some(v) => {
-                            view = v;
-                            complete = true;
-                        }
-                        None => complete = false,
-                    }
-                }
                 // vault-unlock is a pure STATE TRANSITION: it uses the grant's
-                // W_c to open the vault, bootstrap the daemon's in-memory
-                // secrets cache, and flip the vault unlocked. It deliberately
+                // key to open the vault, install the daemon's in-memory
+                // snapshot, and flip the vault unlocked. It deliberately
                 // returns NO secret material. The console editor derives its
                 // `{kv, aux}` view entirely client-side (it pulls the sealed
                 // per-item rows and unseals them under its own passkey PRF —
@@ -1272,24 +1234,28 @@ pub async fn approve_op(
                 // whole vault's plaintext retrievable. Plaintext leaves the
                 // daemon ONLY through a scope-constrained, single-use `Export`
                 // op (the passkey-gated `sc secret get` / reveal path), never
-                // here. Bootstrap the cache from `view` (every allow-policy
-                // service's auth value via the v3 store_order; native-only at
-                // unlock — external adapters fetch lazily at /use); never
-                // materialize kv.
-                let cache = bootstrap_cache_from_view(&view, &state);
-                tracing::info!(
-                    vault = %vault_id,
-                    cached_services = cache.entries.len(),
-                    "vault unlocked"
-                );
-                state.unlock_vault(vault_id.clone(), cache, unlock_key);
-                // Settled only now that the new K is held: a watcher refresh that
-                // ran on the old K during the catch-up may have marked it again.
-                if complete {
-                    state.clear_vault_key_changed(&vault_id);
-                } else {
-                    state.mark_vault_key_changed(&vault_id);
+                // here. The install folds the store as the catch-up left it
+                // (a row this key can't open is skipped and noted as a key
+                // change, never a reason to refuse the unlock) and builds the
+                // snapshot (resident values in plaintext, every other bound
+                // value sealed under S; external stores are walked on first
+                // use); never materialize kv. The only install that takes
+                // the vault from Locked to Unlocked.
+                let installed =
+                    state.install(&vault_id, crate::state::InstallKey::Unlock(unlock_key));
+                if !installed.served() {
+                    // Parked or revoked meanwhile, or the store unreadable:
+                    // nothing was unlocked.
+                    return Err(state
+                        .ledger_refusal()
+                        .or_else(|| state.vault_gone_error(&vault_id))
+                        .unwrap_or_else(|| {
+                            AppError::Internal(
+                                "the vault's store could not be read; it was not unlocked".into(),
+                            )
+                        }));
                 }
+                tracing::info!(vault = %vault_id, "vault unlocked");
                 match pull_error {
                     Some(e) => {
                         crate::sync::retry_pull_after_unlock(state.clone(), vault_id.clone(), e)
@@ -1340,7 +1306,7 @@ pub async fn approve_op(
                 // stashed for the op-poll to hand back.
                 (resp, None)
             }
-            // Lifecycle op: drop the cache and flip Locked. No vault read
+            // Lifecycle op: drop the snapshot and permits and flip Locked. No vault read
             // needed — pure state transition. Requires a fresh grant so an
             // attacker with the user's session token can't DOS-lock without
             // a passkey gesture.
@@ -1439,10 +1405,8 @@ pub async fn approve_op(
             }
             // Component C — one-tap host widen. The agent hit a destination the
             // connection doesn't anchor; the user approves adding that exact
-            // FQDN as a permanent grant. Session-level today (the in-memory
-            // routing snapshot is widened so the agent's retry passes the
-            // anchor); durable persistence into `aux.connections[conn].hosts`
-            // is the documented follow-up (see BUILD_NOTES: widen durable write).
+            // FQDN as a permanent grant, written into `aux.connections[conn]`
+            // and served by the write's install.
             "widen-host" => {
                 let conn = validated
                     .op
@@ -1465,14 +1429,14 @@ pub async fn approve_op(
                         "widen-host scope needs connection_id + host".into(),
                     ));
                 }
-                // Session snapshot first, so the agent's immediate retry passes
-                // the anchor, then persist DURABLY into `aux.connections[conn]`
-                // so the grant survives a restart / re-unlock — the same
+                // The host is checked before anything changes. Then it is
+                // persisted DURABLY into `aux.connections[conn]` — the same
                 // open -> mutate -> reseal -> push path connection-add/secret-set
-                // use. The grant already carries W_c (every approve path attaches
-                // it, act-agnostic: cli/approve.rs + fe vault-grant.ts), so this
-                // opens + reseals the vault like any other mutating custom act.
-                state.widen_connection_host(&vault_id, &conn, &host);
+                // use — and the write's install serves it, so the agent's
+                // retry passes the anchor (one whose install is refused says
+                // so instead of asking for another widen). The grant carries
+                // the vault key, so this opens + reseals the vault like any
+                // other mutating custom act.
                 crate::cli::conn::validate_raw_host(&host).map_err(AppError::BadRequest)?;
                 let (mut view, k) =
                     crate::server::handlers::metadata::open_view_for_grant_keep_key(
@@ -1520,7 +1484,13 @@ pub async fn approve_op(
                         );
                     }
                 }
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1530,10 +1500,12 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, conn = %conn, host = %host, "host widened (durable)");
-                (
+                let resp = with_served(
                     json!({ "ok": true, "act": "widen-host", "connection_id": conn, "host": host }),
-                    None,
-                )
+                    installed,
+                );
+                let cached = Some(resp.to_string());
+                (resp, cached)
             }
             // Inverse of widen-host — remove a host from a connection's anchor
             // (tighten access). Minted by `sc connection rm-host`; passkey-gated
@@ -1581,9 +1553,14 @@ pub async fn approve_op(
                         removed = hosts.len() != before;
                     }
                 }
+                let mut installed = crate::state::Installed::Served;
                 if removed {
-                    crate::auth::connect::persist_mutated_view(
-                        &state, &vault_id, &base, &view, &k,
+                    installed = crate::auth::connect::persist_mutated_view(
+                        &state,
+                        &vault_id,
+                        &base,
+                        &view,
+                        WriteKey::Grant(&k),
                     )?;
                     {
                         let state = state.clone();
@@ -1595,10 +1572,12 @@ pub async fn approve_op(
                     }
                 }
                 tracing::info!(vault = %vault_id, conn = %conn, host = %host, removed, "host narrowed");
-                (
+                let resp = with_served(
                     json!({ "ok": true, "act": "narrow-host", "connection_id": conn, "host": host, "removed": removed }),
-                    None,
-                )
+                    installed,
+                );
+                let cached = Some(resp.to_string());
+                (resp, cached)
             }
             // Remove one vault service definition, or every definition of one
             // source (`target` = a service id, or a source identity such as
@@ -1624,7 +1603,13 @@ pub async fn approve_op(
                     &validated.op.act.scope,
                 )
                 .map_err(AppError::BadRequest)?;
-                crate::server::handlers::service_ops::persist(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::server::handlers::service_ops::persist(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1634,10 +1619,13 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, removed = card.ids.len(), "service definitions removed");
-                let resp = json!({
-                    "ok": true, "act": "service-rm",
-                    "removed": card.ids, "referencing_connections": card.connections,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "service-rm",
+                        "removed": card.ids, "referencing_connections": card.connections,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -1673,7 +1661,13 @@ pub async fn approve_op(
                     &state.services,
                 )
                 .map_err(AppError::BadRequest)?;
-                crate::server::handlers::service_ops::persist(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::server::handlers::service_ops::persist(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1683,10 +1677,13 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, stored = card.ids.len(), removed = card.removes.len(), "service definitions stored");
-                let resp = json!({
-                    "ok": true, "act": "service-add",
-                    "ids": card.ids, "removed": card.removes,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "service-add",
+                        "ids": card.ids, "removed": card.removes,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -1734,7 +1731,13 @@ pub async fn approve_op(
                     .remove(&key)
                     .unwrap_or_default();
                 view.native_secrets.remove(&key);
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1744,10 +1747,13 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, key = %key, "secret removed");
-                let resp = json!({
-                    "ok": true, "act": "secret-rm",
-                    "removed": key, "referenced_by": referenced_by,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "secret-rm",
+                        "removed": key, "referenced_by": referenced_by,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -1791,7 +1797,13 @@ pub async fn approve_op(
                     &state.services,
                 )
                 .map_err(AppError::BadRequest)?;
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -1804,14 +1816,17 @@ pub async fn approve_op(
                 // `kept_secrets` keeps its original shape ([key, [conn, …]]:
                 // still bound elsewhere) for older CLIs; the two newer reasons
                 // ride their own fields.
-                let resp = json!({
-                    "ok": true, "act": "connection-rm",
-                    "removed": id,
-                    "removed_secrets": removed_secrets,
-                    "kept_secrets": plan.shared,
-                    "kept_referenced": plan.referenced,
-                    "kept_untracked": plan.untracked,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "connection-rm",
+                        "removed": id,
+                        "removed_secrets": removed_secrets,
+                        "kept_secrets": plan.shared,
+                        "kept_referenced": plan.referenced,
+                        "kept_untracked": plan.untracked,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -2037,7 +2052,13 @@ pub async fn approve_op(
                     }
                 }
                 view.aux.connections.insert(id.clone(), record);
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -2047,11 +2068,14 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, connection = %id, "connection added");
-                let resp = json!({
-                    "ok": true, "act": "connection-add",
-                    "id": id, "service": service,
-                    "written": written, "referenced": referenced,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "connection-add",
+                        "id": id, "service": service,
+                        "written": written, "referenced": referenced,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -2133,7 +2157,13 @@ pub async fn approve_op(
                     .connection_claims(&state.services, "")
                     .remove(&key)
                     .unwrap_or_default();
-                crate::auth::connect::persist_mutated_view(&state, &vault_id, &base, &view, &k)?;
+                let installed = crate::auth::connect::persist_mutated_view(
+                    &state,
+                    &vault_id,
+                    &base,
+                    &view,
+                    WriteKey::Grant(&k),
+                )?;
                 {
                     let state = state.clone();
                     let vid = vault_id.clone();
@@ -2143,13 +2173,16 @@ pub async fn approve_op(
                     });
                 }
                 tracing::info!(vault = %vault_id, key = %key, "secret set");
-                let resp = json!({
-                    "ok": true, "act": "secret-set", "key": key,
-                    "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
-                    "hosts": echo_hosts,
-                    "removed_prior_anchor": removed_prior_anchor,
-                    "existed": existed, "used_by": used_by,
-                });
+                let resp = with_served(
+                    json!({
+                        "ok": true, "act": "secret-set", "key": key,
+                        "conn": if hosts.is_empty() { Value::Null } else { json!(conn) },
+                        "hosts": echo_hosts,
+                        "removed_prior_anchor": removed_prior_anchor,
+                        "existed": existed, "used_by": used_by,
+                    }),
+                    installed,
+                );
                 let cached = Some(resp.to_string());
                 (resp, cached)
             }
@@ -2168,8 +2201,7 @@ pub async fn approve_op(
         }
     };
 
-    // 5. Mark approved + emit event. A Use op's grant (request-bound grant,
-    // ask-grant ledger entry, or held value) is written inside
+    // 5. Mark approved + emit event. A Use op's permit is stored inside
     // `approve_and_commit`, only once the op is approved.
     //
     // Intent chain (design/approvals-inbox.md D1): the applying op's approve
@@ -2226,230 +2258,114 @@ pub async fn approve_op(
     Ok(Json(response))
 }
 
-/// The grant a Use apply writes, chosen by [`crate::approval::Reuse`]: the
-/// same classifier the proxy stamped the reuse fields with and
-/// [`assert_signed_level`] checked, so what is written is the reuse the
+/// The permit a Use apply stores, keyed by [`crate::state::PermitKey::of`]
+/// from the op's PolicyContext and signed scope: the same classifiers the
+/// proxy stamped the reuse fields with, [`assert_signed_level`] checked, and
+/// the replay looks the permit up under, so what is stored is the reuse the
 /// approver was shown:
 ///   - `none` from `ask-always` (or an `ask` with no unit): a single-use
-///     `op_grants` entry bound to the approved request and its tier,
-///     redeemable for [`crate::state::ASK_ALWAYS_REPLAY_WINDOW_SECS`] (the
-///     replay deadline, not a reuse window).
-///   - `none` from an `allow`-level miss: the value is held for allow-level
-///     traffic for the policy window. No ledger entry, so it never serves an
-///     ask.
-///   - `exact` (scoped ask): an `op_grants` entry bound to the request, value
-///     digest and unit, peeked (reused) for the policy window.
-///   - `rule` / `floor`: an ask-grant ledger entry for the approving agent,
-///     connection, host and unit, plus the held value, for the policy window.
+///     permit for the approved request and its tier, redeemable for
+///     [`crate::state::ASK_ALWAYS_REPLAY_WINDOW_SECS`] (the replay deadline,
+///     not a reuse window).
+///   - `exact` (scoped ask): a window for the request, its bound values and
+///     unit, for the policy window.
+///   - `rule` / `floor`: a window for the approving agent, connection, host
+///     and unit, for the policy window.
 ///
-/// Each request-bound entry carries the tier
-/// ([`crate::approval::reuse::BoundTier`]) the proxy's redeem derives from the
-/// same decision, so it is redeemable only by a request of that tier.
+/// Every permit is also keyed by the credentials the request resolved (the
+/// record's credential set): a replay with another role, or after a rebind,
+/// is not served. A window is stored only under the policy it was minted
+/// under (`window_fp`, checked when it is stored).
 ///
 /// `None` (nothing stored, the replay asks again) when the op has no
-/// PolicyContext (none is minted without one, and approve refuses such an
-/// op) or the scope lacks the binding the grant needs (no connection, or a
-/// request-bound grant missing method/host/path).
+/// PolicyContext or credential set (none is minted without one, and approve
+/// refuses such an op) or the scope lacks the binding the permit needs (no
+/// connection, or a request-bound permit missing method/host/path).
 pub(crate) fn plan_use_grant(
     pc: Option<&crate::approval::PolicyContext>,
     scope: &Value,
     vault_id: &str,
     agent: &str,
-    value: Vec<u8>,
     now: u64,
 ) -> Option<DeferredGrant> {
-    use crate::approval::Reuse;
-    use crate::core::policy::AccessLevel;
-    // Every path that stores nothing wipes the resolved secret first.
-    let drop_value = |mut v: Vec<u8>| -> Option<DeferredGrant> {
-        v.zeroize();
-        None
-    };
     let conn = scope
         .get("connection_id")
         .or_else(|| scope.get("service"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if conn.is_empty() {
-        return drop_value(value);
-    }
+        .unwrap_or("");
     let method = scope.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let path = scope.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let host = pc
         .and_then(|p| p.host.clone())
         .or_else(|| scope.get("host").and_then(|v| v.as_str()).map(String::from))
         .unwrap_or_default();
+    let p = pc?;
+    let credentials = p.credentials.clone()?;
+    if conn.is_empty() || host.is_empty() {
+        return None;
+    }
     // Phase 2: the bound `[requests]` values the proxy stamped into
-    // `scope.scope_vars` (and the passkey signed) fold into the grant identity,
-    // rebuilt as the SAME sorted pairs the redeem path re-extracts from the
-    // live request. Empty (no requests shape, or none resolved) ⇒ `""`.
+    // `scope.scope_vars` (and the passkey signed) fold into the permit
+    // identity, rebuilt as the SAME sorted pairs the replay re-extracts from
+    // the live request. Empty (no requests shape, or none resolved) ⇒ `""`.
     let scope_digest = crate::service::scope_digest(&crate::approval::reuse::bound_values(scope));
-    let Some(p) = pc else {
-        return drop_value(value);
-    };
-    let scoped = crate::approval::reuse::is_scoped(scope);
-    let (reuse, level, ttl) = match Reuse::of(p.level, &p.decided_by, scoped, method) {
-        Some(r) => (r, p.level, p.ttl_seconds),
-        None => return drop_value(value),
-    };
-    if reuse == Reuse::None && level == AccessLevel::Allow {
-        return Some(DeferredGrant::Value {
-            vault_id: vault_id.to_string(),
-            conn,
-            value,
-            expires_at: now + ttl,
-            agent: agent.to_string(),
-        });
+    let key = crate::state::PermitKey::of(
+        p.level,
+        &p.decided_by,
+        crate::approval::reuse::is_scoped(scope),
+        agent,
+        conn,
+        method,
+        &host,
+        path,
+        &scope_digest,
+        credentials,
+    )?;
+    // A request-bound permit is keyed by the exact request the user saw:
+    // never one missing its line.
+    if matches!(key.of, crate::state::PermitFor::Request(_))
+        && (method.is_empty() || path.is_empty())
+    {
+        return None;
     }
-    if let Some(unit) = reuse.unit() {
-        if host.is_empty() {
-            return drop_value(value);
-        }
-        return Some(DeferredGrant::Ledger {
-            vault_id: vault_id.to_string(),
-            agent: agent.to_string(),
-            conn,
-            host,
-            unit,
-            value,
-            ttl,
-            expires_at: now + ttl,
-        });
-    }
-    // `none` / `exact`: request-BOUND, keyed by the exact request the user
-    // saw. Never the connection value: that would let a different request on
-    // this connection use the approval.
-    if method.is_empty() || host.is_empty() || path.is_empty() {
-        return drop_value(value);
-    }
-    let Some(tier) = crate::approval::reuse::BoundTier::of(level, &p.decided_by, scoped, method)
-    else {
-        return drop_value(value);
-    };
-    let window = if tier.single_use() {
+    let window = if key.single_use() {
         crate::state::ASK_ALWAYS_REPLAY_WINDOW_SECS
     } else {
-        ttl
+        p.ttl_seconds
     };
-    Some(DeferredGrant::OpGrant {
+    Some(DeferredGrant {
         vault_id: vault_id.to_string(),
-        agent: agent.to_string(),
-        conn,
-        method: method.to_string(),
-        host,
-        path: path.to_string(),
-        scope_digest,
-        tier,
-        value,
+        window_fp: if key.single_use() { None } else { p.policy_fp },
+        key,
         expires_at: now + window,
     })
 }
 
-/// A Use apply's grant write, captured during dispatch and executed only once
-/// the op is marked approved ([`approve_and_commit`]).
-pub(crate) enum DeferredGrant {
-    /// Request-bound grant (`op_grants`): ask-always, a scoped ask, or an ask
-    /// a rule with no id decided, keyed with the tier that minted it.
-    OpGrant {
-        vault_id: String,
-        agent: String,
-        conn: String,
-        method: String,
-        host: String,
-        path: String,
-        scope_digest: String,
-        tier: crate::approval::reuse::BoundTier,
-        value: Vec<u8>,
-        expires_at: u64,
-    },
-    /// A rule / floor ask: the ask-grant ledger entry for `unit`, plus the
-    /// held value its downgraded requests read.
-    Ledger {
-        vault_id: String,
-        agent: String,
-        conn: String,
-        host: String,
-        unit: crate::approval::reuse::GrantUnit,
-        value: Vec<u8>,
-        ttl: u64,
-        expires_at: u64,
-    },
-    /// An allow-level miss: the held value only (residency, no ledger).
-    Value {
-        vault_id: String,
-        conn: String,
-        value: Vec<u8>,
-        expires_at: u64,
-        agent: String,
-    },
+/// A Use apply's permit, captured during dispatch and stored only once the
+/// op is marked approved ([`approve_and_commit`]). Carries no value.
+pub(crate) struct DeferredGrant {
+    vault_id: String,
+    key: crate::state::PermitKey,
+    expires_at: u64,
+    /// For a window: the policy fingerprint the op was minted under.
+    window_fp: Option<[u8; 32]>,
 }
 
 impl DeferredGrant {
     fn write(self, state: &AppState) {
-        match self {
-            DeferredGrant::OpGrant {
-                vault_id,
-                agent,
-                conn,
-                method,
-                host,
-                path,
-                scope_digest,
-                tier,
-                value,
-                expires_at,
-            } => state.op_grant_insert(
-                &vault_id,
-                &agent,
-                &conn,
-                &method,
-                &host,
-                &path,
-                &scope_digest,
-                &tier,
-                value,
-                expires_at,
-            ),
-            DeferredGrant::Ledger {
-                vault_id,
-                agent,
-                conn,
-                host,
-                unit,
-                value,
-                ttl,
-                expires_at,
-            } => {
-                state.record_ask_grant(&vault_id, &agent, &conn, &host, unit, ttl);
-                state.cache_insert(&vault_id, &conn, value, Some(expires_at), Some(agent));
-            }
-            DeferredGrant::Value {
-                vault_id,
-                conn,
-                value,
-                expires_at,
-                agent,
-            } => state.cache_insert(&vault_id, &conn, value, Some(expires_at), Some(agent)),
-        }
-    }
-
-    /// Wipe the captured secret when the grant is never written.
-    fn discard(self) {
-        match self {
-            DeferredGrant::OpGrant { mut value, .. }
-            | DeferredGrant::Ledger { mut value, .. }
-            | DeferredGrant::Value { mut value, .. } => value.zeroize(),
+        let stored = state.permit_insert(&self.vault_id, self.key, self.expires_at, self.window_fp);
+        if !stored {
+            tracing::info!(vault = %self.vault_id, "use approved: no permit stored (the vault is locked, or its policy changed since the request); the replay asks again");
         }
     }
 }
 
 /// Step 5 core: mark `op_id` approved and resolve its intent chain in ONE
-/// `approvals` acquisition, THEN write the deferred Use grant. If the op is no
-/// longer pending (a reject / withdrawal / auto-reject landed after dispatch),
-/// nothing is written and the secret is wiped: an op that reads rejected never
-/// has a live grant. Once approved, its status can no longer flip, so writing
-/// after the mutex is released is race-free.
+/// `approvals` acquisition, THEN store the deferred Use permit. If the op is
+/// no longer pending (a reject / withdrawal / auto-reject landed after
+/// dispatch), nothing is stored: an op that reads rejected never has a live
+/// permit. Once approved, its status can no longer flip, so storing after the
+/// mutex is released is race-free.
 fn approve_and_commit(
     state: &AppState,
     op_id: &str,
@@ -2467,15 +2383,34 @@ fn approve_and_commit(
             }
             Ok(done)
         }
-        None => {
-            if let Some(g) = deferred {
-                g.discard();
-            }
-            Err(AppError::Conflict(
-                "op no longer pending after validation".into(),
-            ))
-        }
+        None => Err(AppError::Conflict(
+            "op no longer pending after validation".into(),
+        )),
     }
+}
+
+/// Tests: approve a pending Use op as `approve_op` does once the grant
+/// verified (the signed-level assertion, the planned permit, the commit),
+/// without a passkey.
+#[cfg(test)]
+pub(crate) fn approve_use_for_tests(state: &AppState, op_id: &str) -> Result<()> {
+    let (vault_id, scope, pc, agent) = {
+        let store = state.approvals.lock().unwrap();
+        let rec = store.get(op_id).ok_or(AppError::NotFound)?;
+        (
+            rec.vault_id.clone(),
+            rec.op.act.scope.clone(),
+            rec.policy_context.clone(),
+            rec.agent_prefix.clone().unwrap_or_default(),
+        )
+    };
+    assert_signed_level(&scope, pc.as_ref()).map_err(AppError::BadRequest)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let g = plan_use_grant(pc.as_ref(), &scope, &vault_id, &agent, now);
+    approve_and_commit(state, op_id, None, g).map(|_| ())
 }
 
 /// How an intent chain resolved its siblings.
@@ -2628,496 +2563,22 @@ pub(crate) const ENROLL_RETIRED: &str = "creating a vault and adding a passkey h
 pub(crate) const WHOLE_BLOB_WRITE_RETIRED: &str = "whole-vault write ops are no longer supported: \
      this client is out of date. Upgrade the Sprott console/CLI (`sprott upgrade`) and retry.";
 
-/// The role KEYs cached for a service's connections: the declared `secrets`
-/// plus any oauth `[auth].exposes` roles (derived at connect, stored UPPERCASED —
-/// the phantom's lowercase segment matches case-insensitively at resolve).
-fn cacheable_roles(svc: &crate::service::ServiceDef) -> Vec<String> {
-    let mut roles: Vec<String> = svc.service.secrets.clone();
-    if let Some(o) = svc.oauth2() {
-        roles.extend(o.exposes.iter().map(|r| r.to_ascii_uppercase()));
+/// A write's result, saying when this device does not serve the change yet
+/// ([`crate::error::STORED_NOT_SERVED_MSG`]): the store took it (and the
+/// push carries it), so it is a result, never an error. An approved write
+/// stays approved; an error would make the relay record a reject.
+pub(crate) fn with_served(mut resp: Value, installed: crate::state::Installed) -> Value {
+    if !installed.served() {
+        resp["served"] = json!(false);
+        resp["served_message"] = json!(crate::error::STORED_NOT_SERVED_MSG);
     }
-    roles
-}
-
-/// Build the per-service `secrets_cache` from a decrypted v3 view. The cache
-/// carries three things per session:
-///   1. `entries` — resolved auth bytes for every service whose required
-///      item is currently available (any store). Per-rule evaluation at /use
-///      time decides whether to USE them (Allow), prompt (Ask / AskAlways),
-///      or block (Deny) — so we don't pre-filter to allow-default services
-///      anymore: a rule-level Allow on a service whose default was Ask still
-///      needs the bytes ready for fast-path forwarding.
-///   2. `policy` — the effective policy tree (`aux.policy` overlaid on
-///      compiled defaults). Holds default floors, per-tag, and
-///      per-connection user policy. Built-in per-service rules are read
-///      live from the service at eval, not cached here.
-pub(crate) fn bootstrap_cache_from_view(
-    view: &VaultPlaintextView,
-    state: &AppState,
-) -> SecretsCache {
-    let mut cache = SecretsCache::default();
-    // Effective policy = the vault's sparse `aux.policy` overlaid on compiled
-    // defaults. Rebuilt here on every unlock/refresh, so a per-connection edit
-    // is live on the next request (PROTOCOL.md §6.2/§6.4).
-    let effective_policy = crate::core::policy::Policy::effective(view.aux.policy.as_ref());
-    cache.policy = effective_policy.clone();
-    cache.audit_retention_days = view.aux.audit_retention_days;
-    // Residency mirrors the DECISION floor (`AppState::evaluate_request_policy`):
-    // a connection's credential is pre-loaded at unlock iff its effective READ
-    // floor resolves to `allow` — recipe `[default]` ⊕ the user's `aux.policy`
-    // connection override, then tag, then the global `allow` floor. This
-    // replaces the old `default_read_level(service) == Allow` gate, whose
-    // no-`[policy]` fallback was `ask-always` (contradicting the decision layer's
-    // global-`allow` floor, so the first use of a policy-less recipe always
-    // prompted) and which never consulted `aux.policy` (a user tightening a
-    // service to ask-always still got it resident — PROTOCOL.md §6.2). Reusing
-    // `evaluate` with a GET and no rules resolves exactly that read floor, so
-    // residency can't drift from the decision. `service = None` ⇒ raw connection.
-    let read_floor_allows = |service: Option<&str>, conn: &str| -> bool {
-        residency_read_floor_allows(&effective_policy, &state.services, service, conn)
-    };
-    // Routing snapshot (CONNECTION_SCHEMA.md §6): `connection_id → {service,
-    // config}`. The per-service loop below bootstraps every *default* connection
-    // (conn == service); a second pass after it covers *named* connections.
-    cache.connections = view
-        .aux
-        .connections
-        .iter()
-        .map(|(c, conn)| (c.clone(), conn.clone()))
-        .collect();
-    cache.agents = view.aux.agents.clone();
-    // Snapshot native-store item names (names only, never values). Surface
-    // for GET /v/{vid}/secret-keys so the frontend can compute "which
-    // services are reachable" without re-walking the kv map.
-    for name in view.native_secrets.keys() {
-        cache.native_keys.insert(name.clone());
-    }
-    // Snapshot external stores' adapter inputs so GET /v/{vid}/secret-keys
-    // can list() them later without re-decrypting the vault. Only kinds
-    // we have an adapter for today — others are skipped (they live in
-    // store_order but never resolve).
-    for (store_id, store) in view.aux.stores.iter() {
-        if store.kind != "gcp-secret-manager" {
-            continue;
-        }
-        // ONE adapter instance per store for the whole unlocked session:
-        // this is what makes the adapter's OAuth-token cache effective
-        // (F-19: the adapter zeroizes the SA private key on drop, i.e. on
-        // lock). A store that fails to materialise is skipped, same as the
-        // old missing-credential cases — its keys just aren't resident and
-        // `secret-keys` won't list it.
-        match crate::store::build_adapter(store_id, store, view) {
-            Ok(adapter) => {
-                cache.external_stores.insert(
-                    store_id.clone(),
-                    (store.clone(), std::sync::Arc::new(adapter)),
-                );
-            }
-            Err(e) => {
-                // F-20: full error in the log only; the cache carries a
-                // sanitised reason for `secret-keys` to surface.
-                tracing::warn!(store = %store_id, "unlock: external store adapter init failed: {}", e);
-                cache.external_store_errors.push((
-                    store_id.clone(),
-                    format!("store '{}' unavailable", store_id),
-                ));
-            }
-        }
-    }
-    // Resolution order for the lazy fill — aux.store_order restricted to the
-    // adapters that actually materialised, so first-match-wins agrees with
-    // `resolve_value_async`.
-    cache.external_store_order = view
-        .aux
-        .store_order
-        .iter()
-        .filter(|id| {
-            cache
-                .external_stores
-                .get(*id)
-                .is_some_and(|(s, _)| s.category == Category::Value)
-        })
-        .cloned()
-        .collect();
-    for (service_id, _) in state.services.iter_sorted() {
-        // PROTOCOL.md §6.2: only connections whose effective READ floor is
-        // `allow` get their auth value loaded at unlock. ask / ask-always
-        // connections don't sit in cache pre-approval — they're filled lazily
-        // by `approve_op` after the user passkey gesture (ask) or never
-        // (ask-always — fresh-decrypted-per-request via the grant's W_c and
-        // immediately zeroized). Marked `from_bootstrap` so a per-path
-        // ask/ask-always RULE on this (read-allow) connection still forces a
-        // fresh passkey instead of riding this residency.
-        if read_floor_allows(Some(service_id), service_id) {
-            // The default connection's record (usually absent) may rebind a role
-            // to an existing key (`keys` map); identity otherwise. Cache maps
-            // stay ROLE-keyed — only the storage lookup goes through the record.
-            let rec = view.aux.connections.get(service_id);
-            if let Some(role) = state.services.service_env_key(service_id) {
-                let key = crate::storage::plaintext::secret_key_for(rec, &role);
-                if let Some(val) = view.resolve_value_native(&key) {
-                    cache.entries.insert(
-                        service_id.to_string(),
-                        crate::state::CacheEntry {
-                            value: val.to_vec(),
-                            expires_at: None, // allow = lives whole unlocked session
-                            from_bootstrap: true,
-                            agent_prefix: None,
-                        },
-                    );
-                }
-            }
-
-            // v4 multi-secret: resolve each declared `secrets` role so the
-            // allow fast-path can inject multi-secret services without a vault
-            // view. oauth services declare no injectable direct secret here
-            // (their access token is minted from the refresh_token at forward),
-            // but their `exposes` roles — derived at connect and stored
-            // UPPERCASED — ARE injectable, so they load alongside.
-            if let Some(svc) = state.services.get(service_id) {
-                let mut map: std::collections::HashMap<String, Vec<u8>> =
-                    std::collections::HashMap::new();
-                for name in cacheable_roles(svc) {
-                    let key = crate::storage::plaintext::secret_key_for(rec, &name);
-                    if let Some(val) = view.resolve_value_native(&key) {
-                        map.insert(name, val.to_vec());
-                    }
-                }
-                if !map.is_empty() {
-                    cache.allow_secrets.insert(service_id.to_string(), map);
-                }
-            }
-        }
-
-        // Built-in policy rules are NOT cached: they're read live from the
-        // service registry at eval and merged with the connection's user rules
-        // (`aux.policy.connections.<id>.rules`). See
-        // `AppState::evaluate_request_policy`.
-    }
-
-    // Named connections (`conn_id != service_id`) bind each ROLE to its own
-    // BARE key via the record's `keys` map (CONNECTION_SCHEMA.md §3; identity
-    // when unmapped). The per-service loop above already covered every default
-    // connection; here we add the named ones, keyed by connection_id, resolving
-    // each role through its binding but storing the multi-secret map under the
-    // ROLE name so the proxy's phantom resolution finds each role's bytes.
-    // (Allow-level only — ask-level connections resolve lazily from the op's
-    // bound `target` key.)
-    for (conn, c) in view.aux.connections.iter() {
-        // Raw connections (service: None) have no service to bootstrap from; their
-        // bytes resolve lazily at approve. Only service-backed named connections
-        // are pre-bootstrapped here.
-        let Some(service) = c.service.as_deref() else {
-            continue;
-        };
-        if conn == service {
-            continue; // default — already bootstrapped above
-        }
-        if !read_floor_allows(Some(service), conn) {
-            continue;
-        }
-        if let Some(role) = state.services.service_env_key(service) {
-            let key = crate::storage::plaintext::secret_key_for(Some(c), &role);
-            if let Some(val) = view.resolve_value_native(&key) {
-                cache.entries.insert(
-                    conn.clone(),
-                    crate::state::CacheEntry {
-                        value: val.to_vec(),
-                        expires_at: None,
-                        from_bootstrap: true,
-                        agent_prefix: None,
-                    },
-                );
-            }
-        }
-        if let Some(svc) = state.services.get(service) {
-            let mut map: std::collections::HashMap<String, Vec<u8>> =
-                std::collections::HashMap::new();
-            for name in cacheable_roles(svc) {
-                let key = crate::storage::plaintext::secret_key_for(Some(c), &name);
-                if let Some(val) = view.resolve_value_native(&key) {
-                    map.insert(name, val.to_vec());
-                }
-            }
-            if !map.is_empty() {
-                cache.allow_secrets.insert(conn.clone(), map);
-            }
-        }
-    }
-
-    // Raw connections (`service: None`, created by `sc set K --host h` or
-    // `sc connect`) have no service definition, so the per-service loops above
-    // skip them. Their policy floor is the global default (`allow`), and the
-    // resident proxy resolves an allow request straight from the session cache
-    // (no grant to open the vault), so their secret bytes MUST be resident. §2:
-    // read the connection's EXPLICIT `secrets` (uppercase KEY names, stored bare)
-    // — no reverse-index-by-casing. Each KEY is resolved case-insensitively
-    // (canonical uppercase storage, but a legacy key may differ).
-    for (conn, c) in view.aux.connections.iter() {
-        if c.service.is_some() {
-            continue; // service-backed — handled above
-        }
-        let Some(keys) = &c.secrets else { continue };
-        // Same read-floor gate as service connections: a raw connection the user
-        // tightened to ask/ask-always must NOT be resident (PROTOCOL.md §6.2); an
-        // untouched raw connection floors to the global `allow` and stays resident.
-        if !read_floor_allows(None, conn) {
-            continue;
-        }
-        let mut map: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
-        for key in keys {
-            if let Some((_, bytes)) = view
-                .native_secrets
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(key))
-            {
-                map.insert(key.clone(), bytes.clone());
-            }
-        }
-        // Sole secret → also the short-phantom `primary`; a multi-secret raw
-        // connection resolves each role from the map (role phantoms).
-        if map.len() == 1 {
-            let primary = map.values().next().cloned().unwrap();
-            cache.entries.insert(
-                conn.clone(),
-                crate::state::CacheEntry {
-                    value: primary,
-                    expires_at: None,
-                    from_bootstrap: true,
-                    agent_prefix: None,
-                },
-            );
-        }
-        if !map.is_empty() {
-            cache.allow_secrets.insert(conn.clone(), map);
-        }
-    }
-
-    // Custom (per-vault `aux.services`) definitions: validate before they can
-    // broker (defense in depth — never trust the stored blob), never shadow a
-    // built-in id, load only if valid. Wiped on lock with the rest of the cache.
-    let (custom, skipped) = crate::service::vault_custom_services(
-        &view.aux.services,
-        view.aux.allows_installed_services(),
-        &state.services,
-    );
-    for (service_id, reason) in skipped {
-        tracing::warn!(service = %service_id, "custom service {} — skipped", reason);
-    }
-    cache.custom_services = custom;
-    cache.service_entries = view.aux.services.clone();
-    cache.service_requests = view.aux.service_requests.keys().cloned().collect();
-    cache
-}
-
-/// Residency gate shared by the unlock bootstrap and the allow-path lazy
-/// fill: a connection's bytes may sit in the session cache iff its effective
-/// READ floor resolves to `allow` (PROTOCOL.md §6.2 — residency mirrors the
-/// decision layer, see the block comment in `bootstrap_cache_from_view`).
-/// `service = None` ⇒ raw connection.
-pub(crate) fn residency_read_floor_allows(
-    effective_policy: &crate::core::policy::Policy,
-    services: &crate::service::ServiceRegistry,
-    service: Option<&str>,
-    conn: &str,
-) -> bool {
-    let recipe = service.and_then(|s| services.default_policy_levels(s));
-    let user = effective_policy
-        .connections
-        .get(conn)
-        .and_then(|c| c.default.as_ref());
-    let conn_levels = crate::core::policy::merge_levels(user, recipe.as_ref());
-    let tags = service.map(|s| services.service_tags(s)).unwrap_or(&[]);
-    crate::core::policy::evaluate(
-        "GET",
-        "/",
-        None,
-        &crate::core::policy::VarMap::new(),
-        None,
-        conn_levels.as_ref(),
-        effective_policy,
-        tags,
-    ) == crate::core::policy::AccessLevel::Allow
-}
-
-/// Allow-path lazy residency for EXTERNAL stores (the store-agnostic half of
-/// the unlock bootstrap above). The secret model is one abstraction: a
-/// connection binds KEYS and policy gates CONNECTIONS — neither knows which
-/// store hosts the bytes. native-secrets values are resident from unlock
-/// because they're already in hand; external values are network I/O we
-/// refuse to put on the unlock path, so they load on FIRST TOUCH instead:
-/// same read-floor gate, same `from_bootstrap` marking, same
-/// whole-session lifetime — only the load moment differs.
-///
-/// Returns:
-///   - `Ok(true)`  — the cache now holds bytes for `conn`; retry the lookup.
-///   - `Ok(false)` — nothing external to load (no stores, floor not allow,
-///     or no store has the keys); fall through to the portal as before.
-///   - `Err(store_id)` — a CONFIGURED store failed (auth/network). Fail
-///     loudly (P2): the caller surfaces an explicit error, never a portal
-///     that would misread an outage as "needs approval".
-pub(crate) async fn lazy_fill_external(
-    state: &AppState,
-    vault_id: &str,
-    conn: &str,
-) -> std::result::Result<bool, String> {
-    // Single-flight: a burst of first requests fills once. Waiters re-check
-    // the cache under the lock and ride the winner's insert.
-    let _fill = state.external_fill_lock.lock().await;
-
-    let (policy, rec, adapters) = {
-        let Some(runtime) = state.runtime_if_present(vault_id) else {
-            return Ok(false);
-        };
-        let runtime_state = runtime.state.lock().unwrap();
-        let crate::state::VaultState::Unlocked { cache, .. } = &*runtime_state else {
-            return Ok(false);
-        };
-        if cache.entries.contains_key(conn) || cache.allow_secrets.contains_key(conn) {
-            return Ok(true); // another request filled while we waited
-        }
-        if cache.external_store_order.is_empty() {
-            return Ok(false);
-        }
-        let adapters: Vec<(String, Arc<crate::store::Adapter>)> = cache
-            .external_store_order
-            .iter()
-            .filter_map(|id| {
-                cache
-                    .external_stores
-                    .get(id)
-                    .map(|(_, a)| (id.clone(), a.clone()))
-            })
-            .collect();
-        (
-            cache.policy.clone(),
-            cache.connections.get(conn).cloned(),
-            adapters,
-        )
-    };
-
-    // Service resolution: explicit record binding, else the connection id
-    // names a REGISTRY service (default connection), else raw. Custom
-    // (per-vault) services deliberately follow the bootstrap's behavior —
-    // registry-blind residency, first use goes through the portal — so the
-    // two residency paths can never disagree.
-    let service = rec
-        .as_ref()
-        .and_then(|c| c.service.clone())
-        .or_else(|| state.services.get(conn).map(|_| conn.to_string()));
-
-    if !residency_read_floor_allows(&policy, &state.services, service.as_deref(), conn) {
-        return Ok(false);
-    }
-
-    // Walk stores in vault order for one key; external keys resolve EXACT
-    // (external naming is accepted as-is — no case folding). `Err(store_id)`
-    // aborts the whole fill: a configured store outage must surface, not
-    // degrade into "not found".
-    let resolve_key = |key: String| {
-        let adapters = &adapters;
-        let conn = conn.to_string();
-        async move {
-            for (store_id, adapter) in adapters {
-                match adapter.resolve(&key).await {
-                    Ok(Some(bytes)) => return Ok(Some(bytes)),
-                    Ok(None) => continue,
-                    Err(e) => {
-                        // F-20: full error server-side only; the caller
-                        // returns a sanitised message.
-                        tracing::warn!(store = %store_id, conn = %conn, "lazy external fill failed: {}", e);
-                        return Err(store_id.clone());
-                    }
-                }
-            }
-            Ok(None)
-        }
-    };
-
-    // Same shapes as the bootstrap's passes: `entries` primary from the
-    // service's env-key role; `allow_secrets` map from `cacheable_roles`
-    // (NOT the primary role — an oauth refresh token is resident for the
-    // mint path only, never in the injectable role map); raw connections
-    // map their explicit keys, sole key doubling as primary.
-    let mut primary: Option<Vec<u8>> = None;
-    let mut map: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
-    // Names that actually resolved from an external store — fed back into
-    // the cache's external_keys slot so registry/entries surfaces learn
-    // them even when the store's SA can't list().
-    let mut fetched_keys: Vec<String> = Vec::new();
-    match service.as_deref() {
-        Some(svc_id) => {
-            if let Some(role) = state.services.service_env_key(svc_id) {
-                let key = crate::storage::plaintext::secret_key_for(rec.as_ref(), &role);
-                primary = resolve_key(key.clone()).await?;
-                if primary.is_some() {
-                    fetched_keys.push(key);
-                }
-            }
-            if let Some(svc) = state.services.get(svc_id) {
-                for name in cacheable_roles(svc) {
-                    let key = crate::storage::plaintext::secret_key_for(rec.as_ref(), &name);
-                    if let Some(bytes) = resolve_key(key.clone()).await? {
-                        map.insert(name, bytes);
-                        fetched_keys.push(key);
-                    }
-                }
-            }
-        }
-        None => {
-            let Some(keys) = rec.as_ref().and_then(|c| c.secrets.clone()) else {
-                return Ok(false); // raw connection with no explicit keys
-            };
-            for key in keys {
-                if let Some(bytes) = resolve_key(key.clone()).await? {
-                    map.insert(key.clone(), bytes);
-                    fetched_keys.push(key);
-                }
-            }
-            if map.len() == 1 {
-                primary = map.values().next().cloned();
-            }
-        }
-    }
-    if primary.is_none() && map.is_empty() {
-        return Ok(false);
-    }
-    {
-        let Some(runtime) = state.runtime_if_present(vault_id) else {
-            return Ok(false);
-        };
-        let crate::state::VaultState::Unlocked { cache, .. } = &mut *runtime.state.lock().unwrap()
-        else {
-            return Ok(false); // locked while we were fetching — drop the bytes
-        };
-        if let Some(val) = primary {
-            cache
-                .entries
-                .entry(conn.to_string())
-                .or_insert(crate::state::CacheEntry {
-                    value: val,
-                    expires_at: None,
-                    from_bootstrap: true,
-                    agent_prefix: None,
-                });
-        }
-        if !map.is_empty() {
-            cache.allow_secrets.entry(conn.to_string()).or_insert(map);
-        }
-        cache
-            .external_keys
-            .lock()
-            .unwrap()
-            .extend(fetched_keys.iter().cloned());
-    }
-    tracing::info!(conn = %conn, "external store secrets resident after lazy fill");
-    Ok(true)
+    resp
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::plaintext::{Store, VaultAux};
+    use crate::storage::plaintext::{Category, Store, VaultAux, VaultPlaintextView};
     use std::collections::BTreeMap;
 
     thread_local! {
@@ -3348,12 +2809,12 @@ mod tests {
         }
     }
 
-    /// The unlock bootstrap materialises ONE shared adapter per external
-    /// store (a store whose credential is missing is skipped, not fatal)
-    /// and snapshots store_order restricted to what materialised — the
-    /// exact walk order `lazy_fill_external` uses.
+    /// A snapshot holds ONE shared adapter per external store; a store whose
+    /// credential is missing is kept in the walk order as unavailable (a KEY
+    /// it precedes answers `store_unavailable`), not skipped, and listed with
+    /// a sanitised error.
     #[test]
-    fn bootstrap_snapshots_external_adapters_and_order() {
+    fn a_snapshot_holds_one_adapter_per_store_and_the_walk_order() {
         let state = test_state();
         let mut aux = VaultAux::initial();
         aux.stores.insert("gcpa".into(), gcp_store("GCPA_SA_JSON"));
@@ -3371,17 +2832,35 @@ mod tests {
             native_secret_notes: BTreeMap::new(),
         };
 
-        let cache = bootstrap_cache_from_view(&view, &state);
-
-        assert!(cache.external_stores.contains_key("gcpa"));
-        assert!(
-            !cache.external_stores.contains_key("gcpb"),
-            "store with a missing credential item must be skipped"
+        let seal = crate::snapshot::SealKey::fresh();
+        let snapshot = crate::snapshot::Snapshot::build(
+            view,
+            Default::default(),
+            &state.services,
+            "v1",
+            &seal,
         );
-        assert_eq!(cache.external_store_order, vec!["gcpa".to_string()]);
-        let (store, adapter) = &cache.external_stores["gcpa"];
+
+        use crate::snapshot::StoreRef;
+        assert!(snapshot.stores.adapters.contains_key("gcpa"));
+        assert!(!snapshot.stores.adapters.contains_key("gcpb"));
+        assert_eq!(
+            snapshot.stores.order,
+            vec![
+                StoreRef::Native,
+                StoreRef::External("gcpa".into()),
+                StoreRef::Unavailable("gcpb".into())
+            ]
+        );
+        assert_eq!(
+            snapshot.stores.errors,
+            vec![("gcpb".to_string(), "store 'gcpb' unavailable".to_string())]
+        );
+        let (store, adapter) = &snapshot.stores.adapters["gcpa"];
         assert_eq!(store.kind, "gcp-secret-manager");
         assert_eq!(adapter.kind(), "gcp-secret-manager");
+        // The store's own credential is bound by no connection: a name only.
+        assert_eq!(snapshot.holds("GCPA_SA_JSON"), Some("name only"));
     }
 
     fn export_op(target: &str) -> crate::protocol::operation::Operation {
@@ -3775,6 +3254,8 @@ mod tests {
             decided_by: crate::core::policy::DecidedBy::Floor,
             ttl_seconds: ttl,
             host: Some("api.github.com".into()),
+            credentials: None,
+            policy_fp: None,
         }
     }
 
@@ -3821,8 +3302,9 @@ mod tests {
         ));
         // ask-always: reuse none and NO window, while its record still carries a ttl.
         assert!(ok(json!({"level":"ask-always","reuse":"none"}), &always));
-        // An allow-level miss is `none` too: it never serves an ask.
-        assert!(ok(json!({"level":"allow","reuse":"none"}), &allow));
+        // An allow-level request mints no op: one claiming that level has
+        // nothing to approve.
+        assert!(!ok(json!({"level":"allow","reuse":"none"}), &allow));
 
         // Level mismatch either way.
         assert!(!ok(
@@ -4139,16 +3621,22 @@ mod tests {
     // ── signed reuse vs apply, end to end per row ──────────────────────────
     //
     // Each test mints the op scope exactly as the proxy does (stamp_signed_level
-    // + the scoped/scope_vars fields), asserts the stamped reuse fields, runs
-    // apply's write (plan_use_grant, after the approve-time assertion), then
-    // probes later requests through the SAME decision + lookup the proxy runs
-    // (evaluate_request_decision + grant_lookup). `true` from `served` = served
-    // without asking. One test per row of the reuse table
-    // (approval/reuse.rs).
+    // + the scoped/scope_vars fields + the record's credentials and policy
+    // fingerprint), asserts the stamped reuse fields, runs apply's write
+    // (plan_use_grant, after the approve-time assertion), then probes later
+    // requests through the SAME decision, permit key and lookup the proxy runs
+    // (evaluate_request_decision, PermitKey::of, authorize + consume). `true`
+    // from `served` = served without asking. One test per row of the reuse
+    // table (approval/reuse.rs).
 
     const RV: &str = "v-reuse";
     const RC: &str = "gh";
     const RH: &str = "api.gh.com";
+
+    /// The credentials every request here resolves.
+    fn creds() -> crate::state::CredentialSet {
+        crate::state::CredentialSet::new(RC, ["GH_TOKEN".to_string()])
+    }
 
     fn reuse_policy() -> crate::core::policy::Policy {
         use crate::core::policy::{AccessLevel, ConnectionPolicy, Levels, Policy, RuleConfig};
@@ -4188,8 +3676,8 @@ mod tests {
         p.connections.insert(
             RC.to_string(),
             ConnectionPolicy {
-                // Floor: ask both ways with its own window, so the connection
-                // is not resident and unmatched paths are floor asks.
+                // Floor: ask both ways with its own window, so unmatched
+                // paths are floor asks.
                 default: Some(Levels {
                     read: Some(AccessLevel::Ask),
                     write: Some(AccessLevel::Ask),
@@ -4203,11 +3691,9 @@ mod tests {
 
     fn reuse_state() -> AppState {
         let state = test_state();
-        let cache = crate::state::SecretsCache {
-            policy: reuse_policy(),
-            ..Default::default()
-        };
-        state.unlock_vault(RV.into(), cache, zeroize::Zeroizing::new(Vec::new()));
+        let mut snapshot = crate::snapshot::Snapshot::default();
+        snapshot.inputs.policy = reuse_policy();
+        state.unlock_vault(RV.into(), snapshot, zeroize::Zeroizing::new(Vec::new()));
         state
     }
 
@@ -4221,43 +3707,39 @@ mod tests {
     /// The proxy's decision for a request: (level, decided by, ttl).
     fn decide_at(
         state: &AppState,
-        agent: &str,
         method: &str,
         path: &str,
-        host: &str,
-        scoped: bool,
     ) -> (
         crate::core::policy::AccessLevel,
         crate::core::policy::DecidedBy,
         u64,
     ) {
-        let (l, by, t) = state
-            .evaluate_request_decision(
-                RV,
-                agent,
-                RC,
-                RC,
-                method,
-                path,
-                host,
-                None,
-                &crate::core::policy::VarMap::new(),
-                scoped,
-            )
-            .expect("unlocked");
+        let inputs = state.snapshot(RV).expect("unlocked").inputs.clone();
+        let (l, by, t) = state.evaluate_request_decision(
+            &inputs,
+            RC,
+            RC,
+            method,
+            path,
+            None,
+            &crate::core::policy::VarMap::new(),
+        );
         (l, by, t.unwrap_or(900))
     }
 
-    /// Mint the op scope + PolicyContext for the request the way captive_portal
-    /// does (agent `agA`), and check the approve-time assertion accepts it.
-    fn mint(
+    /// Stamp the scope + PolicyContext of a request minted under this
+    /// decision, the way captive_portal does (agent `agA`), and check the
+    /// approve-time assertion accepts it.
+    fn stamp_as(
         state: &AppState,
+        level: crate::core::policy::AccessLevel,
+        decided_by: crate::core::policy::DecidedBy,
+        ttl: u64,
         method: &str,
         path: &str,
         scope_shape: bool,
         bound: &[(&str, &str)],
     ) -> (Value, crate::approval::PolicyContext) {
-        let (level, decided_by, ttl) = decide_at(state, "agA", method, path, RH, scope_shape);
         let mut scope = json!({
             "connection_id": RC, "service": RC, "host": RH,
             "method": method, "path": path, "authorize_only": true, "agent": "agA",
@@ -4280,24 +3762,104 @@ mod tests {
                 scope["scope_vars"] = Value::Object(m);
             }
         }
+        let window = crate::approval::Reuse::of(level, &decided_by, scope_shape, method)
+            .and_then(|r| r.window(ttl))
+            .is_some();
+        let fingerprint = state.snapshot(RV).map(|s| s.fingerprint);
         let pc = crate::approval::PolicyContext {
             level,
             decided_by,
             ttl_seconds: ttl,
             host: Some(RH.into()),
+            credentials: Some(creds()),
+            policy_fp: if window { fingerprint } else { None },
         };
         assert_signed_level(&scope, Some(&pc)).expect("stamp passes the apply assertion");
         (scope, pc)
     }
 
-    /// Apply's grant write.
+    fn mint(
+        state: &AppState,
+        method: &str,
+        path: &str,
+        scope_shape: bool,
+        bound: &[(&str, &str)],
+    ) -> (Value, crate::approval::PolicyContext) {
+        let (level, decided_by, ttl) = decide_at(state, method, path);
+        stamp_as(state, level, decided_by, ttl, method, path, scope_shape, bound)
+    }
+
+    /// Mint under an explicit decision, as when the policy (or a field the
+    /// permit key does not carry) decided the approved request differently
+    /// from the request that later replays it.
+    fn mint_as(
+        state: &AppState,
+        level: crate::core::policy::AccessLevel,
+        by: crate::core::policy::DecidedBy,
+        method: &str,
+        path: &str,
+        scoped: bool,
+        bound: &[(&str, &str)],
+    ) -> (Value, crate::approval::PolicyContext) {
+        stamp_as(state, level, by, 120, method, path, scoped, bound)
+    }
+
+    /// Apply's permit, stored.
     fn apply(state: &AppState, scope: &Value, pc: &crate::approval::PolicyContext, now: u64) {
-        plan_use_grant(Some(pc), scope, RV, "agA", b"tok".to_vec(), now)
-            .expect("a grant is planned")
+        plan_use_grant(Some(pc), scope, RV, "agA", now)
+            .expect("a permit is planned")
             .write(state);
     }
 
-    /// Would the proxy serve this request without asking?
+    /// Would the proxy serve a request the policy decides as `(level, by)`
+    /// without asking (step 6, then step 8)?
+    #[allow(clippy::too_many_arguments)]
+    fn served_as(
+        state: &AppState,
+        agent: &str,
+        level: crate::core::policy::AccessLevel,
+        by: &crate::core::policy::DecidedBy,
+        method: &str,
+        path: &str,
+        host: &str,
+        scoped: bool,
+        bound: &[(&str, &str)],
+    ) -> bool {
+        use crate::core::policy::AccessLevel;
+        if level == AccessLevel::Deny {
+            return false;
+        }
+        let pairs: Vec<(String, String)> = bound
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let digest = crate::service::scope_digest(&pairs);
+        let permit = match level {
+            AccessLevel::Allow => None,
+            _ => Some(
+                crate::state::PermitKey::of(
+                    level,
+                    by,
+                    scoped,
+                    agent,
+                    RC,
+                    method,
+                    host,
+                    path,
+                    &digest,
+                    creds(),
+                )
+                .expect("an ask has a permit key"),
+            ),
+        };
+        let snapshot = state.snapshot(RV).expect("unlocked");
+        match state.authorize(RV, snapshot, Default::default(), permit) {
+            Ok(auth) => state.consume(RV, auth).unwrap(),
+            Err(_) => false,
+        }
+    }
+
+    /// The proxy on a request, decided by the policy.
     fn served_at(
         state: &AppState,
         agent: &str,
@@ -4307,19 +3869,8 @@ mod tests {
         bound: &[(&str, &str)],
     ) -> bool {
         let shape = path == "/buy";
-        let (level, by, _) = decide_at(state, agent, method, path, host, shape);
-        if level == crate::core::policy::AccessLevel::Deny {
-            return false;
-        }
-        let pairs: Vec<(String, String)> = bound
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let digest = crate::service::scope_digest(&pairs);
-        let (primary, _) = crate::proxy::handler::grant_lookup(
-            state, RV, agent, RC, level, &by, method, host, path, &digest, shape,
-        );
-        primary.is_some()
+        let (level, by, _) = decide_at(state, method, path);
+        served_as(state, agent, level, &by, method, path, host, shape, bound)
     }
 
     fn served(
@@ -4332,28 +3883,16 @@ mod tests {
         served_at(state, agent, method, path, RH, bound)
     }
 
-    fn held_expiry(state: &AppState) -> Option<u64> {
-        let runtime = state.runtime_if_present(RV)?;
-        let runtime_state = runtime.state.lock().unwrap();
-        match &*runtime_state {
-            crate::state::VaultState::Unlocked { cache, .. } => {
-                cache.entries.get(RC).and_then(|e| e.expires_at)
-            }
-            _ => None,
-        }
+    /// The unit permits' count.
+    fn units(state: &AppState) -> usize {
+        state
+            .permits(RV)
+            .iter()
+            .filter(|(k, _)| matches!(k.of, crate::state::PermitFor::Unit { .. }))
+            .count()
     }
 
-    fn ledger_len(state: &AppState) -> usize {
-        let Some(runtime) = state.runtime_if_present(RV) else {
-            return 0;
-        };
-        let runtime_state = runtime.state.lock().unwrap();
-        match &*runtime_state {
-            crate::state::VaultState::Unlocked { cache, .. } => cache.ask_grants.len(),
-            _ => 0,
-        }
-    }
-
+    /// The expiry of the request-bound permit for this request line.
     fn bound_expiry(
         state: &AppState,
         method: &str,
@@ -4365,23 +3904,26 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let digest = crate::service::scope_digest(&pairs);
-        let runtime = state.runtime_if_present(RV)?;
-        let runtime_state = runtime.state.lock().unwrap();
-        match &*runtime_state {
+        state.permits(RV).into_iter().find_map(|(k, exp)| match k.of {
             // Whatever tier minted it: the request line + digest identify it.
-            crate::state::VaultState::Unlocked { cache, .. } => cache
-                .op_grants
-                .iter()
-                .find(|(k, _)| {
-                    k.agent == "agA"
-                        && k.conn == RC
-                        && k.method == method
-                        && k.host == RH
-                        && k.path == path
-                        && k.scope_digest == digest
-                })
-                .and_then(|(_, e)| e.expires_at),
+            crate::state::PermitFor::Request(g)
+                if g.agent == "agA"
+                    && g.conn == RC
+                    && g.method == method
+                    && g.host == RH
+                    && g.path == path
+                    && g.scope_digest == digest =>
+            {
+                Some(exp)
+            }
             _ => None,
+        })
+    }
+
+    fn by_rule(id: Option<&str>) -> crate::core::policy::DecidedBy {
+        crate::core::policy::DecidedBy::Rule {
+            id: id.map(str::to_string),
+            label: None,
         }
     }
 
@@ -4417,8 +3959,7 @@ mod tests {
             !served(&state, "agA", "GET", "/y", &[]),
             "nothing held for other requests"
         );
-        assert_eq!(held_expiry(&state), None);
-        assert_eq!(ledger_len(&state), 0);
+        assert_eq!(units(&state), 0);
     }
 
     /// A rule-matched ask → `rule` (id + label) for the rule's window: later
@@ -4434,13 +3975,8 @@ mod tests {
         assert_eq!(scope["reuse_rule"], "read");
         assert_eq!(scope["reuse_label"], "Read x");
         assert_eq!(scope["window_s"], 60);
-        let now = now_s();
-        apply(&state, &scope, &pc, now);
-        assert_eq!(
-            held_expiry(&state),
-            Some(now + 60),
-            "value held for the window"
-        );
+        apply(&state, &scope, &pc, now_s());
+        assert_eq!(units(&state), 1);
         assert!(served(&state, "agA", "GET", "/x", &[]));
         assert!(
             served(&state, "agA", "GET", "/x", &[]),
@@ -4480,9 +4016,7 @@ mod tests {
         assert_eq!(scope["reuse"], "floor");
         assert_eq!(scope["reuse_class"], "read");
         assert_eq!(scope["window_s"], 300);
-        let now = now_s();
-        apply(&state, &scope, &pc, now);
-        assert_eq!(held_expiry(&state), Some(now + 300));
+        apply(&state, &scope, &pc, now_s());
         assert!(served(&state, "agA", "GET", "/y", &[]));
         assert!(
             served(&state, "agA", "GET", "/z", &[]),
@@ -4521,7 +4055,7 @@ mod tests {
         let now = now_s();
         apply(&state, &scope, &pc, now);
         assert_eq!(bound_expiry(&state, "POST", "/buy", &v80), Some(now + 120));
-        assert_eq!(held_expiry(&state), None, "no connection value held");
+        assert_eq!(units(&state), 0, "nothing connection-wide");
         assert!(served(&state, "agA", "POST", "/buy", &v80));
         assert!(
             served(&state, "agA", "POST", "/buy", &v80),
@@ -4551,7 +4085,6 @@ mod tests {
         let now = now_s();
         apply(&state, &scope, &pc, now);
         assert_eq!(bound_expiry(&state, "POST", "/buy", &[]), Some(now + 120));
-        assert_eq!(held_expiry(&state), None);
         assert!(served(&state, "agA", "POST", "/buy", &[]));
         assert!(
             served(&state, "agA", "POST", "/buy", &[]),
@@ -4562,130 +4095,19 @@ mod tests {
         assert!(!served(&state, "agB", "POST", "/buy", &[]));
     }
 
-    /// An allow-level cache miss → `none`, no window: the value is held for
-    /// allow-level traffic (any agent), and the approval serves no ask.
+    /// An allow-level request asks for nothing and mints nothing: it is
+    /// served by policy, for any agent, with no permit.
     #[test]
-    fn reuse_allow_miss_serves_allow_traffic_only() {
+    fn an_allowed_request_needs_no_permit() {
         let state = reuse_state();
-        assert!(
-            !served(&state, "agA", "GET", "/open", &[]),
-            "not resident: a miss asks"
-        );
-        let (scope, pc) = mint(&state, "GET", "/open", false, &[]);
-        assert_eq!(scope["level"], "allow");
-        assert_eq!(scope["reuse"], "none");
-        assert!(scope.get("window_s").is_none());
-        let now = now_s();
-        apply(&state, &scope, &pc, now);
-        assert_eq!(held_expiry(&state), Some(now + 900));
-        assert_eq!(ledger_len(&state), 0, "no ask is authorized");
         assert!(served(&state, "agA", "GET", "/open", &[]));
-        assert!(
-            served(&state, "agB", "GET", "/open", &[]),
-            "allowed requests, any agent"
-        );
-        assert!(
-            !served(&state, "agA", "GET", "/y", &[]),
-            "the approving agent's floor ask still asks"
-        );
-        assert!(
-            !served(&state, "agA", "GET", "/x", &[]),
-            "the approving agent's rule ask still asks"
-        );
-        assert!(!served(&state, "agA", "DELETE", "/x", &[]));
+        assert!(served(&state, "agB", "GET", "/open", &[]));
+        let (level, by, _) = decide_at(&state, "GET", "/open");
+        assert!(crate::approval::Reuse::of(level, &by, false, "GET").is_none());
+        assert!(state.permits(RV).is_empty());
     }
 
-    /// A value held for one unit never authorizes another: after a rule
-    /// approval holds the value, a floor ask by the same agent still asks
-    /// (residency is not authorization), and a later, shorter approval never
-    /// shortens the held value's window.
-    #[test]
-    fn residency_never_authorizes_and_never_shrinks() {
-        let state = reuse_state();
-        let (scope, pc) = mint(&state, "GET", "/y", false, &[]);
-        let now = now_s();
-        apply(&state, &scope, &pc, now);
-        assert_eq!(held_expiry(&state), Some(now + 300));
-        let (scope, pc) = mint(&state, "GET", "/x", false, &[]);
-        apply(&state, &scope, &pc, now);
-        assert_eq!(
-            held_expiry(&state),
-            Some(now + 300),
-            "60s rule did not shorten it"
-        );
-        assert!(served(&state, "agA", "GET", "/x", &[]));
-        assert!(
-            !served(&state, "agA", "POST", "/z", &[]),
-            "write floor never approved"
-        );
-    }
-
-    /// Mint under an explicit decision, as when the policy (or a field the
-    /// grant key does not carry) decided the approved request differently
-    /// from the request that later replays it.
-    fn mint_as(
-        level: crate::core::policy::AccessLevel,
-        by: crate::core::policy::DecidedBy,
-        method: &str,
-        path: &str,
-        scoped: bool,
-        bound: &[(&str, &str)],
-    ) -> (Value, crate::approval::PolicyContext) {
-        let mut scope = json!({
-            "connection_id": RC, "service": RC, "host": RH,
-            "method": method, "path": path, "authorize_only": true, "agent": "agA",
-        });
-        crate::proxy::handler::stamp_signed_level(&mut scope, level, &by, scoped, method, 120);
-        if scoped {
-            scope["scoped"] = json!(true);
-            if !bound.is_empty() {
-                let m: serde_json::Map<String, Value> = bound
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), json!(v)))
-                    .collect();
-                scope["scope_vars"] = Value::Object(m);
-            }
-        }
-        let pc = crate::approval::PolicyContext {
-            level,
-            decided_by: by,
-            ttl_seconds: 120,
-            host: Some(RH.into()),
-        };
-        assert_signed_level(&scope, Some(&pc)).expect("stamp passes the apply assertion");
-        (scope, pc)
-    }
-
-    /// The proxy's lookup for a request the policy decides as `(level, by)`.
-    fn served_as(
-        state: &AppState,
-        level: crate::core::policy::AccessLevel,
-        by: &crate::core::policy::DecidedBy,
-        method: &str,
-        path: &str,
-        scoped: bool,
-        bound: &[(&str, &str)],
-    ) -> bool {
-        let pairs: Vec<(String, String)> = bound
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let digest = crate::service::scope_digest(&pairs);
-        crate::proxy::handler::grant_lookup(
-            state, RV, "agA", RC, level, by, method, RH, path, &digest, scoped,
-        )
-        .0
-        .is_some()
-    }
-
-    fn by_rule(id: Option<&str>) -> crate::core::policy::DecidedBy {
-        crate::core::policy::DecidedBy::Rule {
-            id: id.map(str::to_string),
-            label: None,
-        }
-    }
-
-    /// An ask-always grant is spent only by an ask-always request: a scoped
+    /// An ask-always permit is spent only by an ask-always request: a scoped
     /// ask (which would only read it) and an id-less-rule ask on the same
     /// request line miss, without spending it.
     #[test]
@@ -4693,54 +4115,22 @@ mod tests {
         use crate::core::policy::AccessLevel::{Ask, AskAlways};
         let state = reuse_state();
         let v80 = [("amount", "80")];
-        let (scope, pc) = mint_as(AskAlways, by_rule(Some("buy")), "POST", "/buy", true, &v80);
+        let (scope, pc) = mint_as(&state, AskAlways, by_rule(Some("buy")), "POST", "/buy", true, &v80);
         assert_eq!(scope["reuse"], "none");
         apply(&state, &scope, &pc, now_s());
+        let at = |level, by: &crate::core::policy::DecidedBy| {
+            served_as(&state, "agA", level, by, "POST", "/buy", RH, true, &v80)
+        };
         assert!(
-            !served_as(
-                &state,
-                Ask,
-                &by_rule(Some("buy")),
-                "POST",
-                "/buy",
-                true,
-                &v80
-            ),
-            "a scoped ask does not read an ask-always grant"
+            !at(Ask, &by_rule(Some("buy"))),
+            "a scoped ask does not read an ask-always permit"
         );
-        assert!(!served_as(
-            &state,
-            Ask,
-            &by_rule(None),
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
-        assert!(served_as(
-            &state,
-            AskAlways,
-            &by_rule(Some("buy")),
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
-        assert!(
-            !served_as(
-                &state,
-                AskAlways,
-                &by_rule(Some("buy")),
-                "POST",
-                "/buy",
-                true,
-                &v80
-            ),
-            "single-use"
-        );
+        assert!(!at(Ask, &by_rule(None)));
+        assert!(at(AskAlways, &by_rule(Some("buy"))));
+        assert!(!at(AskAlways, &by_rule(Some("buy"))), "single-use");
     }
 
-    /// A scoped ask's `exact` grant is read only by a scoped ask of the same
+    /// A scoped ask's `exact` permit is read only by a scoped ask of the same
     /// unit: an ask-always request on the same line cannot spend it, and
     /// another unit (a floor ask, an id-less rule) cannot read it.
     #[test]
@@ -4752,45 +4142,16 @@ mod tests {
         let (scope, pc) = mint(&state, "POST", "/buy", true, &v80);
         assert_eq!(scope["reuse"], "exact");
         apply(&state, &scope, &pc, now_s());
+        let at = |level, by: &DecidedBy| {
+            served_as(&state, "agA", level, by, "POST", "/buy", RH, true, &v80)
+        };
         assert!(
-            !served_as(
-                &state,
-                AskAlways,
-                &by_rule(Some("buy")),
-                "POST",
-                "/buy",
-                true,
-                &v80
-            ),
-            "ask-always never spends an exact grant"
+            !at(AskAlways, &by_rule(Some("buy"))),
+            "ask-always never spends an exact permit"
         );
-        assert!(!served_as(
-            &state,
-            Ask,
-            &DecidedBy::Floor,
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
-        assert!(!served_as(
-            &state,
-            Ask,
-            &by_rule(Some("other")),
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
-        assert!(!served_as(
-            &state,
-            Ask,
-            &by_rule(None),
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
+        assert!(!at(Ask, &DecidedBy::Floor));
+        assert!(!at(Ask, &by_rule(Some("other"))));
+        assert!(!at(Ask, &by_rule(None)));
         assert!(
             served(&state, "agA", "POST", "/buy", &v80),
             "still there for its own unit"
@@ -4804,79 +4165,34 @@ mod tests {
         use crate::core::policy::AccessLevel::{Ask, AskAlways};
         use crate::core::policy::DecidedBy;
         let state = reuse_state();
-        let (scope, pc) = mint_as(Ask, by_rule(None), "GET", "/y", false, &[]);
+        let (scope, pc) = mint_as(&state, Ask, by_rule(None), "GET", "/y", false, &[]);
         assert_eq!(scope["reuse"], "none");
         assert!(scope.get("window_s").is_none());
         apply(&state, &scope, &pc, now_s());
-        assert_eq!(ledger_len(&state), 0);
-        assert!(!served_as(
-            &state,
-            AskAlways,
-            &by_rule(None),
-            "GET",
-            "/y",
-            false,
-            &[]
-        ));
-        assert!(!served_as(
-            &state,
-            Ask,
-            &DecidedBy::Floor,
-            "GET",
-            "/y",
-            false,
-            &[]
-        ));
-        assert!(served_as(
-            &state,
-            Ask,
-            &by_rule(None),
-            "GET",
-            "/y",
-            false,
-            &[]
-        ));
-        assert!(!served_as(
-            &state,
-            Ask,
-            &by_rule(None),
-            "GET",
-            "/y",
-            false,
-            &[]
-        ));
+        assert_eq!(units(&state), 0);
+        let at = |level, by: &DecidedBy, method: &str, path: &str, scoped: bool, bound: &[(&str, &str)]| {
+            served_as(&state, "agA", level, by, method, path, RH, scoped, bound)
+        };
+        assert!(!at(AskAlways, &by_rule(None), "GET", "/y", false, &[]));
+        assert!(!at(Ask, &DecidedBy::Floor, "GET", "/y", false, &[]));
+        assert!(at(Ask, &by_rule(None), "GET", "/y", false, &[]));
+        assert!(!at(Ask, &by_rule(None), "GET", "/y", false, &[]));
 
         let v80 = [("amount", "80")];
-        let (scope, pc) = mint_as(Ask, by_rule(None), "POST", "/buy", true, &v80);
+        let (scope, pc) = mint_as(&state, Ask, by_rule(None), "POST", "/buy", true, &v80);
         assert_eq!(scope["reuse"], "none", "no unit: not exact");
         apply(&state, &scope, &pc, now_s());
         assert!(
             !served(&state, "agA", "POST", "/buy", &v80),
-            "not an exact grant"
+            "not an exact permit"
         );
-        assert!(served_as(
-            &state,
-            Ask,
-            &by_rule(None),
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
-        assert!(!served_as(
-            &state,
-            Ask,
-            &by_rule(None),
-            "POST",
-            "/buy",
-            true,
-            &v80
-        ));
+        assert!(at(Ask, &by_rule(None), "POST", "/buy", true, &v80));
+        assert!(!at(Ask, &by_rule(None), "POST", "/buy", true, &v80));
     }
 
     /// A read approved under a rule never serves a write under the same rule
-    /// (the ledger unit is the rule and the request's class). The signed
-    /// fields stay the rule's id and label.
+    /// (the unit is the rule and the request's class). The signed fields
+    /// stay the rule's id and label.
     #[test]
     fn rule_reuse_is_per_class() {
         let state = reuse_state();
@@ -4902,8 +4218,21 @@ mod tests {
         );
     }
 
+    /// No permit is planned without the record's credential set, and a
+    /// window is planned with the fingerprint it was minted under.
+    #[test]
+    fn a_permit_is_planned_with_its_credentials_and_policy() {
+        let state = reuse_state();
+        let (scope, mut pc) = mint(&state, "GET", "/x", false, &[]);
+        let planned = plan_use_grant(Some(&pc), &scope, RV, "agA", now_s()).unwrap();
+        assert_eq!(planned.key.credentials, creds());
+        assert_eq!(planned.window_fp, Some(state.snapshot(RV).unwrap().fingerprint));
+        pc.credentials = None;
+        assert!(plan_use_grant(Some(&pc), &scope, RV, "agA", now_s()).is_none());
+    }
+
     /// A Use op that does not carry a signed level is refused at approve, and
-    /// apply plans no grant without a policy context.
+    /// apply plans no permit without a policy context.
     #[tokio::test]
     async fn approve_refuses_a_use_op_without_a_signed_level() {
         use crate::core::policy::AccessLevel;
@@ -4930,7 +4259,7 @@ mod tests {
             matches!(&err, AppError::BadRequest(m) if m.contains("no signed policy level")),
             "{err}"
         );
-        assert!(plan_use_grant(None, &op.act.scope, "v1", "agA", b"t".to_vec(), 0).is_none());
+        assert!(plan_use_grant(None, &op.act.scope, "v1", "agA", 0).is_none());
     }
 
     /// The whole approve_op path refuses a stored op whose signed reuse is not
@@ -4989,73 +4318,70 @@ mod tests {
         BoundTier::Exact(GrantUnit::Floor(Class::Read))
     }
 
-    fn deferred_pair(agent: &str) -> (DeferredGrant, DeferredGrant) {
+    /// A unit window and an `exact` window for `agent`, under the served
+    /// policy.
+    fn deferred_pair(state: &AppState, agent: &str) -> (DeferredGrant, DeferredGrant) {
         use crate::approval::reuse::{Class, GrantUnit};
+        use crate::state::{CredentialSet, OpGrantKey, PermitFor, PermitKey};
+        let fp = state.snapshot("v1").map(|s| s.fingerprint);
+        let credentials = CredentialSet::new("github", ["GITHUB_TOKEN".to_string()]);
         (
-            DeferredGrant::Ledger {
+            DeferredGrant {
                 vault_id: "v1".into(),
-                agent: agent.into(),
-                conn: "github".into(),
-                host: "api.github.com".into(),
-                unit: GrantUnit::Rule("read".into(), Class::Read),
-                value: b"tok-conn".to_vec(),
-                ttl: 600,
+                key: PermitKey {
+                    of: PermitFor::Unit {
+                        agent: agent.into(),
+                        conn: "github".into(),
+                        host: "api.github.com".into(),
+                        unit: GrantUnit::Rule("read".into(), Class::Read),
+                    },
+                    credentials: credentials.clone(),
+                },
                 expires_at: u64::MAX / 2,
+                window_fp: fp,
             },
-            DeferredGrant::OpGrant {
+            DeferredGrant {
                 vault_id: "v1".into(),
-                agent: agent.into(),
-                conn: "github".into(),
-                method: "GET".into(),
-                host: "api.github.com".into(),
-                path: "/user".into(),
-                scope_digest: String::new(),
-                tier: exact_read_tier(),
-                value: b"tok-bound".to_vec(),
+                key: PermitKey {
+                    of: PermitFor::Request(OpGrantKey::new(
+                        agent,
+                        "github",
+                        "GET",
+                        "api.github.com",
+                        "/user",
+                        "",
+                        &exact_read_tier(),
+                    )),
+                    credentials,
+                },
                 expires_at: u64::MAX / 2,
+                window_fp: fp,
             },
         )
     }
 
+    /// (a unit permit, a request-bound permit) for `agent`.
     fn grants_present(state: &AppState, agent: &str) -> (bool, bool) {
-        let ledger = {
-            let runtime = state.runtime_if_present("v1").unwrap();
-            let runtime_state = runtime.state.lock().unwrap();
-            match &*runtime_state {
-                crate::state::VaultState::Unlocked { cache, .. } => cache
-                    .ask_grants
-                    .keys()
-                    .any(|(a, c, _, _)| a == agent && c == "github"),
-                _ => false,
-            }
-        };
-        (
-            ledger,
-            state
-                .op_grant_take(
-                    "v1",
-                    agent,
-                    "github",
-                    "GET",
-                    "api.github.com",
-                    "/user",
-                    "",
-                    &exact_read_tier(),
-                )
-                .is_some(),
-        )
+        let permits = state.permits("v1");
+        let unit = permits.iter().any(|(k, _)| {
+            matches!(&k.of, crate::state::PermitFor::Unit { agent: a, conn, .. } if a == agent && conn == "github")
+        });
+        let bound = permits.iter().any(|(k, _)| {
+            matches!(&k.of, crate::state::PermitFor::Request(g) if g.agent == agent && g.conn == "github")
+        });
+        (unit, bound)
     }
 
-    /// The Use grant is written only once the op is marked approved. A status
+    /// The Use permit is stored only once the op is marked approved. A status
     /// flip that bypasses the vault write lock (user reject, requester
     /// withdrawal / reaper, auto-reject) landing between dispatch and approve
-    /// leaves NO grant behind an op that reads rejected.
+    /// leaves NO permit behind an op that reads rejected.
     #[test]
     fn deferred_use_grant_not_written_when_op_flipped_before_approve() {
         let state = test_state();
         state.unlock_vault(
             "v1".into(),
-            crate::state::SecretsCache::default(),
+            crate::snapshot::Snapshot::default(),
             zeroize::Zeroizing::new(Vec::new()),
         );
         for flip in [
@@ -5064,7 +4390,7 @@ mod tests {
         ] {
             for which in 0..2 {
                 let c = chained(&state, "/user", &b64r(1));
-                let (conn, bound) = deferred_pair("ag_x");
+                let (conn, bound) = deferred_pair(&state, "ag_x");
                 let g = if which == 0 { conn } else { bound };
                 // Dispatch done; the flip lands before step 5.
                 state.approvals.lock().unwrap().reject(&c.id, flip);
@@ -5086,13 +4412,13 @@ mod tests {
         for _ in 0..crate::approval::store::MAX_APPROVE_ATTEMPTS {
             state.approvals.lock().unwrap().record_failure(&c.id);
         }
-        let (conn, _) = deferred_pair("ag_x");
+        let (conn, _) = deferred_pair(&state, "ag_x");
         assert!(approve_and_commit(&state, &c.id, None, Some(conn)).is_err());
         assert_eq!(grants_present(&state, "ag_x"), (false, false));
 
-        // Still pending at step 5: approved, then the grant is written.
+        // Still pending at step 5: approved, then the permit is stored.
         let c = chained(&state, "/user", &b64r(3));
-        let (conn, bound) = deferred_pair("ag_x");
+        let (conn, bound) = deferred_pair(&state, "ag_x");
         approve_and_commit(&state, &c.id, None, Some(conn)).unwrap();
         let c2 = chained(&state, "/user", &b64r(4));
         approve_and_commit(&state, &c2.id, None, Some(bound)).unwrap();
@@ -5550,6 +4876,182 @@ mod tests {
         assert!(err.is_err(), "a wrong vault key applies nothing");
         let v = d.approve(&id, good()).await.unwrap();
         assert_eq!(v["value"], "foo-value");
+    }
+
+    // ── an approved write's install ─────────────────────────────────────────
+
+    impl BDaemon {
+        /// A write op (`custom` act) B's agent raised: (op, r, op id).
+        fn raise_write(
+            &self,
+            act: &str,
+            target: &str,
+            scope: Value,
+        ) -> (crate::protocol::operation::Operation, String, String) {
+            use crate::protocol::operation::{Act, Bind, Operation, Valid};
+            let op = Operation {
+                act: Act {
+                    kind: ActType::Custom(act.into()),
+                    target: target.into(),
+                    scope,
+                },
+                bind: Bind {
+                    redeemer: self.vault.into(),
+                    recipient: None,
+                },
+                valid: Valid::single_use(0, None),
+            };
+            let r = self
+                .state
+                .challenges
+                .lock()
+                .unwrap()
+                .issue("127.0.0.1".parse().unwrap())
+                .unwrap();
+            let id = self.state.approvals.lock().unwrap().create(
+                self.vault.into(),
+                op.clone(),
+                r.clone(),
+            );
+            self.ids.borrow_mut().insert(r.clone(), id.clone());
+            (op, r, id)
+        }
+
+        /// The admin approves `(op, r)` with the vault key.
+        async fn approve_as_admin(
+            &self,
+            (op, r, id): &(crate::protocol::operation::Operation, String, String),
+        ) -> Result<Value> {
+            let grant = self.k_grant((op, r.as_str()), ADMIN_CID, &self.admin, &VAULT_K, id);
+            self.approve(id, grant).await
+        }
+
+        /// Unlock the vault, as the vault-unlock op's install does.
+        fn unlock(&self) {
+            let key = zeroize::Zeroizing::new(VAULT_K.to_vec());
+            assert!(self
+                .state
+                .install(self.vault, crate::state::InstallKey::Unlock(key))
+                .served());
+        }
+
+        fn store_path(&self) -> std::path::PathBuf {
+            self.state.vaults.per_item_path(self.vault).unwrap()
+        }
+
+        /// Add a connection row to the store (a pull adopting it).
+        fn plant_connection(&self, name: &str, body: Value) {
+            use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+            let mut pv = read_per_item(&self.store_path()).unwrap().unwrap();
+            pv.plant::<sudp::primitives::StdPrimitives>(
+                VaultKeys::single(&VAULT_K),
+                self.vault,
+                ItemNs::Connection,
+                name,
+                1,
+                &ItemPayload::live(ItemNs::Connection, name, body),
+            )
+            .unwrap();
+            crate::storage::sealed_vault::write_per_item_atomic(&self.store_path(), &pv).unwrap();
+        }
+
+        /// Secret `name`'s row now reads only under a key this device lacks.
+        fn reseal_elsewhere(&self, name: &str) {
+            use crate::storage::item::{wire_id_for, ItemNs};
+            let id = wire_id_for::<sudp::primitives::StdPrimitives>(&VAULT_K, ItemNs::Secret, name)
+                .unwrap();
+            let mut pv = read_per_item(&self.store_path()).unwrap().unwrap();
+            let ct = &mut pv.items.get_mut(&id).unwrap().ct;
+            let last = ct.len() - 1;
+            ct[last] ^= 1;
+            crate::storage::sealed_vault::write_per_item_atomic(&self.store_path(), &pv).unwrap();
+        }
+
+        /// The secret names the served snapshot holds (`None`: locked).
+        fn served_names(&self) -> Option<BTreeSet<String>> {
+            Some(self.state.snapshot(self.vault)?.native_names().cloned().collect())
+        }
+
+        fn approved(&self, id: &str) -> bool {
+            let store = self.state.approvals.lock().unwrap();
+            matches!(store.get_any(id).unwrap().status, ApprovalStatus::Approved)
+        }
+    }
+
+    /// A write op minted while unlocked and approved after a lock is stored
+    /// and approved, and the vault stays locked: an approval never unlocks.
+    /// The result says the change is served after `sprott unlock`.
+    #[tokio::test]
+    async fn an_approved_write_after_a_lock_leaves_the_vault_locked() {
+        let d = b_daemon("-wlocked");
+        d.unlock();
+        let raised = d.raise_write("secret-rm", "FOO", Value::Null);
+        d.state.lock_vault(d.vault);
+        let v = d.approve_as_admin(&raised).await.unwrap();
+        assert_eq!(v["removed"], "FOO");
+        assert_eq!(v["served"], false);
+        assert_eq!(v["served_message"], crate::error::STORED_NOT_SERVED_MSG);
+        assert!(d.approved(&raised.2));
+        assert!(d.state.is_vault_locked(d.vault));
+        assert!(d.state.cloned_state_key(d.vault).is_none(), "no K held");
+        // Stored: the next unlock serves it.
+        d.unlock();
+        assert_eq!(d.served_names(), Some(["BAR".to_string()].into()));
+    }
+
+    /// An approved write whose install is refused (a row the served cache
+    /// read no longer reads under the key): the change is stored, the op is
+    /// approved (never an error the relay would record as a reject), and the
+    /// result, the one the op-poll hands the CLI too, says it is served after
+    /// `sprott unlock`. The served cache stays.
+    #[tokio::test]
+    async fn an_approved_write_whose_install_is_refused_stays_approved() {
+        let d = b_daemon("-wrefused");
+        d.unlock();
+        d.reseal_elsewhere("BAR");
+        let raised = d.raise_write("secret-rm", "FOO", Value::Null);
+        let v = d.approve_as_admin(&raised).await.unwrap();
+        assert_eq!(v["removed"], "FOO");
+        assert_eq!(v["served"], false);
+        assert_eq!(v["served_message"], crate::error::STORED_NOT_SERVED_MSG);
+        assert!(d.approved(&raised.2));
+        let polled = op_poll_value(&d.state, &raised.2, None).unwrap();
+        assert_eq!(polled["status"], "ok");
+        assert_eq!(
+            crate::cli::approve::not_served(&crate::cli::approve::act_result(&polled)),
+            Some(crate::error::STORED_NOT_SERVED_MSG)
+        );
+        assert_eq!(
+            d.served_names(),
+            Some(["BAR".to_string(), "FOO".to_string()].into()),
+            "the served cache stays"
+        );
+        assert!(d.state.is_vault_key_changed(d.vault));
+        assert!(!d.state.is_vault_locked(d.vault));
+    }
+
+    /// A widen-host approval for a host that is not a bare domain is refused
+    /// before anything changes: the session's routing snapshot keeps the
+    /// connection's hosts.
+    #[tokio::test]
+    async fn a_widen_with_an_invalid_host_changes_nothing() {
+        let d = b_daemon("-widen");
+        d.plant_connection(
+            "rail",
+            json!({ "hosts": ["api.example.com"], "secrets": ["FOO"] }),
+        );
+        d.unlock();
+        let raised = d.raise_write(
+            "widen-host",
+            "",
+            json!({ "connection_id": "rail", "host": "https://evil.example/x" }),
+        );
+        let err = d.approve_as_admin(&raised).await.unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)), "{err}");
+        assert_eq!(
+            d.state.connection_snapshot(d.vault, "rail").unwrap().hosts,
+            Some(vec!["api.example.com".to_string()])
+        );
     }
 
     /// A grant delivers exactly one of the sealed secret (`wk_*`), the sealed

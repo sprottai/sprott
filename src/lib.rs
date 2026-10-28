@@ -47,6 +47,7 @@ pub mod relay;
 mod rename_guard;
 pub mod server;
 pub mod service;
+pub mod snapshot;
 pub mod state;
 pub mod storage;
 pub mod store;
