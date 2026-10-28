@@ -569,6 +569,17 @@ pub(crate) fn match_pattern_problem(pattern: &str) -> Option<String> {
         ));
     }
     let segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    // `*` and `**` are whole segments: `v*` would be the literal text "v*"
+    // and never match `v9`.
+    if let Some(seg) = segments
+        .iter()
+        .find(|s| s.contains('*') && **s != "*" && **s != "**")
+    {
+        return Some(format!(
+            "match '{}': '{}' puts '*' inside a segment; '*' matches only a whole segment",
+            pattern, seg
+        ));
+    }
     if let Some((_, init)) = segments.split_last() {
         if init.contains(&"**") {
             return Some(format!(
@@ -1515,7 +1526,8 @@ mod tests {
             assert_eq!(match_pattern_problem(good), None, "{good}");
         }
         for bad in [
-            "x", "GET x", "/a b", "/x?y=1", "/x#f", "/a/**/b", "GE T /x", "",
+            "x", "GET x", "/a b", "/x?y=1", "/x#f", "/a/**/b", "GE T /x", "", "DELETE /v*/projects/*",
+            "/a/b*", "/a/***",
         ] {
             assert!(match_pattern_problem(bad).is_some(), "{bad}");
         }

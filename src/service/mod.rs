@@ -2394,11 +2394,13 @@ secrets = ["GITHUB_TOKEN"]
         }
     }
 
-    /// A gated delete can't be reached another way: through a Google batch
-    /// endpoint, the Cloud Storage XML API, or GitHub's REST rulesets (the
-    /// GraphQL spelling is already gated).
+    /// A gated operation can't be reached another way: through a Google batch
+    /// endpoint, the Cloud Storage XML API, GitHub's REST twins of its gated
+    /// GraphQL mutations and its org, user and environment variants, or
+    /// Vercel's member invite and role change. Paths from the vendors' own
+    /// API descriptions (GitHub rest-api-description, Vercel OpenAPI).
     #[test]
-    fn compiled_policies_gate_every_spelling_of_a_gated_delete() {
+    fn compiled_policies_gate_every_spelling_of_a_gated_operation() {
         use crate::core::policy::AccessLevel;
         for (service, method, path) in [
             ("gcp", "DELETE", "/storage/v1/b/bkt"),
@@ -2413,6 +2415,30 @@ secrets = ["GITHUB_TOKEN"]
             ("github", "DELETE", "/repositories/42/rulesets/7"),
             ("github", "PUT", "/orgs/acme/rulesets/7"),
             ("github", "DELETE", "/organizations/9/rulesets/7"),
+            ("github", "PUT", "/orgs/acme/actions/secrets/TOKEN/repositories/99"),
+            ("github", "PUT", "/orgs/acme/actions/secrets/TOKEN/repositories"),
+            ("github", "PUT", "/orgs/acme/dependabot/secrets/TOKEN"),
+            ("github", "PUT", "/user/codespaces/secrets/TOKEN/repositories/99"),
+            ("github", "PUT", "/repos/o/r/environments/prod/secrets/TOKEN"),
+            ("github", "PUT", "/repos/o/r/dependabot/secrets/TOKEN"),
+            ("github", "PUT", "/orgs/acme/teams/devs/repos/acme/app"),
+            ("github", "PUT", "/teams/5/repos/acme/app"),
+            ("github", "PUT", "/orgs/acme/memberships/mallory"),
+            ("github", "POST", "/orgs/acme/invitations"),
+            ("github", "DELETE", "/orgs/acme/outside_collaborators/bob"),
+            ("github", "POST", "/orgs/acme/actions/runners/registration-token"),
+            ("github", "POST", "/repos/o/r/actions/runners/generate-jitconfig"),
+            ("github", "POST", "/orgs/acme/hooks"),
+            ("github", "PATCH", "/orgs/acme/hooks/3/config"),
+            ("github", "PATCH", "/repos/o/r/hooks/3/config"),
+            ("github", "PATCH", "/repos/o/r/branches/main/protection/required_pull_request_reviews"),
+            ("github", "POST", "/repos/o/r/branches/main/protection/restrictions/users"),
+            ("vercel", "POST", "/v2/teams/t1/members"),
+            ("vercel", "PATCH", "/v1/teams/t1/members/u1"),
+            ("vercel", "DELETE", "/v9/projects/web"),
+            ("vercel", "DELETE", "/v6/domains/example.com"),
+            ("vercel", "DELETE", "/v1/teams/t1/members/u1"),
+            ("vercel", "POST", "/v1/webhooks"),
         ] {
             assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::AskAlways, "{service} {method} {path}");
         }
