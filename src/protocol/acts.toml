@@ -24,8 +24,8 @@
 [acts.vault-unlock]
 action = "Unlock vault"
 action_zh = "解锁 vault"
-explain = "For this session, the agent on this device can use this vault's credentials."
-explain_zh = "本次会话内，这台设备上的 agent 可以使用这个 vault 的凭证。"
+explain = "Unlock to let agents on this device use this vault's credentials."
+explain_zh = "解锁后，这台设备上的 agent 就能使用这个 vault 里的凭证。"
 tone = "neutral"
 
 [acts.vault-lock]

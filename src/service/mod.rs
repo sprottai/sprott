@@ -2394,6 +2394,46 @@ secrets = ["GITHUB_TOKEN"]
         }
     }
 
+    /// Every Cloudflare change that can remove or re-point traffic is gated,
+    /// in each spelling the API accepts (a trailing slash too); an approval
+    /// binds the fields a record write sets.
+    #[test]
+    fn compiled_cloudflare_policy_gates_record_changes_and_binds_them() {
+        use crate::core::policy::AccessLevel;
+        let z = "/client/v4/zones/z1";
+        let record = r#"{"type": "A", "name": "x.example.com", "content": "192.0.2.1"}"#;
+        for (method, path, body) in [
+            ("PATCH", format!("{z}/dns_records/r1"), r#"{"proxied": true}"#),
+            ("PATCH", format!("{z}/dns_records/r1/"), r#"{"proxied": true}"#),
+            ("PUT", format!("{z}/dns_records/r1"), record),
+            ("DELETE", format!("{z}/dns_records/r1"), ""),
+            ("POST", format!("{z}/dns_records/batch"), r#"{"deletes": [{"id": "r1"}]}"#),
+            ("DELETE", z.to_string(), ""),
+            ("DELETE", format!("{z}/"), ""),
+        ] {
+            assert_eq!(eval_compiled("cloudflare", method, &path, body), AccessLevel::AskAlways, "{method} {path}");
+        }
+        for (method, path) in [("GET", format!("{z}/dns_records")), ("POST", format!("{z}/dns_records"))] {
+            assert_eq!(eval_compiled("cloudflare", method, &path, record), AccessLevel::Allow, "{method} {path}");
+        }
+
+        let r = ServiceRegistry::load();
+        let def = r.get("cloudflare").expect("cloudflare service");
+        let scope = |path: &str, body: &str| {
+            def.extract_request_scope("PATCH", path, None, Some(body.as_bytes())).unwrap()
+        };
+        let path = format!("{z}/dns_records/r1");
+        let rs = scope(&path, r#"{"proxied": true, "comment": "x"}"#);
+        assert_eq!(rs.bound, vec![("proxied".to_string(), "true".to_string())]);
+        // The same approval can't carry a new target.
+        let other = scope(&path, r#"{"proxied": true, "content": "198.51.100.7"}"#);
+        assert_ne!(rs.digest(), other.digest());
+        let batch = def
+            .extract_request_scope("POST", &format!("{z}/dns_records/batch"), None, Some(br#"{"deletes": [{"id": "r1"}]}"#))
+            .unwrap();
+        assert_eq!(batch.bound, vec![("deletes".to_string(), r#"[{"id":"r1"}]"#.to_string())]);
+    }
+
     /// Every Railway mutation that deletes, mints a credential or changes who
     /// can get in is gated; routine ones with the same words ride the floor.
     /// Names from introspection of backboard.railway.com (2026-10-27).
