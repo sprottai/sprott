@@ -3131,7 +3131,6 @@ async fn confirm_unreadable_after_refresh(state: &Arc<AppState>, vault_id: &str)
 //   PUT  /v/{vid}/items/{item_id}   { base_version?, version, ct } → CAS
 //                                   → 200 {version,seq} | 409 {currentVersion}
 //   GET  /v/{vid}/items/wait?since=<seq> (daemon long-poll)
-//   DELETE /v/{vid}/items/{item_id}?gc_version=<v> (tombstone GC)
 //
 // PULL adopts server truth (§5): a newer version replaces the local row, a
 // tombstone is stored (fold_view drops it), the cursor advances to max(seq).
@@ -3703,39 +3702,6 @@ pub async fn push_item(
             })
         }
         other => Err(format!("item PUT HTTP {}", other)),
-    }
-}
-
-/// Hard-delete a tombstone row that has fully propagated (GC, §6): DELETE
-/// `/items/{id}?gc_version=<v>`. Idempotent; only removes the exact version the
-/// caller saw so it never drops a newer row that replaced the tombstone.
-pub async fn gc_item(
-    cloud: &str,
-    vault: &str,
-    device_key: &str,
-    item_id: &str,
-    gc_version: u64,
-) -> Result<(), String> {
-    let url = format!(
-        "{}/v/{}/items/{}?gc_version={}",
-        cloud.trim_end_matches('/'),
-        vault,
-        item_id,
-        gc_version
-    );
-    let client = crate::cli::egress_proxy::client(Duration::from_secs(15))
-        .map_err(|e| format!("http client init: {}", e))?;
-    let resp = client
-        .delete(&url)
-        .bearer_auth(device_key)
-        .dik_pop("DELETE", &url, &[])
-        .send()
-        .await
-        .map_err(|e| format!("reach {}: {}", cloud, e))?;
-    if resp.status().is_success() || resp.status().as_u16() == 404 {
-        Ok(())
-    } else {
-        Err(format!("item GC DELETE HTTP {}", resp.status()))
     }
 }
 
