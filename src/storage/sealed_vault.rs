@@ -703,6 +703,18 @@ pub struct KeysetUik {
     pub approver_cids: BTreeMap<String, String>,
 }
 
+impl KeysetUik {
+    /// The signing pubkey of the published cred whose self-certifying id is
+    /// `signer_id`, or `None` when no cred carries one.
+    pub(crate) fn signer_key(&self, signer_id: &str) -> Option<[u8; 32]> {
+        self.creds.values().find_map(|c| {
+            let k = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
+            (crate::identity::derive_id(crate::identity::IdKind::User, &k) == signer_id)
+                .then_some(k)
+        })
+    }
+}
+
 /// A one-way commitment to a content key for a re-key event: `SHA-256(domain ‖
 /// content_key)`. Byte-identical to the browser's `rekeyCommitment`
 /// (lib/uik-crypto.ts). Binds a signed `generation` to the specific content key.
@@ -864,13 +876,7 @@ fn verify_record_sidecar_sig(
     // Resolve the signer's pubkey from the published keyset creds and bind it to the
     // claimed `signer_id` (self-certifying: id = fold of pubkey). A server-minted
     // key isn't in the keyset (it can't add one with a valid K-seal) → rejected.
-    let uik = keyset.uik.as_ref()?;
-    let sign_pub_vec = uik.creds.values().map(|c| &c.sig_pub).find(|pk| {
-        <[u8; 32]>::try_from(pk.as_slice())
-            .map(|k| crate::identity::derive_id(crate::identity::IdKind::User, &k) == signer_id)
-            .unwrap_or(false)
-    })?;
-    let sign_pub: [u8; 32] = sign_pub_vec.as_slice().try_into().ok()?;
+    let sign_pub = keyset.uik.as_ref()?.signer_key(signer_id)?;
     let input = crate::identity::record_signature_input(
         record_type,
         item_id_raw,
@@ -1206,12 +1212,7 @@ fn verify_rekey_proof(
     };
     // The signer must be a PUBLISHED member key whose id matches the claimed
     // signer (C.1 anchor) — a backend-minted key isn't in the keyset.
-    let signer_pub: Option<[u8; 32]> = uik.creds.values().find_map(|c| {
-        let a = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
-        (crate::identity::derive_id(crate::identity::IdKind::User, &a) == proof.signer_id)
-            .then_some(a)
-    });
-    let Some(signer_pub) = signer_pub else {
+    let Some(signer_pub) = uik.signer_key(&proof.signer_id) else {
         return false;
     };
     // The signer must be an ADMIN in the verified role set (D). (`is_admin`, not a

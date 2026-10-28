@@ -6104,14 +6104,12 @@ fn adopt_rekey_meta(
     }
     // The signer's published sig pubkey (C.1 anchor): a keyset cred whose derived
     // id matches `signer_id` — a backend-minted key isn't in the keyset.
-    let signer_pub: Option<[u8; 32]> = pv.keyset.uik.as_ref().and_then(|uik| {
-        uik.creds.values().find_map(|c| {
-            let a = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
-            (crate::identity::derive_id(crate::identity::IdKind::User, &a) == signer_id)
-                .then_some(a)
-        })
-    });
-    let Some(signer_pub) = signer_pub else {
+    let Some(signer_pub) = pv
+        .keyset
+        .uik
+        .as_ref()
+        .and_then(|uik| uik.signer_key(&signer_id))
+    else {
         return Ok(());
     };
     let input = crate::identity::rekey_sig_input(
