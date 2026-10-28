@@ -2439,9 +2439,34 @@ secrets = ["GITHUB_TOKEN"]
             ("vercel", "DELETE", "/v6/domains/example.com"),
             ("vercel", "DELETE", "/v1/teams/t1/members/u1"),
             ("vercel", "POST", "/v1/webhooks"),
+            ("neon", "POST", "/api/v2/organizations/org-1/api_keys"),
+            ("gcp", "DELETE", "/compute/beta/projects/p/zones/z/instances/vm"),
+            ("gcp", "DELETE", "/compute/alpha/projects/p/zones/z/instances/vm"),
+            ("gcalendar", "DELETE", "/calendar/v3/calendars/cal1"),
+            ("gcalendar", "POST", "/calendar/v3/calendars/primary/clear"),
+            ("supabase", "GET", "/v1/projects/ref/config/database/pgbouncer"),
         ] {
             assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::AskAlways, "{service} {method} {path}");
         }
+        for (service, method, path, body) in [
+            ("openai", "POST", "/v1/threads/runs", r#"{"assistant_id": "a", "model": "o3"}"#),
+            ("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a", "model": "o4-mini"}"#),
+            ("openai", "POST", "/v1/assistants", r#"{"model": "o3"}"#),
+            ("openai", "POST", "/v1/assistants/a1", r#"{"model": "gpt-4.5-preview"}"#),
+            ("openai", "POST", "/v1/batches", r#"{"input_file_id": "f", "endpoint": "/v1/chat/completions", "completion_window": "24h"}"#),
+            ("circleci", "DELETE", "/api/v2/org/o1/oidc-custom-claims", ""),
+            ("circleci", "DELETE", "/api/v2/org/o1/project/p1/oidc-custom-claims", ""),
+            ("googletasks", "POST", "/tasks/v1/lists/l1/clear", ""),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, body), AccessLevel::Ask, "{service} {method} {path}");
+        }
+        for field in ["workspacePolicyItemUpdate", "workspacePolicyDeploySourceAllowlistAdd", "workspacePolicyDeploySourceAllowlistRemove"] {
+            let body = format!(r#"{{"query":"mutation {{ {field}(id: \"x\") }}"}}"#);
+            assert_eq!(eval_compiled("railway", "POST", "/graphql/v2", &body), AccessLevel::AskAlways, "{field}");
+        }
+        // An assistant on a routine model, and a run without an override, ride the floor.
+        assert_eq!(eval_compiled("openai", "POST", "/v1/assistants", r#"{"model": "gpt-4o-mini"}"#), AccessLevel::Allow);
+        assert_eq!(eval_compiled("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a"}"#), AccessLevel::Allow);
         // Object deletes stay routine; reading rulesets is a read.
         for (service, method, path) in [
             ("gcp", "DELETE", "/storage/v1/b/bkt/o/obj"),

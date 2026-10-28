@@ -29,7 +29,8 @@ level = "ask-always"
 [[rule]]
 id = "delete-instance"
 label = "Delete a Compute Engine VM"
-match = "DELETE /compute/v1/projects/*/zones/*/instances/*"
+# `/compute/*/`: v1, beta and alpha all delete the same VM.
+match = "DELETE /compute/*/projects/*/zones/*/instances/*"
 level = "ask-always"
 
 # ── Delete a storage bucket (loses every object in it) ────────────────────────

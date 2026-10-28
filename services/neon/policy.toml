@@ -41,5 +41,5 @@ level = "ask-always"
 [[rule]]
 id = "mint-api-key"
 label = "Create an API key"
-match = "POST /api/v2/api_keys"
+match = ["POST /api/v2/api_keys", "POST /api/v2/organizations/*/api_keys"]
 level = "ask-always"

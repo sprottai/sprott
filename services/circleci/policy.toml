@@ -146,6 +146,8 @@ label = "Change the custom claims in CircleCI's OIDC tokens for an organization 
 match = [
   "PATCH /api/v2/org/*/oidc-custom-claims",
   "PATCH /api/v2/org/*/project/*/oidc-custom-claims",
+  "DELETE /api/v2/org/*/oidc-custom-claims",
+  "DELETE /api/v2/org/*/project/*/oidc-custom-claims",
 ]
 level = "ask"
 
