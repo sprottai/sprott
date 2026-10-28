@@ -2394,6 +2394,38 @@ secrets = ["GITHUB_TOKEN"]
         }
     }
 
+    /// A gated delete can't be reached another way: through a Google batch
+    /// endpoint, the Cloud Storage XML API, or GitHub's REST rulesets (the
+    /// GraphQL spelling is already gated).
+    #[test]
+    fn compiled_policies_gate_every_spelling_of_a_gated_delete() {
+        use crate::core::policy::AccessLevel;
+        for (service, method, path) in [
+            ("gcp", "DELETE", "/storage/v1/b/bkt"),
+            ("gcp", "DELETE", "/bkt"),
+            ("gcp", "DELETE", "/bkt/"),
+            ("gcp", "POST", "/batch/storage/v1"),
+            ("gcp", "POST", "/batch/compute/v1"),
+            ("gcalendar", "POST", "/batch/calendar/v3"),
+            ("github", "POST", "/repos/o/r/rulesets"),
+            ("github", "PUT", "/repos/o/r/rulesets/7"),
+            ("github", "DELETE", "/repos/o/r/rulesets/7"),
+            ("github", "DELETE", "/repositories/42/rulesets/7"),
+            ("github", "PUT", "/orgs/acme/rulesets/7"),
+            ("github", "DELETE", "/organizations/9/rulesets/7"),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::AskAlways, "{service} {method} {path}");
+        }
+        // Object deletes stay routine; reading rulesets is a read.
+        for (service, method, path) in [
+            ("gcp", "DELETE", "/storage/v1/b/bkt/o/obj"),
+            ("gcp", "DELETE", "/bkt/obj"),
+            ("github", "GET", "/repos/o/r/rulesets"),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::Allow, "{service} {method} {path}");
+        }
+    }
+
     /// Snaplii's purchase and transfer gates read the fields its OpenAPI spec
     /// sends (`orderInfo.item.price` as a decimal string; `to_phone`, `amount`),
     /// and an approval binds what moves money.

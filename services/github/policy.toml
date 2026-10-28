@@ -64,6 +64,17 @@ match = ["DELETE /repos/*/*/branches/**", "DELETE /repositories/*/branches/**"]
 level = "ask-always"
 
 [[rule]]
+id = "change-ruleset"
+label = "Create, change or delete a ruleset"
+match = [
+  "POST /repos/*/*/rulesets", "PUT /repos/*/*/rulesets/*", "DELETE /repos/*/*/rulesets/*",
+  "POST /repositories/*/rulesets", "PUT /repositories/*/rulesets/*", "DELETE /repositories/*/rulesets/*",
+  "POST /orgs/*/rulesets", "PUT /orgs/*/rulesets/*", "DELETE /orgs/*/rulesets/*",
+  "POST /organizations/*/rulesets", "PUT /organizations/*/rulesets/*", "DELETE /organizations/*/rulesets/*",
+]
+level = "ask-always"
+
+[[rule]]
 id = "add-deploy-key"
 label = "Add a deploy key"
 match = ["POST /repos/*/*/keys", "POST /repositories/*/keys"]
