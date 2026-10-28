@@ -1680,6 +1680,53 @@ fn owner_config_tombstone_honored(
     }
 }
 
+/// How an owner-config row reads under `trust`: a tombstone by
+/// [`owner_config_tombstone_honored`], a live body by
+/// [`fold_owner_config_record`]. `None` = not honored; `Some(None)` = an
+/// honored tombstone; `Some(Some(data))` = honored live data. `ns` and
+/// `record_type` are those of the opened record.
+#[allow(clippy::too_many_arguments)]
+fn honored_owner_config(
+    stored: &StoredItem,
+    keyset: &Keyset,
+    vault_id: &str,
+    item_id_raw: &[u8],
+    ns: ItemNs,
+    record_type: &str,
+    tombstone: bool,
+    body: serde_json::Value,
+    trust: &MembershipTrust,
+) -> Option<Option<serde_json::Value>> {
+    if tombstone {
+        return owner_config_tombstone_honored(
+            stored.sig.as_deref(),
+            stored.signer.as_deref(),
+            &stored.ct,
+            keyset,
+            vault_id,
+            item_id_raw,
+            record_type,
+            stored.version,
+            trust,
+        )
+        .then_some(None);
+    }
+    fold_owner_config_record(
+        stored.sig.as_deref(),
+        stored.signer.as_deref(),
+        &stored.ct,
+        keyset,
+        vault_id,
+        item_id_raw,
+        ns,
+        record_type,
+        stored.version,
+        body,
+        trust,
+    )
+    .map(Some)
+}
+
 /// LEGACY: how the native record at one key reads, for the migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeKey {
@@ -3151,28 +3198,22 @@ impl PerItemVault {
                     // (sidecar type = the namespace). A tombstone counts too:
                     // it removes its key, over the legacy row.
                     Read::OwnerSignedWithKeysetNativeWins => {
-                        let ty = sig_type.as_deref().unwrap_or("");
-                        if !live {
-                            if owner_config_tombstone_honored(
-                                stored.sig.as_deref(),
-                                stored.signer.as_deref(),
-                                &stored.ct,
-                                &self.keyset,
-                                vault_id,
-                                &raw,
-                                ty,
-                                stored.version,
-                                &trust,
-                            ) {
-                                config.native(payload.ns, name, None);
-                            }
-                            return Ok(());
-                        }
-                        match owner_config(payload.body) {
-                            Some(data) => config.native(payload.ns, name, Some(data)),
-                            None => {
+                        match honored_owner_config(
+                            stored,
+                            &self.keyset,
+                            vault_id,
+                            &raw,
+                            payload.ns,
+                            sig_type.as_deref().unwrap_or(""),
+                            !live,
+                            payload.body,
+                            &trust,
+                        ) {
+                            Some(data) => config.native(payload.ns, name, data),
+                            None if live => {
                                 tracing::warn!(vault = %vault_id, ns = %payload.ns.as_str(), "fold: dropping owner-config — unauthorized/invalid owner signature")
                             }
+                            None => {}
                         }
                     }
                     _ if !live => {}
@@ -3419,34 +3460,18 @@ impl PerItemVault {
                 let ty = crate::storage::item::rule(ns, name)
                     .and_then(|r| r.signature_type(name))
                     .unwrap_or("");
-                if payload.is_tombstone() {
-                    owner_config_tombstone_honored(
-                        stored.sig.as_deref(),
-                        stored.signer.as_deref(),
-                        &stored.ct,
-                        &self.keyset,
-                        vault_id,
-                        &raw,
-                        ty,
-                        stored.version,
-                        trust,
-                    )
-                } else {
-                    fold_owner_config_record(
-                        stored.sig.as_deref(),
-                        stored.signer.as_deref(),
-                        &stored.ct,
-                        &self.keyset,
-                        vault_id,
-                        &raw,
-                        ns,
-                        ty,
-                        stored.version,
-                        payload.body,
-                        trust,
-                    )
-                    .is_some()
-                }
+                honored_owner_config(
+                    stored,
+                    &self.keyset,
+                    vault_id,
+                    &raw,
+                    ns,
+                    ty,
+                    payload.is_tombstone(),
+                    payload.body,
+                    trust,
+                )
+                .is_some()
             };
         if honored {
             NativeKey::Decided {
@@ -3585,34 +3610,20 @@ impl PerItemVault {
                 return Some(false);
             }
             let ty = r.signature_type(&payload.name).unwrap_or("");
-            Some(if payload.is_tombstone() {
-                owner_config_tombstone_honored(
-                    stored.sig.as_deref(),
-                    stored.signer.as_deref(),
-                    &stored.ct,
-                    &self.keyset,
-                    vault_id,
-                    &raw,
-                    ty,
-                    stored.version,
-                    &trust,
-                )
-            } else {
-                fold_owner_config_record(
-                    stored.sig.as_deref(),
-                    stored.signer.as_deref(),
-                    &stored.ct,
+            Some(
+                honored_owner_config(
+                    stored,
                     &self.keyset,
                     vault_id,
                     &raw,
                     payload.ns,
                     ty,
-                    stored.version,
+                    payload.is_tombstone(),
                     payload.body,
                     &trust,
                 )
-                .is_some()
-            })
+                .is_some(),
+            )
         };
         if read(local) != Some(true) {
             return None;
