@@ -2394,6 +2394,49 @@ secrets = ["GITHUB_TOKEN"]
         }
     }
 
+    /// Snaplii's purchase and transfer gates read the fields its OpenAPI spec
+    /// sends (`orderInfo.item.price` as a decimal string; `to_phone`, `amount`),
+    /// and an approval binds what moves money.
+    #[test]
+    fn compiled_snaplii_policy_reads_the_fields_its_api_sends() {
+        use crate::core::policy::AccessLevel;
+        let purchase = |price: &str| {
+            format!(r#"{{"orderInfo": {{"orderType": "GIFT_CARD", "item": {{"itemId": "CB_1", "price": {price}}}}}}}"#)
+        };
+        let eval = |body: &str| eval_compiled("snaplii", "POST", "/v2/purchase", body);
+        assert_eq!(eval(&purchase(r#""40.00""#)), AccessLevel::Ask);
+        for large in [r#""100.01""#, r#""5000""#, "40", r#"" 40""#, r#""4e1""#, "null"] {
+            assert_eq!(eval(&purchase(large)), AccessLevel::AskAlways, "{large}");
+        }
+        assert_eq!(eval(r#"{"orderInfo": {"orderType": "BILL_PAY"}}"#), AccessLevel::AskAlways);
+        assert_eq!(
+            eval_compiled("snaplii", "POST", "/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
+            AccessLevel::AskAlways
+        );
+        assert_eq!(eval_compiled("snaplii", "POST", "/v2/quote", &purchase(r#""40.00""#)), AccessLevel::Allow);
+
+        let r = ServiceRegistry::load();
+        let def = r.get("snaplii").expect("snaplii service");
+        let bound = |path: &str, body: &str| {
+            def.extract_request_scope("POST", path, None, Some(body.as_bytes())).unwrap().bound
+        };
+        assert_eq!(
+            bound("/v2/purchase", &purchase(r#""40.00""#)),
+            vec![
+                ("item".to_string(), "CB_1".to_string()),
+                ("price".to_string(), "40.00".to_string()),
+                ("type".to_string(), "GIFT_CARD".to_string()),
+            ]
+        );
+        assert_eq!(
+            bound("/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
+            vec![
+                ("amount".to_string(), "12.50".to_string()),
+                ("to_phone".to_string(), "4165550006".to_string()),
+            ]
+        );
+    }
+
     /// Every Cloudflare change that can remove or re-point traffic is gated,
     /// in each spelling the API accepts (a trailing slash too); an approval
     /// binds the fields a record write sets.

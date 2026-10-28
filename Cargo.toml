@@ -104,7 +104,7 @@ percent-encoding = "2"
 # Policy `when` conditions are CEL (Common Expression Language, the rule
 # language of Kubernetes admission policies, Envoy RBAC and Google IAM), via
 # cel-rust.
-cel = { version = "0.15", default-features = false }
+cel = { version = "0.15", default-features = false, features = ["regex"] }
 urlencoding = "2"
 
 # Misc

@@ -4,7 +4,8 @@ Put the phantom in the bearer header; the broker exchanges the stored api key
 for a short-lived JWT at egress — neither ever enters the agent:
   sprott run -- curl https://aipayment.snaplii.com/v2/balance \\
     -H "Authorization: Bearer __sprott__snaplii__"
-Purchases (POST /v2/purchase) ask for approval by default.
+Purchases (POST /v2/purchase) and transfers (POST /v2/transfers) ask for
+approval by default.
 """
 
 [service]
@@ -29,18 +30,26 @@ secret_url = "https://www.snaplii.com/a2m/"
 [auth]
 type = "snaplii"
 
-# Request shapes (docs/REQUEST_SCOPE.md): a purchase's body fields become part
-# of what the user approves. `amount` drives the policy `when` (a large purchase
-# asks every time) AND, with `merchant`, binds the approval — so approving $80
-# to one merchant cannot be replayed as $180 or to a different merchant.
-#
-# CONFIRM AT E2E: the body JSON Pointers (`/amount`, `/merchant_id`) are
-# best-effort against Snaplii's A2M API; adjust to the live field names. A
-# mismatch degrades safely — an unresolved var just leaves the purchase at its
-# base `ask` with no field binding, never a bypass.
+# Request shapes: the fields that say what money moves become part of what the
+# user approves. Field names are Snaplii's OpenAPI spec (agent-to-merchant-
+# payments openapi.yaml, v0.20.2): a purchase is `orderInfo.item` with `price`
+# as a decimal string ("50.00") and `orderType` GIFT_CARD or BILL_PAY; a
+# transfer is `to_phone` + `amount` (decimal string). Approving one purchase
+# can't be replayed as another item, type or price.
 [requests.purchase]
 match = "POST /v2/purchase"
+vars.type  = "/orderInfo/orderType"
+vars.item  = "/orderInfo/item/itemId"
+vars.price = "/orderInfo/item/price"
+scope   = ["type", "item", "price"]
+consent = "Buy {{ vars.item }} ({{ vars.type }}) for {{ vars.price }}"
+
+# A P2P transfer sends wallet balance to a phone number once its short undo
+# window ends.
+[requests.transfer]
+match = "POST /v2/transfers"
+vars.to_phone = "/to_phone"
 vars.amount   = "/amount"
-vars.merchant = "/merchant_id"
-scope   = ["amount", "merchant"]
-consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
+vars.remark   = "/remark"
+scope   = ["to_phone", "amount", "remark"]
+consent = "Send {{ vars.amount }} to {{ vars.to_phone }}"

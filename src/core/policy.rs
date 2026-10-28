@@ -2110,8 +2110,10 @@ mod tests {
         assert!(Condition::parse("vars.amount == bare").is_none());
         assert!(Condition::parse("vars['amount'] > 1").is_none());
         // A function this build lacks is refused, not left to fail on every request.
-        assert!(Condition::compile("vars.model.matches('^o3')").is_err());
         assert!(Condition::compile("vars.model.startswith('o3')").is_err());
+        assert!(Condition::compile("vars.model.lowerAscii() == 'o3'").is_err());
+        // `matches` is CEL's standard RE2 function (cel's `regex` feature).
+        assert!(Condition::compile("vars.model.matches('^o3')").is_ok());
         assert!(Condition::compile("vars.model.startsWith('o3')").is_ok());
         assert!(Condition::compile("size(vars.fields) > 0 && vars.fields.exists(f, f == 'a')").is_ok());
         // A type test, and a number sent as text read either way.
