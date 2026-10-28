@@ -116,8 +116,6 @@ pub struct VaultRuntime {
     pub pending_rotations: Mutex<BTreeMap<(String, String), crate::state::PendingRotation>>,
     /// Retry timers of connect work left behind ([`crate::auth::retry`]).
     pub retries: Mutex<crate::auth::retry::Retries>,
-    pub pending_format_mark: AtomicBool,
-    pub pending_config_ids: Mutex<Vec<String>>,
     pub oauth_reauth_needed: Mutex<HashSet<String>>,
     pub live_ceremony_ops: Mutex<HashMap<String, String>>,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -155,8 +153,6 @@ impl VaultRuntime {
             catch_up_failure: Mutex::new(None),
             pending_rotations: Mutex::new(BTreeMap::new()),
             retries: Mutex::new(Default::default()),
-            pending_format_mark: AtomicBool::new(false),
-            pending_config_ids: Mutex::new(Vec::new()),
             oauth_reauth_needed: Mutex::new(HashSet::new()),
             live_ceremony_ops: Mutex::new(HashMap::new()),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
