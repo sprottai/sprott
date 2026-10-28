@@ -21,9 +21,9 @@ write = "allow"
 # Small-value convenience, big-value confirmation — the contactless-payment
 # social norm (no-verification ceilings: US ~$100, EU €50, UK £100). A purchase
 # at or under the threshold is `ask` (approve once, then a reuse window), and
-# it is BOUND to its exact item, type and price (service.toml
+# it is BOUND to its exact order, payment and delivery (service.toml
 # `[requests.purchase]`), so approving a $40 gift card can't be ridden by a
-# $75 bill payment (a different value re-prompts). Over the threshold
+# $75 bill payment or a gift to someone else (a different value re-prompts). Over the threshold
 # escalates to `ask-always` (every spend confirmed, single-use). To make even
 # small purchases frictionless (no tap at all), set this base to `allow`.
 [[rule]]

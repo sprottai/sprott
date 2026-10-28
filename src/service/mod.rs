@@ -2424,10 +2424,19 @@ secrets = ["GITHUB_TOKEN"]
             bound("/v2/purchase", &purchase(r#""40.00""#)),
             vec![
                 ("item".to_string(), "CB_1".to_string()),
+                (
+                    "order".to_string(),
+                    r#"{"item":{"itemId":"CB_1","price":"40.00"},"orderType":"GIFT_CARD"}"#.to_string()
+                ),
                 ("price".to_string(), "40.00".to_string()),
                 ("type".to_string(), "GIFT_CARD".to_string()),
             ]
         );
+        // A gift to someone else, or another payment method, is another approval.
+        let mine = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
+        let gift = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}, "orderContext": {{"giftOrder": "true"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
+        let scope = |body: &str| def.extract_request_scope("POST", "/v2/purchase", None, Some(body.as_bytes())).unwrap();
+        assert_ne!(scope(&mine).digest(), scope(&gift).digest());
         assert_eq!(
             bound("/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
             vec![
