@@ -2463,6 +2463,10 @@ secrets = ["GITHUB_TOKEN"]
         ] {
             assert_eq!(eval_compiled(service, method, path, body), AccessLevel::Ask, "{service} {method} {path}");
         }
+        for field in ["updateRefs", "addEnterpriseOrganizationMember"] {
+            let body = format!(r#"{{"query":"mutation {{ {field}(input: {{}}) {{ clientMutationId }} }}"}}"#);
+            assert_eq!(eval_compiled("github", "POST", "/graphql", &body), AccessLevel::AskAlways, "{field}");
+        }
         for field in ["workspacePolicyItemUpdate", "workspacePolicyDeploySourceAllowlistAdd", "workspacePolicyDeploySourceAllowlistRemove"] {
             let body = format!(r#"{{"query":"mutation {{ {field}(id: \"x\") }}"}}"#);
             assert_eq!(eval_compiled("railway", "POST", "/graphql/v2", &body), AccessLevel::AskAlways, "{field}");
