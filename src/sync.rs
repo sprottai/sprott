@@ -9580,3 +9580,8 @@ mod tests {
         assert!(active::load().unwrap().vault_deleted_upstream.is_none());
     }
 }
+
+/// A fresh daemon's adopt against `sprott_trust::adopt::fresh_keyset`, and the
+/// wasm crate's fixtures.
+#[cfg(test)]
+mod fresh_keyset_tests;

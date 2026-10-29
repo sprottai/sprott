@@ -18,9 +18,10 @@ name = "sprott"
 path = "src/main.rs"
 
 # The root package stays the daemon. `crates/sprott-trust` holds the membership
-# and signature rules, pure so the console can run them as wasm.
+# and signature rules, pure so the console can run them as wasm;
+# `crates/sprott-trust-wasm` is that wasm build.
 [workspace]
-members = ["crates/sprott-trust"]
+members = ["crates/sprott-trust", "crates/sprott-trust-wasm"]
 
 [dependencies]
 # Membership and signature rules (keyset types, role fold, row honoring,
