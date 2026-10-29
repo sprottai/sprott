@@ -28,7 +28,8 @@ secret_url = "https://railway.com/account/tokens"
 # that isn't a GraphQL request a server would run is refused, as the server
 # would refuse it.
 [requests.graphql]
-match = "POST /graphql/**"
+method = "POST"
+path = "/graphql/*"
 vars.request = { in = "graphql", at = "request" }
 vars.calls   = { in = "graphql", at = "calls" }
 vars.fields  = { in = "graphql", at = "fields" }

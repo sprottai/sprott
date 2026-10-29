@@ -38,7 +38,8 @@ type = "snaplii"
 # whole order, payment and delivery, so approving one purchase can't be
 # replayed as another item, price, recipient (a gift order) or payment method.
 [requests.purchase]
-match = "POST /v2/purchase"
+method = "POST"
+path = "/v2/purchase"
 vars.type     = "/orderInfo/orderType"
 vars.item     = "/orderInfo/item/itemId"
 vars.price    = "/orderInfo/item/price"
@@ -51,7 +52,8 @@ consent = "Buy {{ vars.item }} ({{ vars.type }}) for {{ vars.price }}"
 # A P2P transfer sends wallet balance to a phone number once its short undo
 # window ends.
 [requests.transfer]
-match = "POST /v2/transfers"
+method = "POST"
+path = "/v2/transfers"
 vars.to_phone = "/to_phone"
 vars.amount   = "/amount"
 vars.remark   = "/remark"

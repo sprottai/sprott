@@ -219,11 +219,24 @@ pub struct RegistryPolicyDefaults {
 pub struct RegistryPolicyRule {
     pub id: String,
     pub label: String,
-    /// Single pattern serializes as a bare string (registry.json stays stable for
-    /// one-match rules); a list serializes as a list (OR — see core `PolicyRule`).
+    /// Which requests the rule decides: `method` AND `path` (a URL Pattern
+    /// pathname), each a bare string when it holds one, a list (any of) when
+    /// several, omitted when absent (any).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "crate::core::selector::serialize_one_or_many"
+    )]
+    pub method: Vec<String>,
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "crate::core::selector::serialize_one_or_many"
+    )]
+    pub path: Vec<String>,
+    /// Display only, for consoles that read the 2.0 `match`: each method ×
+    /// path as `"METHOD path"`, a bare string when one, else a list.
     #[serde(
         rename = "match",
-        serialize_with = "crate::core::policy::match_spec::serialize"
+        serialize_with = "crate::core::selector::serialize_one_or_many"
     )]
     pub match_pattern: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -303,7 +316,9 @@ fn policy_for(def: &ServiceDef, include_rules: bool) -> Option<RegistryServicePo
             .map(|r| RegistryPolicyRule {
                 id: r.id.clone().unwrap_or_default(),
                 label: r.label.clone().unwrap_or_default(),
-                match_pattern: r.match_patterns.clone(),
+                method: r.select.methods().to_vec(),
+                path: r.select.paths(),
+                match_pattern: r.select.display(),
                 body: r.body.as_ref().map(|b| b.as_str().to_string()),
                 when: r.when.clone(),
                 level: level(r.level),
@@ -725,6 +740,38 @@ refresh_token = "REFRESH_TOKEN"
         assert_eq!(d.client_id, "acme-public");
         // The descriptor mirrors the def 1:1 — token_url rides too.
         assert_eq!(d.token_url.as_deref(), Some("https://auth.acme.dev/token"));
+    }
+
+    /// A catalog rule carries `method` and `path`, and the `match` text the
+    /// current console renders: each method × path as `"METHOD path"`.
+    #[test]
+    fn catalog_rules_carry_method_path_and_a_display_match() {
+        let services = crate::service::ServiceRegistry::load();
+        let github = services.get("github").expect("github");
+        let policy = policy_for(github, true).expect("policy");
+        let rules = serde_json::to_value(policy.rules.expect("rules")).unwrap();
+        let rule = |id: &str| {
+            rules
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        let delete = rule("delete-repo");
+        assert_eq!(delete["method"], serde_json::json!("DELETE"));
+        assert_eq!(
+            delete["path"],
+            serde_json::json!(["/repos/:owner/:repo", "/repositories/:repository_id"])
+        );
+        assert_eq!(
+            delete["match"],
+            serde_json::json!(["DELETE /repos/:owner/:repo", "DELETE /repositories/:repository_id"])
+        );
+        let graphql = rule("graphql-gated-mutations");
+        assert_eq!(graphql["path"], serde_json::json!("/graphql"));
+        assert_eq!(graphql["match"], serde_json::json!("POST /graphql"));
     }
 
     #[test]

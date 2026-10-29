@@ -10,12 +10,11 @@
 #
 # Endpoints are CircleCI API v2 (https://circleci.com/api/v2/openapi.json). A
 # project slug is `vcs-slug/org-name/repo-name` and either `/` may be
-# URL-escaped, so a slug spans one, two or three path segments and each rule
-# lists all three forms (`*` is one segment; `**` is only allowed last). The
+# URL-escaped, so a slug spans one, two or three path segments:
+# `:vcs{/:org}?{/:project}?` (an escaped `/` stays inside its segment). The
 # project endpoints CircleCI still documents under API v1.1 on the same host
 # (https://circleci.com/docs/api/v1/) are covered alongside their v2
-# counterparts; their `:vcs-type/:username/:project` is matched in the same
-# three forms.
+# counterparts; their `:vcs-type/:username/:project` is matched the same way.
 
 # CircleCI's API reads a `_method` field from a form or multipart POST body and
 # routes the request to that method's handler (probed 2026-10-29), so every
@@ -29,66 +28,49 @@ write = "allow"
 [[rule]]
 id = "trigger-pipeline"
 label = "Trigger, continue or rerun a pipeline or job (runs CI code)"
-match = [
-  "POST /api/v2/project/*/pipeline",
-  "POST /api/v2/project/*/*/pipeline",
-  "POST /api/v2/project/*/*/*/pipeline",
-  "POST /api/v2/project/*/pipeline/run",
-  "POST /api/v2/project/*/*/pipeline/run",
-  "POST /api/v2/project/*/*/*/pipeline/run",
-  "POST /api/v2/pipeline/continue",
-  "POST /api/v2/workflow/*/rerun",
+method = "POST"
+path = [
+  "/api/v2/project/:vcs{/:org}?{/:project}?/pipeline",
+  "/api/v2/project/:vcs{/:org}?{/:project}?/pipeline/run",
+  "/api/v2/pipeline/continue",
+  "/api/v2/workflow/:workflow/rerun",
   # v1.1: trigger a job, a job on a branch, a pipeline; retry a job.
-  "POST /api/v1.1/project/*",
-  "POST /api/v1.1/project/*/*",
-  "POST /api/v1.1/project/*/*/*",
-  "POST /api/v1.1/project/*/tree/**",
-  "POST /api/v1.1/project/*/*/tree/**",
-  "POST /api/v1.1/project/*/*/*/tree/**",
-  "POST /api/v1.1/project/*/build",
-  "POST /api/v1.1/project/*/*/build",
-  "POST /api/v1.1/project/*/*/*/build",
-  "POST /api/v1.1/project/*/*/retry",
-  "POST /api/v1.1/project/*/*/*/retry",
-  "POST /api/v1.1/project/*/*/*/*/retry",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/tree/*",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/build",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/:build_num/retry",
 ]
 level = "ask"
 
 [[rule]]
 id = "job-ssh"
 label = "Rerun a job with SSH access, or give a user SSH access to a job"
-match = [
-  "POST /api/v1.1/project/*/*/ssh",
-  "POST /api/v1.1/project/*/*/*/ssh",
-  "POST /api/v1.1/project/*/*/*/*/ssh",
-  "POST /api/v1.1/project/*/*/ssh-users",
-  "POST /api/v1.1/project/*/*/*/ssh-users",
-  "POST /api/v1.1/project/*/*/*/*/ssh-users",
+method = "POST"
+path = [
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/:build_num/ssh",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/:build_num/ssh-users",
 ]
 level = "ask"
 
 [[rule]]
 id = "schedule-pipeline"
 label = "Create or change a pipeline schedule or trigger"
-match = [
-  "POST /api/v2/project/*/schedule",
-  "POST /api/v2/project/*/*/schedule",
-  "POST /api/v2/project/*/*/*/schedule",
-  "PATCH /api/v2/schedule/*",
-  "POST /api/v2/schedule/*",
-  "POST /api/v2/projects/*/pipeline-definitions/*/triggers",
-  "PATCH /api/v2/projects/*/triggers/*",
-  "POST /api/v2/projects/*/triggers/*",
+method = ["POST", "PATCH"]
+path = [
+  "/api/v2/project/:vcs{/:org}?{/:project}?/schedule",
+  "/api/v2/schedule/:schedule",
+  "/api/v2/projects/:project_id/pipeline-definitions/:definition/triggers",
+  "/api/v2/projects/:project_id/triggers/:trigger",
 ]
 level = "ask"
 
 [[rule]]
 id = "pipeline-definition"
 label = "Create or change a pipeline definition (which config a project runs)"
-match = [
-  "POST /api/v2/projects/*/pipeline-definitions",
-  "PATCH /api/v2/projects/*/pipeline-definitions/*",
-  "POST /api/v2/projects/*/pipeline-definitions/*",
+method = ["POST", "PATCH"]
+path = [
+  "/api/v2/projects/:project_id/pipeline-definitions",
+  "/api/v2/projects/:project_id/pipeline-definitions/:definition",
 ]
 level = "ask"
 
@@ -96,44 +78,37 @@ level = "ask"
 [[rule]]
 id = "approve-job"
 label = "Approve a job that is waiting for approval (can release a held deploy)"
-match = ["POST /api/v2/workflow/*/approve/*"]
+method = "POST"
+path = "/api/v2/workflow/:workflow/approve/:approval"
 level = "ask"
 
 [[rule]]
 id = "rollback-project"
 label = "Roll back a project (runs its rollback pipeline)"
-match = ["POST /api/v2/projects/*/rollback"]
+method = "POST"
+path = "/api/v2/projects/:project_id/rollback"
 level = "ask"
 
 # ── Plant a secret or key the build will read ────────────────────────────────
 [[rule]]
 id = "create-env-var"
 label = "Create or overwrite a project or context environment variable"
-match = [
-  "POST /api/v2/project/*/envvar",
-  "POST /api/v2/project/*/*/envvar",
-  "POST /api/v2/project/*/*/*/envvar",
-  "PUT /api/v2/context/*/environment-variable/*",
-  "POST /api/v2/context/*/environment-variable/*",
-  "POST /api/v1.1/project/*/envvar",
-  "POST /api/v1.1/project/*/*/envvar",
-  "POST /api/v1.1/project/*/*/*/envvar",
+method = ["POST", "PUT"]
+path = [
+  "/api/v2/project/:vcs{/:org}?{/:project}?/envvar",
+  "/api/v2/context/:context/environment-variable/:name",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/envvar",
 ]
 level = "ask"
 
 [[rule]]
 id = "add-project-key"
 label = "Add a checkout key or SSH key to a project"
-match = [
-  "POST /api/v2/project/*/checkout-key",
-  "POST /api/v2/project/*/*/checkout-key",
-  "POST /api/v2/project/*/*/*/checkout-key",
-  "POST /api/v1.1/project/*/checkout-key",
-  "POST /api/v1.1/project/*/*/checkout-key",
-  "POST /api/v1.1/project/*/*/*/checkout-key",
-  "POST /api/v1.1/project/*/ssh-key",
-  "POST /api/v1.1/project/*/*/ssh-key",
-  "POST /api/v1.1/project/*/*/*/ssh-key",
+method = "POST"
+path = [
+  "/api/v2/project/:vcs{/:org}?{/:project}?/checkout-key",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/checkout-key",
+  "/api/v1.1/project/:vcs{/:org}?{/:project}?/ssh-key",
 ]
 level = "ask"
 
@@ -141,26 +116,17 @@ level = "ask"
 [[rule]]
 id = "project-settings"
 label = "Change a project's advanced settings"
-match = [
-  "PATCH /api/v2/project/*/settings",
-  "POST /api/v2/project/*/settings",
-  "PATCH /api/v2/project/*/*/settings",
-  "POST /api/v2/project/*/*/settings",
-  "PATCH /api/v2/project/*/*/*/settings",
-  "POST /api/v2/project/*/*/*/settings",
-]
+method = ["PATCH", "POST"]
+path = "/api/v2/project/:vcs{/:org}?{/:project}?/settings"
 level = "ask"
 
 [[rule]]
 id = "oidc-claims"
 label = "Change the custom claims in CircleCI's OIDC tokens for an organization or project"
-match = [
-  "PATCH /api/v2/org/*/oidc-custom-claims",
-  "POST /api/v2/org/*/oidc-custom-claims",
-  "PATCH /api/v2/org/*/project/*/oidc-custom-claims",
-  "POST /api/v2/org/*/project/*/oidc-custom-claims",
-  "DELETE /api/v2/org/*/oidc-custom-claims",
-  "DELETE /api/v2/org/*/project/*/oidc-custom-claims",
+method = ["PATCH", "POST", "DELETE"]
+path = [
+  "/api/v2/org/:org_id/oidc-custom-claims",
+  "/api/v2/org/:org_id/project/:project_id/oidc-custom-claims",
 ]
 level = "ask"
 
@@ -169,5 +135,6 @@ level = "ask"
 [[rule]]
 id = "remove-context-restriction"
 label = "Remove a restriction on who can use a context"
-match = ["DELETE /api/v2/context/*/restrictions/*", "POST /api/v2/context/*/restrictions/*"]
+method = ["DELETE", "POST"]
+path = "/api/v2/context/:context/restrictions/:restriction"
 level = "ask"

@@ -7,3 +7,4 @@ pub mod forward;
 pub mod host;
 pub mod path;
 pub mod policy;
+pub mod selector;

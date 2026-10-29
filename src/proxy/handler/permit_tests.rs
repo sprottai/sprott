@@ -103,11 +103,10 @@ impl Vault {
             p.connections.entry(conn.to_string()).or_default().rules.insert(
                 id.to_string(),
                 RuleConfig {
-                    match_pattern: Some(pattern.to_string()),
                     body: body.map(crate::core::policy::BodyPattern::lenient),
                     level: Some(level),
                     ttl: Some(600),
-                    ..Default::default()
+                    ..RuleConfig::selecting(pattern)
                 },
             );
         })
@@ -416,7 +415,8 @@ name = "Acme"
 hosts = ["api.acme.dev"]
 secrets = ["ACME_TOKEN", "ACME_ID"]
 [requests.buy]
-match = "POST /buy"
+method = "POST"
+path = "/buy"
 vars.amount = "/amount"
 scope = ["amount"]
 [[policy.rules]]

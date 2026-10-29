@@ -20,7 +20,8 @@ write = "allow"
 [[rule]]
 id = "delete-infra"
 label = "Delete or overwrite a workspace, project, service, environment, volume or the account"
-match = "POST /graphql/**"
+method = "POST"
+path = "/graphql/*"
 when = "vars.fields.exists(f, f in ['workspaceDelete', 'projectDelete', 'serviceDelete', 'environmentDelete', 'volumeDelete', 'volumeInstanceBackupDelete', 'userDelete', 'projectScheduleDelete', 'projectScheduleDeleteForce', 'volumeInstanceBackupRestore', 'signalDelete', 'sandboxDestroy', 'templateDelete', 'cloudAgentDelete', 'integrationDelete', 'providerAuthRemove'])"
 level = "ask-always"
 
@@ -37,14 +38,16 @@ level = "ask-always"
 [[rule]]
 id = "delete-via-config"
 label = "Delete a service, volume or bucket through an environment change"
-match = "POST /graphql/**"
+method = "POST"
+path = "/graphql/*"
 when = "vars.fields.exists(f, f == 'environmentApplyChangeSet') || vars.fields.exists(f, f in ['environmentPatchCommit', 'environmentStageChanges']) && vars.request.contains('\"isDeleted\":true')"
 level = "ask-always"
 
 [[rule]]
 id = "mint-token"
 label = "Mint an API or access token"
-match = "POST /graphql/**"
+method = "POST"
+path = "/graphql/*"
 when = "vars.fields.exists(f, f in ['projectTokenCreate', 'apiTokenCreate', 'clearanceTokenCreate'])"
 level = "ask-always"
 
@@ -55,6 +58,7 @@ level = "ask-always"
 [[rule]]
 id = "change-access"
 label = "Add or remove a member, change a role or a limit, transfer ownership, open a shell, reset credentials, or change sign-in security"
-match = "POST /graphql/**"
+method = "POST"
+path = "/graphql/*"
 when = "vars.fields.exists(f, f in ['projectMemberAdd', 'projectMemberUpdate', 'projectInviteUser', 'projectTransfer', 'projectTransferInitiate', 'projectTransferConfirm', 'workspaceUserInvite', 'workspaceInviteCodeCreate', 'workspacePermissionChange', 'accessGroupMemberAdd', 'accessGroupProjectAttach', 'sshPublicKeyCreate', 'generateShellToken', 'passkeyDelete', 'twoFactorInfoDelete', 'workspaceTwoFactorEnforcementUpdate', 'projectMemberRemove', 'projectLeave', 'workspaceUserRemove', 'workspaceLeave', 'workspaceInviteCodeUse', 'inviteCodeUse', 'accessGroupUpdate', 'accessGroupDelete', 'accessGroupMemberRemove', 'accessGroupProjectDetach', 'twoFactorInfoCreate', 'twoFactorInfoSecret', 'databasePasswordReset', 'bucketCredentialsReset', 'usageLimitRemove', 'sshSignupApprove', 'usageLimitSet', 'agentUsageLimitSet', 'workspacePolicyDeploySourceAllowlistAdd', 'workspacePolicyDeploySourceAllowlistRemove', 'workspacePolicyItemUpdate'])"
 level = "ask-always"

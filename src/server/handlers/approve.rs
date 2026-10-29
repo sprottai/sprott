@@ -3656,10 +3656,9 @@ mod tests {
     fn reuse_policy() -> crate::core::policy::Policy {
         use crate::core::policy::{AccessLevel, ConnectionPolicy, Levels, Policy, RuleConfig};
         let rule = |pat: &str, level: AccessLevel, ttl: Option<u64>| RuleConfig {
-            match_pattern: Some(pat.to_string()),
             level: Some(level),
             ttl,
-            ..Default::default()
+            ..RuleConfig::selecting(pat)
         };
         let mut rules = std::collections::HashMap::new();
         rules.insert(

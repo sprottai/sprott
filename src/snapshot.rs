@@ -317,7 +317,7 @@ impl PolicyInputs {
                 let vars: BTreeMap<&String, String> =
                     s.vars.iter().map(|(k, v)| (k, format!("{:?}", v))).collect();
                 let mut shape = Map::new();
-                shape.insert("match".into(), to_value(&s.match_pattern)?);
+                shape.insert("select".into(), to_value(&s.select)?);
                 shape.insert("vars".into(), to_value(vars)?);
                 shape.insert("scope".into(), to_value(&s.scope)?);
                 shape.insert("consent".into(), to_value(&s.consent)?);

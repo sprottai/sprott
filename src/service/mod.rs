@@ -250,10 +250,7 @@ impl ServiceDef {
         names.sort();
         names.into_iter().find_map(|n| {
             let s = &self.requests[n];
-            s.match_pattern
-                .iter()
-                .any(|p| crate::core::policy::pattern_matches(p, method, path))
-                .then_some((n, s))
+            s.select.exec(method, path).is_some().then_some((n, s))
         })
     }
 
@@ -542,29 +539,21 @@ pub struct ConnectDescriptor {
 
 // ── Request shapes: `[requests.<name>]` (design/request-scope.md) ──────────────
 
-/// One request shape: a method+path matcher plus the body/query fields it
-/// exposes (`vars`), which of them bind the grant (`scope`), and how to phrase
-/// the action for a human (`consent`). `deny_unknown_fields` so a typo is a
-/// parse error, not a silently-ignored field.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One request shape, as the gate compiled it: which requests it reads
+/// (`method` and `path`, the same selector a policy rule has) plus the
+/// body/query fields it exposes (`vars`), which of them bind the grant
+/// (`scope`), and how to phrase the action for a human (`consent`).
+#[derive(Debug, Clone)]
 pub struct RequestShape {
-    /// `"METHOD /path"` (or `"/path"`), or a list = OR. Same grammar / serde as
-    /// a policy rule's `match`.
-    #[serde(
-        rename = "match",
-        deserialize_with = "crate::core::policy::match_spec::deserialize"
-    )]
-    pub match_pattern: Vec<String>,
+    /// Which requests it reads ([`crate::core::selector`]).
+    pub select: crate::core::selector::Select,
     /// `name → address`. A bare string addresses a body JSON Pointer; the table
     /// form `{ in = "query", at = "<param>" }` addresses a query parameter, and
     /// `{ in = "graphql", at = "request" | "calls" | "fields" }` reads the body
     /// as the GraphQL operation a server would run (graphql.rs).
-    #[serde(default)]
     pub vars: HashMap<String, VarDef>,
     /// The subset of `vars` whose VALUES bind the grant identity. Absent/empty ⇒
     /// nothing bound (P5). Whitelist only in v1.
-    #[serde(default)]
     pub scope: Vec<String>,
     /// The approval-screen phrasing: a template over the bound vars, using the
     /// SAME `{{ vars.x | filter }}` pipe syntax as git-integration's
@@ -577,7 +566,6 @@ pub struct RequestShape {
     /// `vars.<name>` must be in `scope` (P4 show ⊆ bind, build-checked); a filter
     /// reads ONLY that bound value. Interpolated values are auto-escaped by the
     /// renderer (they come from the agent).
-    #[serde(default)]
     pub consent: Option<String>,
 }
 
@@ -1498,10 +1486,7 @@ level = "ask"
         assert_eq!(sl.read, Some(AccessLevel::Deny));
         assert_eq!(sl.write, Some(AccessLevel::AskAlways));
         assert_eq!(p.rules.len(), 1);
-        assert_eq!(
-            p.rules[0].match_patterns,
-            vec!["delete /v1/things".to_string()]
-        );
+        assert_eq!(p.rules[0].select.display(), ["DELETE /v1/things"]);
         assert_eq!(p.rules[0].level, Some(AccessLevel::Ask));
         // A lowercase method word is a method at this rule source too.
         let mut services = HashMap::new();
@@ -1617,7 +1602,7 @@ level = "allow"
         assert!(rules.iter().any(|r| r.id.as_deref() == Some("delete-repo")));
         // An override whose own policy.toml is given uses it instead.
         let own =
-            "[[rule]]\nid = \"only\"\nlabel = \"Only\"\nmatch = \"DELETE /x\"\nlevel = \"deny\"\n";
+            "[[rule]]\nid = \"only\"\nlabel = \"Only\"\nmethod = \"DELETE\"\npath = \"/x\"\nlevel = \"deny\"\n";
         assert!(ServiceRegistry::admit_dir(
             ("github".into(), Ok(svc.clone()), Some(Ok(own.to_string()))),
             &mut services,
@@ -1628,7 +1613,7 @@ level = "allow"
         let mut services = compiled.services.clone();
         let mut texts: HashMap<String, String> = [(
             "github".to_string(),
-            "[[rule]]\nid = \"w\"\nlabel = \"W\"\nmatch = \"POST /x\"\nwhen = \"vars.amount > 1\"\nlevel = \"deny\"\n".to_string(),
+            "[[rule]]\nid = \"w\"\nlabel = \"W\"\nmethod = \"POST\"\npath = \"/x\"\nwhen = \"vars.amount > 1\"\nlevel = \"deny\"\n".to_string(),
         )]
         .into_iter()
         .collect();
@@ -2900,7 +2885,8 @@ secrets = ["SNAPLII_API_KEY"]
 [auth]
 type = "snaplii"
 [requests.purchase]
-match = "POST /v2/purchase"
+method = "POST"
+path = "/v2/purchase"
 vars.amount   = "/amount"
 vars.merchant = "/merchant_id"
 vars.force    = { in = "query", at = "force" }

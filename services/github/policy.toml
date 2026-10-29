@@ -22,33 +22,44 @@ write = "allow"
 [[rule]]
 id = "delete-repo"
 label = "Delete repository"
-match = ["DELETE /repos/*/*", "DELETE /repositories/*"]
+method = "DELETE"
+path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
 level = "ask-always"
 
 [[rule]]
 id = "transfer-repo"
 label = "Transfer repository to a new owner"
-match = ["POST /repos/*/*/transfer", "POST /repositories/*/transfer"]
+method = "POST"
+path = ["/repos/:owner/:repo/transfer", "/repositories/:repository_id/transfer"]
 level = "ask-always"
 
 # ── Change who can access (security posture) ─────────────────────────────────
 [[rule]]
 id = "make-public"
 label = "Make repository public"
-match = ["PATCH /repos/*/*", "PATCH /repositories/*", "POST /repos/*/*", "POST /repositories/*"]
+method = ["PATCH", "POST"]
+path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
 when = "vars.private == false || vars.visibility == 'public'"
 level = "ask-always"
 
 [[rule]]
 id = "add-collaborator"
 label = "Add or change a collaborator"
-match = ["PUT /repos/*/*/collaborators/*", "PUT /repositories/*/collaborators/*"]
+method = "PUT"
+path = [
+  "/repos/:owner/:repo/collaborators/:username",
+  "/repositories/:repository_id/collaborators/:username",
+]
 level = "ask-always"
 
 [[rule]]
 id = "remove-collaborator"
 label = "Remove a collaborator"
-match = ["DELETE /repos/*/*/collaborators/*", "DELETE /repositories/*/collaborators/*"]
+method = "DELETE"
+path = [
+  "/repos/:owner/:repo/collaborators/:username",
+  "/repositories/:repository_id/collaborators/:username",
+]
 level = "ask-always"
 
 [[rule]]
@@ -57,114 +68,139 @@ label = "Change branch protection (or rename a branch)"
 # Protection settings take PUT, PATCH and POST on sub-resources
 # (required_pull_request_reviews, restrictions/users, enforce_admins, …);
 # POST also renames a branch (…/rename), which this gates too.
-match = [
-  "PUT /repos/*/*/branches/**", "PUT /repositories/*/branches/**",
-  "PATCH /repos/*/*/branches/**", "PATCH /repositories/*/branches/**",
-  "POST /repos/*/*/branches/**", "POST /repositories/*/branches/**",
-]
+method = ["PUT", "PATCH", "POST"]
+path = ["/repos/:owner/:repo/branches/*", "/repositories/:repository_id/branches/*"]
 level = "ask-always"
 
 [[rule]]
 id = "remove-branch-protection"
 label = "Remove branch protection"
-match = ["DELETE /repos/*/*/branches/**", "DELETE /repositories/*/branches/**"]
+method = "DELETE"
+path = ["/repos/:owner/:repo/branches/*", "/repositories/:repository_id/branches/*"]
 level = "ask-always"
 
 [[rule]]
 id = "change-ruleset"
 label = "Create, change or delete a ruleset"
-match = [
-  "POST /repos/*/*/rulesets", "PUT /repos/*/*/rulesets/*", "DELETE /repos/*/*/rulesets/*",
-  "POST /repositories/*/rulesets", "PUT /repositories/*/rulesets/*", "DELETE /repositories/*/rulesets/*",
-  "POST /orgs/*/rulesets", "PUT /orgs/*/rulesets/*", "DELETE /orgs/*/rulesets/*",
-  "POST /organizations/*/rulesets", "PUT /organizations/*/rulesets/*", "DELETE /organizations/*/rulesets/*",
+method = ["POST", "PUT", "DELETE"]
+path = [
+  "/repos/:owner/:repo/rulesets", "/repos/:owner/:repo/rulesets/:ruleset_id",
+  "/repositories/:repository_id/rulesets", "/repositories/:repository_id/rulesets/:ruleset_id",
+  "/orgs/:org/rulesets", "/orgs/:org/rulesets/:ruleset_id",
+  "/organizations/:org_id/rulesets", "/organizations/:org_id/rulesets/:ruleset_id",
 ]
 level = "ask-always"
 
 [[rule]]
 id = "change-org-access"
 label = "Change who is in an organization or a team, or a team's access to a repository"
-match = [
-  "PUT /orgs/*/memberships/*", "DELETE /orgs/*/memberships/*", "DELETE /orgs/*/members/*",
-  "POST /orgs/*/invitations",
-  "PUT /orgs/*/outside_collaborators/*", "DELETE /orgs/*/outside_collaborators/*",
-  "PUT /orgs/*/teams/*/memberships/*", "DELETE /orgs/*/teams/*/memberships/*",
-  "PUT /orgs/*/teams/*/repos/*/*", "DELETE /orgs/*/teams/*/repos/*/*",
-  "PUT /teams/*/repos/*/*", "DELETE /teams/*/repos/*/*",
-  "PUT /organizations/*/memberships/*", "DELETE /organizations/*/memberships/*", "DELETE /organizations/*/members/*",
-  "POST /organizations/*/invitations",
-  "PUT /organizations/*/outside_collaborators/*", "DELETE /organizations/*/outside_collaborators/*",
-  "PUT /organizations/*/teams/*/memberships/*", "DELETE /organizations/*/teams/*/memberships/*",
-  "PUT /organizations/*/teams/*/repos/*/*", "DELETE /organizations/*/teams/*/repos/*/*",
+method = ["PUT", "DELETE", "POST"]
+path = [
+  "/orgs/:org/:collection(memberships|members|outside_collaborators)/:username",
+  "/orgs/:org/invitations",
+  "/orgs/:org/teams/:team_slug/memberships/:username",
+  "/orgs/:org/teams/:team_slug/repos/:owner/:repo",
+  "/organizations/:org_id/:collection(memberships|members|outside_collaborators)/:username",
+  "/organizations/:org_id/invitations",
+  "/organizations/:org_id/teams/:team_slug/memberships/:username",
+  "/organizations/:org_id/teams/:team_slug/repos/:owner/:repo",
+  "/teams/:team_id/repos/:owner/:repo",
 ]
 level = "ask-always"
 
 [[rule]]
 id = "add-deploy-key"
 label = "Add a deploy key"
-match = ["POST /repos/*/*/keys", "POST /repositories/*/keys"]
+method = "POST"
+path = ["/repos/:owner/:repo/keys", "/repositories/:repository_id/keys"]
 level = "ask-always"
 
 # ── Supply chain / code execution (CI runs arbitrary code; exfil surface) ────
 [[rule]]
 id = "add-webhook"
 label = "Add a webhook"
-match = ["POST /repos/*/*/hooks", "POST /repositories/*/hooks", "POST /orgs/*/hooks", "POST /organizations/*/hooks"]
+method = "POST"
+path = [
+  "/repos/:owner/:repo/hooks", "/repositories/:repository_id/hooks",
+  "/orgs/:org/hooks", "/organizations/:org_id/hooks",
+]
 level = "ask-always"
 
 [[rule]]
 id = "edit-webhook"
 label = "Edit a webhook"
-match = [
-  "PATCH /repos/*/*/hooks/*", "PATCH /repositories/*/hooks/*", "POST /repos/*/*/hooks/*", "POST /repositories/*/hooks/*",
-  "PATCH /repos/*/*/hooks/*/config", "PATCH /repositories/*/hooks/*/config",
-  "PATCH /orgs/*/hooks/*", "PATCH /orgs/*/hooks/*/config", "PATCH /organizations/*/hooks/*", "PATCH /organizations/*/hooks/*/config",
+method = ["PATCH", "POST"]
+path = [
+  "/repos/:owner/:repo/hooks/:hook_id", "/repos/:owner/:repo/hooks/:hook_id/config",
+  "/repositories/:repository_id/hooks/:hook_id", "/repositories/:repository_id/hooks/:hook_id/config",
+  "/orgs/:org/hooks/:hook_id", "/orgs/:org/hooks/:hook_id/config",
+  "/organizations/:org_id/hooks/:hook_id", "/organizations/:org_id/hooks/:hook_id/config",
 ]
 level = "ask-always"
 
 [[rule]]
 id = "set-actions-secret"
 label = "Set a repository secret (Actions, Dependabot, Codespaces, agents, environments)"
-# `/repos/*/*/*/secrets/*`: the third segment is actions, dependabot,
-# codespaces or agents; each kind is read by code that runs for the repo.
-match = [
-  "PUT /repos/*/*/*/secrets/*", "PUT /repositories/*/*/secrets/*",
-  "PUT /repos/*/*/environments/*/secrets/*", "PUT /repositories/*/environments/*/secrets/*",
+# `:kind` is actions, dependabot, codespaces or agents; each kind is read by
+# code that runs for the repo.
+method = "PUT"
+path = [
+  "/repos/:owner/:repo/:kind/secrets/:secret_name",
+  "/repositories/:repository_id/:kind/secrets/:secret_name",
+  "/repos/:owner/:repo/environments/:environment/secrets/:secret_name",
+  "/repositories/:repository_id/environments/:environment/secrets/:secret_name",
 ]
 level = "ask-always"
 
 [[rule]]
 id = "set-org-actions-secret"
 label = "Set an org or user secret, or which repositories can read it"
-# `/orgs/*/*/secrets/*`: actions, dependabot, codespaces or agents. The
-# `repositories` sub-paths decide which repositories can read the secret.
-match = [
-  "PUT /orgs/*/*/secrets/*", "PUT /orgs/*/*/secrets/*/repositories", "PUT /orgs/*/*/secrets/*/repositories/*",
-  "PUT /organizations/*/*/secrets/*", "PUT /organizations/*/*/secrets/*/repositories", "PUT /organizations/*/*/secrets/*/repositories/*",
-  "PUT /user/codespaces/secrets/*", "PUT /user/codespaces/secrets/*/repositories", "PUT /user/codespaces/secrets/*/repositories/*",
+# `:kind` is actions, dependabot, codespaces or agents. The `repositories`
+# sub-paths decide which repositories can read the secret.
+method = "PUT"
+path = [
+  "/orgs/:org/:kind/secrets/:secret_name",
+  "/orgs/:org/:kind/secrets/:secret_name/repositories",
+  "/orgs/:org/:kind/secrets/:secret_name/repositories/:repository_id",
+  "/organizations/:org_id/:kind/secrets/:secret_name",
+  "/organizations/:org_id/:kind/secrets/:secret_name/repositories",
+  "/organizations/:org_id/:kind/secrets/:secret_name/repositories/:repository_id",
+  "/user/codespaces/secrets/:secret_name",
+  "/user/codespaces/secrets/:secret_name/repositories",
+  "/user/codespaces/secrets/:secret_name/repositories/:repository_id",
 ]
 level = "ask-always"
 
 [[rule]]
 id = "dispatch-workflow"
 label = "Trigger a workflow run"
-match = ["POST /repos/*/*/actions/workflows/*/dispatches", "POST /repositories/*/actions/workflows/*/dispatches"]
+method = "POST"
+path = [
+  "/repos/:owner/:repo/actions/workflows/:workflow_id/dispatches",
+  "/repositories/:repository_id/actions/workflows/:workflow_id/dispatches",
+]
 level = "ask-always"
 
 [[rule]]
 id = "repo-dispatch"
 label = "Trigger a repository_dispatch event"
-match = ["POST /repos/*/*/dispatches", "POST /repositories/*/dispatches"]
+method = "POST"
+path = ["/repos/:owner/:repo/dispatches", "/repositories/:repository_id/dispatches"]
 level = "ask-always"
 
 [[rule]]
 id = "register-runner"
 label = "Register a self-hosted runner"
-match = [
-  "POST /repos/*/*/actions/runners/registration-token", "POST /repositories/*/actions/runners/registration-token",
-  "POST /repos/*/*/actions/runners/generate-jitconfig", "POST /repositories/*/actions/runners/generate-jitconfig",
-  "POST /orgs/*/actions/runners/registration-token", "POST /organizations/*/actions/runners/registration-token",
-  "POST /orgs/*/actions/runners/generate-jitconfig", "POST /organizations/*/actions/runners/generate-jitconfig",
+method = "POST"
+path = [
+  "/repos/:owner/:repo/actions/runners/registration-token",
+  "/repositories/:repository_id/actions/runners/registration-token",
+  "/repos/:owner/:repo/actions/runners/generate-jitconfig",
+  "/repositories/:repository_id/actions/runners/generate-jitconfig",
+  "/orgs/:org/actions/runners/registration-token",
+  "/organizations/:org_id/actions/runners/registration-token",
+  "/orgs/:org/actions/runners/generate-jitconfig",
+  "/organizations/:org_id/actions/runners/generate-jitconfig",
 ]
 level = "ask-always"
 
@@ -172,13 +208,18 @@ level = "ask-always"
 [[rule]]
 id = "delete-branch"
 label = "Delete a branch or tag"
-match = ["DELETE /repos/*/*/git/refs/**", "DELETE /repositories/*/git/refs/**"]
+method = "DELETE"
+path = ["/repos/:owner/:repo/git/refs/*", "/repositories/:repository_id/git/refs/*"]
 level = "ask"
 
 [[rule]]
 id = "delete-release"
 label = "Delete a release"
-match = ["DELETE /repos/*/*/releases/*", "DELETE /repositories/*/releases/*"]
+method = "DELETE"
+path = [
+  "/repos/:owner/:repo/releases/:release_id",
+  "/repositories/:repository_id/releases/:release_id",
+]
 level = "ask"
 
 # ── The same gates over GraphQL ──────────────────────────────────────────────
@@ -190,6 +231,7 @@ level = "ask"
 [[rule]]
 id = "graphql-gated-mutations"
 label = "Change branch protection or rulesets, change who can access, or delete a branch (GraphQL)"
-match = "POST /graphql"
+method = "POST"
+path = "/graphql"
 when = "vars.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef', 'updateRefs', 'addEnterpriseOrganizationMember'])"
 level = "ask-always"

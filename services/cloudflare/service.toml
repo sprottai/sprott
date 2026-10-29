@@ -24,13 +24,26 @@ secret_url = "https://dash.cloudflare.com/profile/api-tokens"
 # DNS record writes. The card lists the fields a request sets (a PATCH sets only
 # some) and an approval binds them, so an approved change can't be replayed
 # with a different target. comment and tags are left out: they don't change
-# what the record answers.
+# what the record answers. A change to a record and a new record are two
+# shapes: a POST under a record's path (`dns_records/import`, a BIND file) is
+# not a record write.
 [requests.dns_record]
-match = [
-  "POST /client/v4/zones/*/dns_records",
-  "PUT /client/v4/zones/*/dns_records/*",
-  "PATCH /client/v4/zones/*/dns_records/*",
-]
+method = ["PUT", "PATCH"]
+path = "/client/v4/zones/:zone/dns_records/:record"
+vars.type            = "/type"
+vars.name            = "/name"
+vars.content         = "/content"
+vars.data            = "/data"
+vars.priority        = "/priority"
+vars.proxied         = "/proxied"
+vars.ttl             = "/ttl"
+vars.settings        = "/settings"
+vars.private_routing = "/private_routing"
+scope = ["type", "name", "content", "data", "priority", "proxied", "ttl", "settings", "private_routing"]
+
+[requests.dns_record_create]
+method = "POST"
+path = "/client/v4/zones/:zone/dns_records"
 vars.type            = "/type"
 vars.name            = "/name"
 vars.content         = "/content"
@@ -45,7 +58,8 @@ scope = ["type", "name", "content", "data", "priority", "proxied", "ttl", "setti
 # One batch request deletes, updates, overwrites and creates records, in that
 # order.
 [requests.dns_batch]
-match = "POST /client/v4/zones/*/dns_records/batch"
+method = "POST"
+path = "/client/v4/zones/:zone/dns_records/batch"
 vars.deletes = "/deletes"
 vars.patches = "/patches"
 vars.puts    = "/puts"

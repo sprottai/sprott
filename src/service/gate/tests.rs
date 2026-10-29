@@ -25,6 +25,15 @@ fn mentions(errs: &[String], needle: &str) -> bool {
     errs.iter().any(|e| e.contains(needle))
 }
 
+/// `"METHOD /path"` or `"/path"` as the `method` and `path` lines of a rule
+/// or a shape.
+fn sel(spec: &str) -> String {
+    match spec.split_once(' ') {
+        Some((m, p)) => format!("method = \"{m}\"\npath = \"{p}\"\n"),
+        None => format!("path = \"{spec}\"\n"),
+    }
+}
+
 // ── compiled-in definitions ──────────────────────────────────────────────────
 
 /// Every compiled service, with its policy.toml, passes the gate under its
@@ -288,15 +297,15 @@ fn unknown_fields_are_rejected_everywhere() {
     assert!(mentions(&e, "unknown field at line"), "{e:?}");
     // [requests] shape, and the table form of a var.
     let req =
-        "[requests.buy]\nmatch = \"POST /buy\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n";
+        "[requests.buy]\nmethod = \"POST\"\npath = \"/buy\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n";
     ok(&format!("{GITHUB}{req}"));
     rejected(&format!("{GITHUB}{req}scopes = [\"amount\"]\n"));
     rejected(&format!(
-        "{GITHUB}[requests.buy]\nmatch = \"POST /buy\"\nvars.f = {{ in = \"query\", at = \"f\", as = \"int\" }}\n"
+        "{GITHUB}[requests.buy]\nmethod = \"POST\"\npath = \"/buy\"\nvars.f = {{ in = \"query\", at = \"f\", as = \"int\" }}\n"
     ));
     // policy.toml: top level, [default], [[rule]].
     let rule =
-        "[[rule]]\nid = \"del\"\nlabel = \"Delete\"\nmatch = \"DELETE /x\"\nlevel = \"ask\"\n";
+        "[[rule]]\nid = \"del\"\nlabel = \"Delete\"\nmethod = \"DELETE\"\npath = \"/x\"\nlevel = \"ask\"\n";
     assert!(admit(None, GITHUB, Some(rule)).is_ok());
     rejected_with(GITHUB, &format!("{rule}[extra]\na = 1\n"));
     rejected_with(
@@ -484,7 +493,8 @@ name = "Pay"
 hosts = ["api.pay.com"]
 secrets = ["PAY_KEY"]
 [requests.purchase]
-match = "POST /buy"
+method = "POST"
+path = "/buy"
 vars.amount = "/amount"
 scope = ["amount"]
 consent = "Spend {{ vars.amount }}"
@@ -506,21 +516,43 @@ fn requests_shapes_are_checked() {
     assert!(mentions(&e, "more than once"));
     let e = rejected(&REQ_SERVICE.replace("vars.amount = \"/amount\"", "vars.amount = \"amount\""));
     assert!(mentions(&e, "must be a JSON Pointer"));
-    // A match that could never match a request.
-    for bad in ["/buy?x=1", "buy", "POST  buy", "POST /a/**/b", "/a b"] {
-        let e = rejected(
-            &REQ_SERVICE.replace("match = \"POST /buy\"", &format!("match = \"{}\"", bad)),
-        );
-        assert!(mentions(&e, "match"), "{bad}: {e:?}");
+    // A 2.0 `match` is refused, with the replacement spelled out.
+    let e = rejected(&REQ_SERVICE.replace("method = \"POST\"\npath = \"/buy\"", "match = \"POST /buy\""));
+    assert!(mentions(&e, "[requests.purchase]: `match` is not read; use method = \"DELETE\" and path = \"/v1/x/:id\""), "{e:?}");
+    let e = rejected(&REQ_SERVICE.replace("method = \"POST\"", "match = \"POST /buy\"\nmethod = \"POST\""));
+    assert!(mentions(&e, "`match` is not read"), "{e:?}");
+    // A path that could never match a request, or a 2.0 glob.
+    for (bad, why) in [
+        ("buy", "must start with '/'"),
+        ("/buy?x=1", "is not a URL Pattern pathname"),
+        ("/a/**/b", "'**'"),
+        ("/a/*/b", "write ':name' for one segment"),
+        ("/buy/", "ends with '/'"),
+        ("/a/:", "is not a URL Pattern pathname"),
+    ] {
+        let e = rejected(&REQ_SERVICE.replace("path = \"/buy\"", &format!("path = \"{}\"", bad)));
+        assert!(mentions(&e, why), "{bad}: {e:?}");
     }
-    rejected(&REQ_SERVICE.replace("match = \"POST /buy\"", "match = []"));
+    for (bad, why) in [("GE T", "not an HTTP method token"), ("", "not an HTTP method token")] {
+        let e = rejected(&REQ_SERVICE.replace("method = \"POST\"", &format!("method = \"{}\"", bad)));
+        assert!(mentions(&e, why), "{bad}: {e:?}");
+    }
+    let e = rejected(&REQ_SERVICE.replace("method = \"POST\"", "method = []"));
+    assert!(mentions(&e, "`method = []` lists no method"), "{e:?}");
+    let e = rejected(&REQ_SERVICE.replace("path = \"/buy\"", "path = []"));
+    assert!(mentions(&e, "`path = []` lists no path"), "{e:?}");
+    let e = rejected(&REQ_SERVICE.replace("method = \"POST\"\npath = \"/buy\"\n", ""));
+    assert!(mentions(&e, "selects every request"), "{e:?}");
+    // A method alone selects that method on any path; one is stored uppercase.
+    let def = ok(&REQ_SERVICE.replace("method = \"POST\"\npath = \"/buy\"\n", "method = \"post\"\n"));
+    assert!(def.request_shape("POST", "/anything").is_some());
 }
 
 #[test]
 fn consent_filters_are_the_ones_the_console_implements() {
     let raw = |consent: &str| {
         format!(
-            "[service]\nid = \"m\"\nname = \"M\"\nhosts = [\"api.m.com\"]\n[requests.send]\nmatch = \"POST /send\"\nvars.raw = \"/raw\"\nscope = [\"raw\"]\nconsent = \"{}\"\n",
+            "[service]\nid = \"m\"\nname = \"M\"\nhosts = [\"api.m.com\"]\n[requests.send]\nmethod = \"POST\"\npath = \"/send\"\nvars.raw = \"/raw\"\nscope = [\"raw\"]\nconsent = \"{}\"\n",
             consent
         )
     };
@@ -555,7 +587,8 @@ const RULE: &str = r#"
 [[rule]]
 id = "big"
 label = "Big purchase"
-match = "POST /buy"
+method = "POST"
+path = "/buy"
 when = "vars.amount > 80"
 level = "ask-always"
 "#;
@@ -585,9 +618,14 @@ fn policy_rules_are_recognized_whole_or_rejected() {
         ),
         ("id = \"big\"", "id = \"Big One\"", "the id must be"),
         (
+            "path = \"/buy\"",
+            "path = \"/buy?x\"",
+            "is not a URL Pattern pathname",
+        ),
+        (
+            "method = \"POST\"\npath = \"/buy\"",
             "match = \"POST /buy\"",
-            "match = \"POST /buy?x\"",
-            "may not contain",
+            "rule 'big': `match` is not read; use method = \"DELETE\" and path = \"/v1/x/:id\"",
         ),
     ] {
         let e = rejected_with(REQ_SERVICE, &RULE.replace(from, to));
@@ -605,12 +643,12 @@ fn policy_rules_are_recognized_whole_or_rejected() {
     ));
 }
 
-/// A rule that names nothing it matches (`match = []`, no body, no when)
+/// A rule that names nothing it matches (no `method`, `path`, body or when)
 /// matches every request: refused. With a body or a when it decides on
 /// those.
 #[test]
 fn a_rule_matching_every_request_is_refused() {
-    let all = "[[rule]]\nid = \"all\"\nlabel = \"All\"\nmatch = []\nlevel = \"deny\"\n";
+    let all = "[[rule]]\nid = \"all\"\nlabel = \"All\"\nlevel = \"deny\"\n";
     let e = rejected_with(GITHUB, all);
     assert!(mentions(&e, "matches every request"), "{e:?}");
     let body = all.replace("level", "body = \"delete\"\nlevel");
@@ -676,19 +714,20 @@ fn when_var_must_be_bound() {
     assert!(mentions(&e, "[requests.purchase] does not bind"), "{e:?}");
 }
 
-/// A `when` var is judged per shape covering the rule's `match`, never
+/// A `when` var is judged per shape covering the rule's `method` / `path`, never
 /// against the union of all shapes.
 #[test]
 fn when_var_is_declared_and_bound_by_every_shape_covering_the_rule() {
     let svc = |pay: &str| {
         format!(
             "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n\
-             [requests.transfer]\nmatch = \"POST /transfer\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n{pay}"
+             [requests.transfer]\nmethod = \"POST\"\npath = \"/transfer\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n{pay}"
         )
     };
     let rule = |m: &str, when: &str| {
         format!(
-            "[[rule]]\nid = \"big\"\nlabel = \"Big payment\"\nmatch = \"{m}\"\nwhen = \"{when}\"\nlevel = \"ask-always\"\n"
+            "[[rule]]\nid = \"big\"\nlabel = \"Big payment\"\n{}when = \"{when}\"\nlevel = \"ask-always\"\n",
+            sel(m)
         )
     };
     // No shape covers POST /pay: the var never resolves there.
@@ -696,32 +735,32 @@ fn when_var_is_declared_and_bound_by_every_shape_covering_the_rule() {
     assert!(mentions(&e, "no [requests] shape covers"), "{e:?}");
     // The covering shape declares the var but does not bind it, while
     // another shape binds it.
-    let unbound = "[requests.pay]\nmatch = \"POST /pay\"\nvars.amount = \"/amount\"\n";
+    let unbound = "[requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.amount = \"/amount\"\n";
     let e = rejected_with(&svc(unbound), &rule("POST /pay", "vars.amount > 100"));
     assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
     // The covering shape does not declare it.
     let other =
-        "[requests.pay]\nmatch = \"POST /pay\"\nvars.total = \"/total\"\nscope = [\"total\"]\n";
+        "[requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.total = \"/total\"\nscope = [\"total\"]\n";
     let e = rejected_with(&svc(other), &rule("POST /pay", "vars.amount > 100"));
     assert!(
         mentions(&e, "'amount', which [requests.pay] does not declare"),
         "{e:?}"
     );
     // A rule spanning both shapes needs the var from each.
-    let e = rejected_with(&svc(other), &rule("POST /*", "vars.amount > 100"));
+    let e = rejected_with(&svc(other), &rule("POST /:any", "vars.amount > 100"));
     assert!(mentions(&e, "[requests.pay] does not declare"), "{e:?}");
-    let e = rejected_with(&svc(unbound), &rule("/**", "vars.amount > 100"));
+    let e = rejected_with(&svc(unbound), &rule("/*", "vars.amount > 100"));
     assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
     let bound =
-        "[requests.pay]\nmatch = \"POST /pay\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n";
-    for m in ["POST /pay", "POST /*", "/**"] {
+        "[requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n";
+    for m in ["POST /pay", "POST /:any", "/*"] {
         assert!(
             admit(None, &svc(bound), Some(&rule(m, "vars.amount > 100"))).is_ok(),
             "{m}"
         );
     }
-    // A rule with an empty `match` covers every shape.
-    let no_match = "[[rule]]\nid = \"big\"\nlabel = \"Big\"\nmatch = []\nwhen = \"vars.amount > 100\"\nlevel = \"ask-always\"\n";
+    // A rule with no `method` or `path` covers every shape.
+    let no_match = "[[rule]]\nid = \"big\"\nlabel = \"Big\"\nwhen = \"vars.amount > 100\"\nlevel = \"ask-always\"\n";
     assert!(admit(None, &svc(bound), Some(no_match)).is_ok());
     let e = rejected_with(&svc(unbound), no_match);
     assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
@@ -731,16 +770,16 @@ fn when_var_is_declared_and_bound_by_every_shape_covering_the_rule() {
         &rule("POST /pay", "vars.transfer.amount > 100"),
     );
     assert!(
-        mentions(&e, "[requests.transfer] does not cover the rule's `match`"),
+        mentions(&e, "[requests.transfer] does not cover the rule's `method` / `path`"),
         "{e:?}"
     );
     assert!(admit(
         None,
         &svc(unbound),
-        Some(&rule("POST /*", "vars.transfer.amount > 100"))
+        Some(&rule("POST /:any", "vars.transfer.amount > 100"))
     )
     .is_ok());
-    let e = rejected_with(&svc(unbound), &rule("POST /*", "vars.pay.amount > 100"));
+    let e = rejected_with(&svc(unbound), &rule("POST /:any", "vars.pay.amount > 100"));
     assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
 }
 
@@ -748,7 +787,7 @@ fn when_var_is_declared_and_bound_by_every_shape_covering_the_rule() {
 fn body_regex_compiles_at_load_or_rejects() {
     let rule = |body: &str| {
         format!(
-            "[[rule]]\nid = \"pub\"\nlabel = \"Make public\"\nmatch = \"PATCH /repos/*/*\"\nbody = '{}'\nlevel = \"ask-always\"\n",
+            "[[rule]]\nid = \"pub\"\nlabel = \"Make public\"\nmethod = \"PATCH\"\npath = \"/repos/:owner/:repo\"\nbody = '{}'\nlevel = \"ask-always\"\n",
             body
         )
     };
@@ -772,11 +811,12 @@ fn body_regex_compiles_at_load_or_rejects() {
 fn ask_on_the_body_where_a_shape_binds_is_rejected() {
     let body_rule = |level: &str, m: &str| {
         format!(
-            "[[rule]]\nid = \"gift\"\nlabel = \"Gift cards\"\nmatch = \"{m}\"\nbody = \"gift\"\nlevel = \"{level}\"\n"
+            "[[rule]]\nid = \"gift\"\nlabel = \"Gift cards\"\n{}body = \"gift\"\nlevel = \"{level}\"\n",
+            sel(m)
         )
     };
     for level in ["ask", "ask-always"] {
-        for m in ["POST /buy", "/buy", "POST /*", "/**", "post /buy"] {
+        for m in ["POST /buy", "/buy", "POST /:any", "/*", "post /buy"] {
             let e = rejected_with(REQ_SERVICE, &body_rule(level, m));
             assert!(
                 mentions(&e, "[requests.purchase] covers"),
@@ -795,7 +835,7 @@ fn ask_on_the_body_where_a_shape_binds_is_rejected() {
 
 #[test]
 fn rule_method_word_is_case_insensitive() {
-    let policy = "[[rule]]\nid = \"del\"\nlabel = \"Delete repo\"\nmatch = \"delete /repos/*/*\"\nlevel = \"deny\"\n";
+    let policy = "[[rule]]\nid = \"del\"\nlabel = \"Delete repo\"\nmethod = \"delete\"\npath = \"/repos/:owner/:repo\"\nlevel = \"deny\"\n";
     let def = admit(None, GITHUB, Some(policy)).unwrap();
     let rules = def.policy.unwrap().rules;
     let decide = |m: &str, p: &str| {
@@ -820,7 +860,7 @@ fn rule_method_word_is_case_insensitive() {
 fn body_rules_are_capped() {
     let rules: String = (0..=MAX_BODY_RULES)
         .map(|i| {
-            format!("[[rule]]\nid = \"b{i}\"\nlabel = \"B\"\nmatch = \"POST /b{i}\"\nbody = \"x\"\nlevel = \"deny\"\n")
+            format!("[[rule]]\nid = \"b{i}\"\nlabel = \"B\"\nmethod = \"POST\"\npath = \"/b{i}\"\nbody = \"x\"\nlevel = \"deny\"\n")
         })
         .collect();
     let e = rejected_with(GITHUB, &rules);
@@ -829,25 +869,25 @@ fn body_rules_are_capped() {
 
 #[test]
 fn over_limit_lists_never_reach_the_cross_checks() {
-    // A shape and a body rule with huge match lists: refused on the counts,
+    // A shape and a body rule with huge path lists: refused on the counts,
     // before any pairwise rule/shape comparison (12k x 12k would be ~1.4e8).
     let matches = vec!["\"/b\""; 12_000].join(",");
     let svc = format!(
-        "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n[requests.purchase]\nmatch = [{}]\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n",
+        "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n[requests.purchase]\npath = [{}]\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n",
         matches
     );
     let rule = format!(
-        "[[rule]]\nid = \"g\"\nlabel = \"G\"\nmatch = [{}]\nbody = \"gift\"\nlevel = \"ask\"\n",
+        "[[rule]]\nid = \"g\"\nlabel = \"G\"\nmethod = \"POST\"\npath = [{}]\nbody = \"gift\"\nlevel = \"ask\"\n",
         matches
     );
     assert!(svc.len() < MAX_FILE_BYTES && rule.len() < MAX_FILE_BYTES);
     let started = std::time::Instant::now();
     let e = rejected_with(&svc, &rule);
     assert!(
-        mentions(&e, "[requests.purchase] match has 12000 entries"),
+        mentions(&e, "[requests.purchase] has 12000 method × path pairs"),
         "{e:?}"
     );
-    assert!(mentions(&e, "rule 'g' match has 12000 entries"), "{e:?}");
+    assert!(mentions(&e, "rule 'g' has 12000 method × path pairs"), "{e:?}");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),
         "{:?}",
@@ -885,7 +925,7 @@ fn limits_reject_oversized_definitions() {
     let rules: String = (0..=MAX_RULES)
         .map(|i| {
             format!(
-                "[[rule]]\nid = \"r{i}\"\nlabel = \"R\"\nmatch = \"GET /r{i}\"\nlevel = \"ask\"\n"
+                "[[rule]]\nid = \"r{i}\"\nlabel = \"R\"\nmethod = \"GET\"\npath = \"/r{i}\"\nlevel = \"ask\"\n"
             )
         })
         .collect();
@@ -895,10 +935,17 @@ fn limits_reject_oversized_definitions() {
         .map(|i| format!("\"/p{}\"", i))
         .collect();
     let rule = format!(
-        "[[rule]]\nid = \"m\"\nlabel = \"M\"\nmatch = [{}]\nlevel = \"ask\"\n",
+        "[[rule]]\nid = \"m\"\nlabel = \"M\"\npath = [{}]\nlevel = \"ask\"\n",
         pats.join(", ")
     );
-    assert!(mentions(&rejected_with(GITHUB, &rule), "match has"));
+    assert!(mentions(&rejected_with(GITHUB, &rule), "method × path pairs"));
+    // The limit counts each method with each path.
+    let half: Vec<String> = (0..=MAX_MATCH_PATTERNS / 2).map(|i| format!("\"/p{}\"", i)).collect();
+    let rule = format!(
+        "[[rule]]\nid = \"m\"\nlabel = \"M\"\nmethod = [\"POST\", \"PUT\"]\npath = [{}]\nlevel = \"ask\"\n",
+        half.join(", ")
+    );
+    assert!(mentions(&rejected_with(GITHUB, &rule), "34 method × path pairs"));
 }
 
 // ── display strings ──────────────────────────────────────────────────────────
@@ -920,7 +967,7 @@ fn control_and_bidi_characters_are_rejected_and_never_echoed() {
         }
     }
     // A rule label in policy.toml, and a table key.
-    let label = "[[rule]]\nid = \"x\"\nlabel = \"Delete\\u200f repo\"\nmatch = \"DELETE /x\"\nlevel = \"ask\"\n";
+    let label = "[[rule]]\nid = \"x\"\nlabel = \"Delete\\u200f repo\"\nmethod = \"DELETE\"\npath = \"/x\"\nlevel = \"ask\"\n";
     assert!(mentions(&rejected_with(GITHUB, label), "rule[0].label"));
     let key = format!("{ACME_OAUTH}[auth.authorize_params]\n\"a\\u001bb\" = \"1\"\n");
     assert!(mentions(&rejected(&key), "a key in auth.authorize_params"));

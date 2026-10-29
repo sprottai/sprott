@@ -6,42 +6,46 @@
 # per-connection console toggle; loosen, split, or add your own (e.g. gate GKE
 # cluster delete, or an IAM setIamPolicy that grants roles).
 #
-# Deliberately NOT gated: object deletes (DELETE /storage/v1/b/*/o/* — daily file
-# churn), stop / reset / resize (POST actions, recoverable), disk deletes. Each
-# rule's match is segment-counted to hit exactly its target — a bucket delete,
-# not an object delete; a project delete, not a sub-resource delete.
+# Deliberately NOT gated: object deletes (DELETE /storage/v1/b/:bucket/o/:object
+# — daily file churn), stop / reset / resize (POST actions, recoverable), disk
+# deletes. Each rule's path is segment-counted (`:name` is exactly one segment)
+# to hit exactly its target — a bucket delete, not an object delete; a project
+# delete, not a sub-resource delete.
 
 [default]
 read = "allow"
 write = "allow"
 
 # ── Destroy a whole project (takes every resource + all data, no undo) ────────
-# `/*/projects/*` = exactly 3 segments → the Resource Manager project delete
+# `/:version/projects/:project` = exactly 3 segments → the Resource Manager project delete
 # (/v1|/v3/projects/<id>); every sub-resource DELETE is a longer path and rides
 # the floor.
 [[rule]]
 id = "delete-project"
 label = "Delete a project (destroys every resource and all its data)"
-match = "DELETE /*/projects/*"
+method = "DELETE"
+path = "/:version/projects/:project"
 level = "ask-always"
 
 # ── Delete a VM (loses the instance and its boot disk) ────────────────────────
 [[rule]]
 id = "delete-instance"
 label = "Delete a Compute Engine VM"
-# `/compute/*/`: v1, beta and alpha all delete the same VM.
-match = "DELETE /compute/*/projects/*/zones/*/instances/*"
+# `/compute/:version/`: v1, beta and alpha all delete the same VM.
+method = "DELETE"
+path = "/compute/:version/projects/:project/zones/:zone/instances/:instance"
 level = "ask-always"
 
 # ── Delete a storage bucket (loses every object in it) ────────────────────────
-# `*` = one segment, so this catches the bucket, not object deletes
+# `:bucket` = one segment, so this catches the bucket, not object deletes
 # (DELETE /storage/v1/b/<bucket>/o/<object>, which has more segments). The
 # Cloud Storage XML API deletes a bucket as DELETE /<bucket> on the same host
 # and token; no other GCP API here has a one-segment path.
 [[rule]]
 id = "delete-bucket"
 label = "Delete a Cloud Storage bucket (loses all its objects)"
-match = ["DELETE /storage/v1/b/*", "DELETE /*"]
+method = "DELETE"
+path = ["/storage/v1/b/:bucket", "/:bucket"]
 level = "ask-always"
 
 # ── Mint a service-account KEY (a durable credential Sprott never sees) ──────
@@ -50,7 +54,8 @@ level = "ask-always"
 [[rule]]
 id = "mint-sa-key"
 label = "Create a service-account key (a durable credential outside the broker)"
-match = "POST /v1/projects/*/serviceAccounts/*/keys"
+method = "POST"
+path = "/v1/projects/:project/serviceAccounts/:account/keys"
 level = "ask-always"
 
 # ── A batch of calls (can carry any of the deletes above) ─────────────────────
@@ -59,5 +64,6 @@ level = "ask-always"
 [[rule]]
 id = "batch"
 label = "Send a batch of API calls (can delete a bucket or a VM)"
-match = "POST /batch/**"
+method = "POST"
+path = "/batch/*"
 level = "ask-always"

@@ -3,9 +3,9 @@
 # gate is spent on the few that destroy infrastructure, change who can get in,
 # or open an exfil path. Each rule is a per-connection console toggle.
 #
-# Paths carry Vercel's version prefix (/v9, /v13, …); a whole-segment `*` in
-# that place keeps a rule valid across version bumps (`*` = exactly one path
-# segment; a `*` inside a segment, like `v*`, is refused at verify).
+# Paths carry Vercel's version prefix (/v9, /v13, …); a `:version` segment in
+# that place keeps a rule valid across version bumps (`:name` = exactly one
+# path segment).
 
 [default]
 read = "allow"
@@ -15,43 +15,50 @@ write = "allow"
 [[rule]]
 id = "delete-project"
 label = "Delete a project"
-match = "DELETE /*/projects/*"
+method = "DELETE"
+path = "/:version/projects/:project"
 level = "ask-always"
 
 [[rule]]
 id = "delete-deployment"
 label = "Delete a deployment"
-match = "DELETE /*/deployments/*"
+method = "DELETE"
+path = "/:version/deployments/:deployment"
 level = "ask"
 
 [[rule]]
 id = "delete-domain"
 label = "Remove a domain"
-match = "DELETE /*/domains/*"
+method = "DELETE"
+path = "/:version/domains/:domain"
 level = "ask-always"
 
 # ── Change who can get in (access posture) ───────────────────────────────────
 [[rule]]
 id = "remove-member"
 label = "Remove a team member"
-match = "DELETE /*/teams/*/members/*"
+method = "DELETE"
+path = "/:version/teams/:team/members/:member"
 level = "ask-always"
 
 [[rule]]
 id = "change-member"
 label = "Invite a team member or change a member's role"
-match = ["POST /*/teams/*/members", "PATCH /*/teams/*/members/*"]
+method = ["POST", "PATCH"]
+path = ["/:version/teams/:team/members", "/:version/teams/:team/members/:member"]
 level = "ask-always"
 
 # ── Supply chain / exfil (a webhook streams project events to an outside URL) ─
 [[rule]]
 id = "create-webhook"
 label = "Create a webhook"
-match = "POST /*/webhooks"
+method = "POST"
+path = "/:version/webhooks"
 level = "ask-always"
 
 [[rule]]
 id = "delete-integration"
 label = "Remove an integration configuration"
-match = "DELETE /*/integrations/configuration/*"
+method = "DELETE"
+path = "/:version/integrations/configuration/:configuration"
 level = "ask"

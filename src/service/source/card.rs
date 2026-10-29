@@ -65,7 +65,7 @@ pub struct RuleSummary {
 
 fn rule_summary(r: &PolicyRule) -> RuleSummary {
     let level = r.level.map(|l| l.to_string()).unwrap_or_default();
-    let matched = r.match_patterns.join(" | ");
+    let matched = r.select.display().join(" | ");
     let mut key = matched.clone();
     if let Some(b) = &r.body {
         key.push_str(" body~");

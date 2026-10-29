@@ -5,25 +5,29 @@ write = "ask"
 [[rule]]
 id = "list-events"
 label = "List events"
-match = "GET /calendar/v3/calendars/*/events"
+method = "GET"
+path = "/calendar/v3/calendars/:calendar/events"
 level = "allow"
 
 [[rule]]
 id = "delete-event"
 label = "Delete event"
-match = "DELETE /calendar/v3/calendars/*/events/*"
+method = "DELETE"
+path = "/calendar/v3/calendars/:calendar/events/:event"
 level = "ask-always"
 
 # Deleting a calendar, or clearing one, drops every event in it at once.
 [[rule]]
 id = "delete-calendar"
 label = "Delete or clear a whole calendar (drops all its events)"
-match = ["DELETE /calendar/v3/calendars/*", "POST /calendar/v3/calendars/*/clear"]
+method = ["DELETE", "POST"]
+path = ["/calendar/v3/calendars/:calendar", "/calendar/v3/calendars/:calendar/clear"]
 level = "ask-always"
 
 # A batch (POST /batch/calendar/v3, multipart/mixed) can carry an event delete.
 [[rule]]
 id = "batch"
 label = "Send a batch of Calendar calls (can delete events)"
-match = "POST /batch/**"
+method = "POST"
+path = "/batch/*"
 level = "ask-always"

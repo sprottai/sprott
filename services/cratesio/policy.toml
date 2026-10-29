@@ -24,7 +24,8 @@ write = "allow"
 [[rule]]
 id = "publish"
 label = "Publish a crate version"
-match = "PUT /api/v1/crates/new"
+method = "PUT"
+path = "/api/v1/crates/new"
 level = "ask"
 ttl = 1800
 
@@ -32,33 +33,38 @@ ttl = 1800
 [[rule]]
 id = "yank"
 label = "Yank a version"
-match = "DELETE /api/v1/crates/*/*/yank"
+method = "DELETE"
+path = "/api/v1/crates/:crate/:version/yank"
 level = "ask"
 
 [[rule]]
 id = "unyank"
 label = "Unyank a version"
-match = "PUT /api/v1/crates/*/*/unyank"
+method = "PUT"
+path = "/api/v1/crates/:crate/:version/unyank"
 level = "ask"
 
 # The newer PATCH form of yank/unyank (sets `yanked` + `yank_message`).
 [[rule]]
 id = "update-version"
 label = "Update a version (yank status / message)"
-match = "PATCH /api/v1/crates/*/*"
+method = "PATCH"
+path = "/api/v1/crates/:crate/:version"
 level = "ask"
 
 # ── Change who can publish (security posture) ────────────────────────────────
 [[rule]]
 id = "add-owner"
 label = "Add a crate owner"
-match = "PUT /api/v1/crates/*/owners"
+method = "PUT"
+path = "/api/v1/crates/:crate/owners"
 level = "ask-always"
 
 [[rule]]
 id = "remove-owner"
 label = "Remove a crate owner"
-match = "DELETE /api/v1/crates/*/owners"
+method = "DELETE"
+path = "/api/v1/crates/:crate/owners"
 level = "ask-always"
 
 # ── Supply chain (standing publish rights for CI; publish-security settings) ─
@@ -67,13 +73,15 @@ level = "ask-always"
 [[rule]]
 id = "add-trusted-publishing"
 label = "Add a Trusted Publishing config (CI publish rights)"
-match = "POST /api/v1/trusted_publishing/*"
+method = "POST"
+path = "/api/v1/trusted_publishing/:resource"
 level = "ask-always"
 
 [[rule]]
 id = "remove-trusted-publishing"
 label = "Remove a Trusted Publishing config"
-match = "DELETE /api/v1/trusted_publishing/*/*"
+method = "DELETE"
+path = "/api/v1/trusted_publishing/:resource/:id"
 level = "ask"
 
 # PATCH crate settings currently carries one field: `trustpub_only` — whether
@@ -82,14 +90,16 @@ level = "ask"
 [[rule]]
 id = "crate-settings"
 label = "Change crate publish settings"
-match = "PATCH /api/v1/crates/*"
+method = "PATCH"
+path = "/api/v1/crates/:crate"
 level = "ask-always"
 
 # ── Credential lifecycle ──────────────────────────────────────────────────────
 [[rule]]
 id = "revoke-token"
 label = "Revoke an API token"
-match = "DELETE /api/v1/me/tokens/*"
+method = "DELETE"
+path = "/api/v1/me/tokens/:token"
 level = "ask"
 
 # Revoking the token this connection injects bricks the connection until the
@@ -97,5 +107,6 @@ level = "ask"
 [[rule]]
 id = "revoke-current-token"
 label = "Revoke this connection's own token"
-match = "DELETE /api/v1/tokens/current"
+method = "DELETE"
+path = "/api/v1/tokens/current"
 level = "ask"

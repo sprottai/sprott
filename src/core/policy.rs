@@ -12,10 +12,11 @@
 //! (deny-override / fail-safe) → connection default → tag default →
 //! global default → floor (`ask-always`).
 //!
-//! Rule matching uses path patterns (nginx-style):
-//! - `match`: `"METHOD /path/with/*/wildcards"` — `*` matches one path segment
+//! A rule selects requests by `method` and `path` (a URL Pattern pathname),
+//! [`crate::core::selector`].
 //! - `body`: regex matched against request body text (optional), compiled once
 //!   when its rule is loaded ([`BodyPattern`])
+use crate::core::selector::{PathPattern, Select};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -106,36 +107,6 @@ impl<'de> Deserialize<'de> for BodyPattern {
     }
 }
 
-/// Serde for a rule's `match`: accept either a single `"METHOD /path"` string or
-/// a list of them (OR — any pattern matches). A single pattern serializes back
-/// as a bare string so registry.json stays byte-stable for the common one-match
-/// rule; a list serializes as a list. Used by the core [`PolicyRule`] and mirrored
-/// by the service-registry (`PolicyFileRule`) and registry-response types.
-pub(crate) mod match_spec {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum OneOrMany {
-            One(String),
-            Many(Vec<String>),
-        }
-        Ok(match OneOrMany::deserialize(d)? {
-            OneOrMany::One(s) => vec![s],
-            OneOrMany::Many(v) => v,
-        })
-    }
-
-    pub fn serialize<S: Serializer>(v: &[String], s: S) -> Result<S::Ok, S::Error> {
-        if v.len() == 1 {
-            v[0].serialize(s)
-        } else {
-            v.serialize(s)
-        }
-    }
-}
-
 // ── Access Level ───────────────────────────────────────────────────────────────
 
 /// The access DECISION for a request.
@@ -197,45 +168,32 @@ impl AccessLevel {
 /// `level` hangs on the *rule* (matcher + optional `body` predicate), so future
 /// predicate rules (`amount > $100`) decide the same way. A rule with no `level`
 /// is malformed — it can never decide — and is skipped at evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PolicyRule {
     /// Unique id (e.g. "send-email"). The key for user edits / the ask-cache scope.
-    #[serde(default)]
     pub id: Option<String>,
     /// Human-readable label for the console.
-    #[serde(default)]
     pub label: Option<String>,
-    /// Path pattern(s): `"METHOD /path"` or `"/path"` (any method). `*` = one
-    /// segment. Accepts a single string OR a list — a list is an OR (the rule
-    /// fires if ANY pattern matches), for one logical operation exposed at
-    /// several endpoints (e.g. a Beta and an Alpha endpoint that do the same
-    /// thing). This is the REST-side equivalent of the `body` regex's OR that
-    /// collapses several GraphQL mutations into one rule. Empty = no path/method
-    /// constraint (the rule decides on `body` alone, or unconditionally).
-    #[serde(
-        default,
-        rename = "match",
-        skip_serializing_if = "Vec::is_empty",
-        with = "match_spec"
-    )]
-    pub match_patterns: Vec<String>,
+    /// Which requests it decides: `method` AND `path`, each a list read as
+    /// any of (one logical operation exposed at several endpoints), absent =
+    /// no restriction ([`crate::core::selector`]). Compiled when the rule is
+    /// loaded. A refused stored user rule carries a refused selection
+    /// ([`evaluate_decision`] says how it decides).
+    #[serde(flatten)]
+    pub select: Select,
     /// Regex matched against request body text. Omit to skip body matching.
-    #[serde(default)]
     pub body: Option<BodyPattern>,
-    /// A structured field condition, AND-combined with `match`/`body`:
+    /// A structured field condition, AND-combined with the selector and `body`:
     /// `"vars.<name> <op> <literal>"`, e.g. `"vars.amount > 80"`. The var is
     /// resolved from the request's matching `[requests]` shape (service.toml);
     /// an UNDEFINED var makes the condition — and so the rule — not match
     /// (policy is an explicit contract, we never fabricate a decision). See
     /// [`Condition`] and design/request-scope.md.
-    #[serde(default)]
     pub when: Option<String>,
     /// The access decision when this rule matches.
-    #[serde(default)]
     pub level: Option<AccessLevel>,
     /// Cache TTL (seconds) after an `ask` approval, scoped to this rule
     /// (PROTOCOL.md §6.1 `policy.rules[].ttl`).
-    #[serde(default)]
     pub ttl: Option<u64>,
 }
 
@@ -266,12 +224,31 @@ pub struct Levels {
 /// <id>.rules`. Two modes:
 ///   - **override** an existing built-in rule (set `level` and/or `ttl`; the id
 ///     matches a built-in),
-///   - **add** a new rule (carries its own `match` — the presence of `match` is
-///     what makes it a new rule rather than an override).
+///   - **add** a new rule (carries its own selector, `method` and / or
+///     `path`: having one is what makes it a new rule rather than an
+///     override).
+///
+/// Each selector key is read (and its patterns compiled) once, when the
+/// sealed policy is read, and written back as it was stored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuleConfig {
+    /// A 2.0 rule's `"METHOD /path"`. Not read: an entry that carries one is
+    /// a refused rule ([`RuleConfig::select`]); kept so the record reads back
+    /// as stored.
     #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
     pub match_pattern: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::core::selector::methods_opt"
+    )]
+    pub method: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::core::selector::paths_opt"
+    )]
+    pub path: Option<Vec<PathPattern>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +259,60 @@ pub struct RuleConfig {
     pub level: Option<AccessLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u64>,
+}
+
+impl RuleConfig {
+    /// What an added rule selects; `None` for an override (no selector key).
+    /// A rule the daemon refuses (DESIGN.md §2) gets a
+    /// [`Select::refused`] selection: one in the 2.0 `match` syntax, or whose
+    /// selector can't be read (a pattern that doesn't compile, a method that
+    /// isn't a token, an empty list). [`evaluate_decision`] says how a
+    /// refused rule decides.
+    pub fn select(&self) -> Option<Select> {
+        if self.match_pattern.is_some() {
+            return Some(Select::refused(
+                "it is in the 2.0 `match` syntax; write `method` and `path`".into(),
+            ));
+        }
+        if self.method.is_none() && self.path.is_none() {
+            return None;
+        }
+        let methods = self.method.clone().unwrap_or_default();
+        let paths = self.path.clone().unwrap_or_default();
+        if self.method.as_ref().is_some_and(Vec::is_empty)
+            || self.path.as_ref().is_some_and(Vec::is_empty)
+        {
+            return Some(Select::refused("an empty `method` or `path` list".into()));
+        }
+        if let Some(m) = methods
+            .iter()
+            .find(|m| !crate::core::selector::is_method_token(m))
+        {
+            return Some(Select::refused(format!("method '{}' is not a method token", m)));
+        }
+        if let Some((p, e)) = paths.iter().find_map(|p| {
+            let problem = crate::core::selector::path_problem(p.as_str())
+                .or_else(|| p.error().map(str::to_string))?;
+            Some((p.as_str(), problem))
+        }) {
+            return Some(Select::refused(format!("path '{}' {}", p, e)));
+        }
+        Some(Select::new(methods, paths))
+    }
+
+    /// Test fixture: an entry selecting `"METHOD /path"` or `"/path"`.
+    #[cfg(test)]
+    pub(crate) fn selecting(spec: &str) -> RuleConfig {
+        let (method, path) = match spec.split_once(' ') {
+            Some((m, p)) => (Some(vec![m.to_ascii_uppercase()]), p),
+            None => (None, spec),
+        };
+        RuleConfig {
+            method,
+            path: Some(vec![PathPattern::lenient(path)]),
+            ..Default::default()
+        }
+    }
 }
 
 // ── Per-connection + global policy (sealed in `aux.policy`) ──────────────────────
@@ -400,13 +431,20 @@ pub fn merge_levels(user: Option<&Levels>, built_in: Option<&Levels>) -> Option<
 
 /// Merge a connection's user [`RuleConfig`] edits onto a service's built-in
 /// rules. By id: an edit overrides `level` / `ttl` (and `label`/`body` if given)
-/// of the matching built-in; an entry with a `match` whose id is *not* built-in
-/// is appended as a new rule. PROTOCOL.md §6.4 `M.policy` (logical merged view).
+/// of the matching built-in, in its place; an entry with a selector whose id is
+/// *not* built-in is appended as a new rule, in id order (the declaration
+/// order a tie between equally strict rules goes to). An entry in the 2.0
+/// `match` syntax is appended as a refused rule, whatever its id, and
+/// overrides nothing. PROTOCOL.md §6.4 `M.policy` (logical merged view).
 pub fn merge_rules(built_in: &[PolicyRule], user: &HashMap<String, RuleConfig>) -> Vec<PolicyRule> {
     let mut out: Vec<PolicyRule> = built_in
         .iter()
         .map(|rule| {
-            let edit = rule.id.as_ref().and_then(|id| user.get(id));
+            let edit = rule
+                .id
+                .as_ref()
+                .and_then(|id| user.get(id))
+                .filter(|e| e.match_pattern.is_none());
             match edit {
                 Some(e) => PolicyRule {
                     level: e.level.or(rule.level),
@@ -420,18 +458,21 @@ pub fn merge_rules(built_in: &[PolicyRule], user: &HashMap<String, RuleConfig>) 
             }
         })
         .collect();
-    // New rules: user entries with a `match` and an id not present in built-ins.
+    // New rules: user entries with a selector and an id not present in
+    // built-ins, and refused entries, in id order.
     let built_in_ids: std::collections::HashSet<&str> =
         built_in.iter().filter_map(|r| r.id.as_deref()).collect();
-    for (id, e) in user {
-        if built_in_ids.contains(id.as_str()) {
-            continue;
-        }
-        if let Some(ref m) = e.match_pattern {
+    let mut added: Vec<(&String, &RuleConfig)> = user
+        .iter()
+        .filter(|(id, e)| !built_in_ids.contains(id.as_str()) || e.match_pattern.is_some())
+        .collect();
+    added.sort_by_key(|(id, _)| *id);
+    for (id, e) in added {
+        if let Some(select) = e.select() {
             out.push(PolicyRule {
                 id: Some(id.clone()),
                 label: e.label.clone(),
-                match_patterns: vec![m.clone()],
+                select,
                 body: e.body.clone(),
                 when: e.when.clone(),
                 level: e.level,
@@ -461,7 +502,7 @@ pub fn merge_rules(built_in: &[PolicyRule], user: &HashMap<String, RuleConfig>) 
 /// a `body` decides on that body and is judged so. Only rules a user edit
 /// touches (`aux.policy.connections.<id>.rules`) are checked, only those that
 /// decide `ask` or `ask-always` (an `allow` or `deny` mints no approval and
-/// is re-decided on every request), and only those whose `match` covers this
+/// is re-decided on every request), and only those whose selector covers this
 /// request. A `when` naming a var this shape does not declare never fires
 /// here (P3) and is not refused.
 /// `shape` / `declared` / `binds` describe the matched shape
@@ -490,12 +531,7 @@ pub fn unenforceable_user_rule(
         if !matches!(rule.level, Some(AccessLevel::Ask | AccessLevel::AskAlways)) {
             continue;
         }
-        let covers = rule.match_patterns.is_empty()
-            || rule
-                .match_patterns
-                .iter()
-                .any(|p| pattern_matches(p, method, path));
-        if !covers {
+        if rule.select.exec(method, path).is_none() {
             continue;
         }
         if rule.body.is_some() {
@@ -532,173 +568,6 @@ pub fn unenforceable_user_rule(
     None
 }
 
-// ── Path Pattern Matching ─────────────────────────────────────────────────────
-
-/// Parse a match pattern into (optional_method, path_pattern). The first word
-/// is the method when it is ASCII letters in any case (`DELETE /x`,
-/// `delete /x`); every rule source (policy.toml, inline policy, a user edit)
-/// reads it the same way, and matching compares it case-insensitively.
-fn parse_match_pattern(pattern: &str) -> (Option<&str>, &str) {
-    if let Some((method, path)) = pattern.split_once(' ') {
-        if !method.is_empty() && method.bytes().all(|b| b.is_ascii_alphabetic()) {
-            return (Some(method), path.trim_start());
-        }
-    }
-    (None, pattern)
-}
-
-/// Why a definition's `match` pattern could never match a request, or `None`
-/// when it is well formed: `"/path"` or `"METHOD /path"`, the path starting
-/// with `/`, free of whitespace, `?` and `#` (matching sees the path without
-/// its query), with `**` only as the final segment.
-pub(crate) fn match_pattern_problem(pattern: &str) -> Option<String> {
-    let (method, path) = parse_match_pattern(pattern);
-    if method.is_none() && pattern.contains(char::is_whitespace) {
-        return Some(format!(
-            "match '{}' must be \"/path\" or \"METHOD /path\" (METHOD in letters)",
-            pattern
-        ));
-    }
-    if !path.starts_with('/') {
-        return Some(format!("match '{}': the path must start with '/'", pattern));
-    }
-    if path.contains(char::is_whitespace) || path.contains(['?', '#']) {
-        return Some(format!(
-            "match '{}': the path may not contain whitespace, '?' or '#'",
-            pattern
-        ));
-    }
-    let segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
-    // `*` and `**` are whole segments: `v*` would be the literal text "v*"
-    // and never match `v9`.
-    if let Some(seg) = segments
-        .iter()
-        .find(|s| s.contains('*') && **s != "*" && **s != "**")
-    {
-        return Some(format!(
-            "match '{}': '{}' puts '*' inside a segment; '*' matches only a whole segment",
-            pattern, seg
-        ));
-    }
-    if let Some((_, init)) = segments.split_last() {
-        if init.contains(&"**") {
-            return Some(format!(
-                "match '{}': '**' is only allowed as the final segment",
-                pattern
-            ));
-        }
-    }
-    None
-}
-
-/// Could one request match both patterns? Methods agree when either is absent
-/// or they are equal ignoring case; paths agree segment by segment (`*` is
-/// any one segment, a final `**` any one or more). A path-level check only:
-/// it decides whether a rule can apply on a path a `[requests]` shape covers.
-pub(crate) fn patterns_overlap(a: &str, b: &str) -> bool {
-    let (ma, pa) = parse_match_pattern(a);
-    let (mb, pb) = parse_match_pattern(b);
-    if let (Some(x), Some(y)) = (ma, mb) {
-        if !x.eq_ignore_ascii_case(y) {
-            return false;
-        }
-    }
-    let split = |p: &str| -> (Vec<String>, bool) {
-        let mut segs: Vec<String> = p
-            .trim_end_matches('/')
-            .split('/')
-            .map(str::to_string)
-            .collect();
-        let rest = segs.last().is_some_and(|s| s == "**");
-        if rest {
-            segs.pop();
-        }
-        (segs, rest)
-    };
-    let (sa, ra) = split(pa);
-    let (sb, rb) = split(pb);
-    let seg_ok = |x: &String, y: &String| x == "*" || y == "*" || x == y;
-    let common = sa.len().min(sb.len());
-    if !sa
-        .iter()
-        .zip(sb.iter())
-        .take(common)
-        .all(|(x, y)| seg_ok(x, y))
-    {
-        return false;
-    }
-    match (ra, rb) {
-        // Fixed lengths must agree.
-        (false, false) => sa.len() == sb.len(),
-        // `a/**` needs at least one segment past its prefix; `b` fixed supplies it.
-        (true, false) => sb.len() > sa.len(),
-        (false, true) => sa.len() > sb.len(),
-        // Both open-ended: a path long enough for both exists.
-        (true, true) => true,
-    }
-}
-
-/// Match a request path against a pattern. `*` matches exactly one path
-/// segment; a trailing `**` matches one-or-more remaining segments (only
-/// meaningful as the final segment — it lets a single rule cover
-/// variable-depth paths like git refs `git/refs/heads/feature/x` or nested
-/// file paths). `**` anywhere but last is treated as a literal (won't match).
-fn path_matches(pattern: &str, path: &str) -> bool {
-    let pat_segments: Vec<&str> = pattern.trim_end_matches('/').split('/').collect();
-    let path_segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
-
-    // Trailing `**`: the fixed prefix must match segment-for-segment, and the
-    // path must have at least one further segment for `**` to cover.
-    if let Some((last, prefix)) = pat_segments.split_last() {
-        if *last == "**" {
-            if path_segments.len() <= prefix.len() {
-                return false;
-            }
-            return prefix
-                .iter()
-                .zip(path_segments.iter())
-                .all(|(p, s)| *p == "*" || p == s);
-        }
-    }
-
-    if pat_segments.len() != path_segments.len() {
-        return false;
-    }
-    pat_segments
-        .iter()
-        .zip(path_segments.iter())
-        .all(|(p, s)| *p == "*" || p == s)
-}
-
-/// Specificity score (nginx longest-match): used only as a tiebreaker between
-/// equally-restrictive matching rules, so the ask-cache scope is deterministic.
-///   - `+1000` if rule has body regex
-///   - `+5` if method specified
-///   - `+10` per literal (non-wildcard) path segment
-fn specificity(rule: &PolicyRule) -> u32 {
-    let mut score: u32 = 0;
-    if rule.body.is_some() {
-        score += 1000;
-    }
-    // A match list scores by its most-specific pattern (the best case): a rule
-    // is at least as specific as its tightest alternative.
-    let path_score = rule
-        .match_patterns
-        .iter()
-        .map(|pattern| {
-            let (method, path) = parse_match_pattern(pattern);
-            let mut s: u32 = if method.is_some() { 5 } else { 0 };
-            for seg in path.split('/') {
-                if !seg.is_empty() && seg != "*" && seg != "**" {
-                    s += 10;
-                }
-            }
-            s
-        })
-        .max()
-        .unwrap_or(0);
-    score + path_score
-}
 
 // ── `when` field conditions ──────────────────────────────────────────────────
 
@@ -933,23 +802,6 @@ fn walk_names(
     }
 }
 
-/// Does a single `"METHOD /path"` (or `"/path"`) pattern match this request?
-/// The method/path half of rule matching, exposed so the service layer can
-/// resolve which `[requests]` shape a request hits with the SAME grammar the
-/// policy rules use (no second matcher to drift). The method compares
-/// case-insensitively: the proxy normalizes it to uppercase at ingress, and a
-/// caller that did not still matches the rule it names.
-pub(crate) fn pattern_matches(pattern: &str, method: &str, path: &str) -> bool {
-    let path_no_query = path.split('?').next().unwrap_or(path);
-    let (rule_method, rule_path) = parse_match_pattern(pattern);
-    if let Some(m) = rule_method {
-        if !m.eq_ignore_ascii_case(method) {
-            return false;
-        }
-    }
-    path_matches(rule_path, path_no_query)
-}
-
 /// The text a rule's `body` regex is matched against: the body as sent, and,
 /// when it is JSON, also its decoded form (parsed and written back out), on a
 /// line of its own. A JSON string can spell any character as an escape, and
@@ -979,16 +831,8 @@ fn matches_rule(
     body: Option<&str>,
     vars: &VarMap,
 ) -> bool {
-    if !rule.match_patterns.is_empty() {
-        // OR across the rule's patterns: the rule's path/method predicate holds
-        // if ANY listed "METHOD /path" matches this request.
-        let any = rule
-            .match_patterns
-            .iter()
-            .any(|pattern| pattern_matches(pattern, method, path));
-        if !any {
-            return false;
-        }
+    if rule.select.exec(method, path).is_none() {
+        return false;
     }
     if let Some(ref pattern) = rule.body {
         match pattern.is_match(body.unwrap_or("")) {
@@ -1135,8 +979,9 @@ pub fn stricter(
 ///
 /// Resolution (PROTOCOL.md §6.4):
 ///   1. Among ALL matching rules, the **most restrictive** effective level wins
-///      (deny-override / fail-safe). Ties broken by specificity for a
-///      deterministic ask-cache scope (`(connection, rule_id, method)`).
+///      (deny-override / fail-safe). A tie goes to the first in declaration
+///      order (the definition's rules in file order, then the user's added
+///      rules, [`merge_rules`]), so the ask-cache scope is deterministic.
 ///   2. else connection default (read/write floor),
 ///   3. else tag default (the service's tags matched against the
 ///      `Policy.categories` floor map; several hits → most restrictive wins),
@@ -1145,8 +990,55 @@ pub fn stricter(
 ///
 /// [`DecidedBy::Rule`] when a rule decided (step 1), else
 /// [`DecidedBy::Floor`].
+///
+/// A refused rule (a stored user rule the daemon can't read, DESIGN.md §2)
+/// decides every request on its connection: a refused `deny` denies it, any
+/// other makes it the stricter of `ask-always` and the decision without the
+/// refused rules. A refused rule never loosens a decision.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_decision(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    vars: &VarMap,
+    rules: Option<&Vec<PolicyRule>>,
+    connection_levels: Option<&Levels>,
+    policy: &Policy,
+    tags: &[String],
+) -> (AccessLevel, DecidedBy, Option<u64>) {
+    let without = decide_readable(
+        method,
+        path,
+        body,
+        vars,
+        rules,
+        connection_levels,
+        policy,
+        tags,
+    );
+    let mut refused = rules
+        .into_iter()
+        .flatten()
+        .filter(|r| r.select.problem().is_some());
+    let Some(first) = refused.next() else {
+        return without;
+    };
+    let by = |r: &PolicyRule| DecidedBy::Rule {
+        id: r.id.clone(),
+        label: r.label.clone(),
+    };
+    if let Some(deny) = std::iter::once(first)
+        .chain(refused)
+        .find(|r| r.level == Some(AccessLevel::Deny))
+    {
+        return (AccessLevel::Deny, by(deny), None);
+    }
+    stricter(without, (AccessLevel::AskAlways, by(first), None))
+}
+
+/// [`evaluate_decision`] over the rules that can be read.
+#[allow(clippy::too_many_arguments)]
+fn decide_readable(
     method: &str,
     path: &str,
     body: Option<&str>,
@@ -1174,7 +1066,7 @@ pub fn evaluate_decision(
 
     // 1. Rules — most-restrictive matching wins (deny-override).
     if let Some(rules) = rules {
-        let mut best: Option<(u8, u32, &PolicyRule, AccessLevel)> = None;
+        let mut best: Option<(&PolicyRule, AccessLevel)> = None;
         for rule in rules {
             if !matches_rule(rule, method, path, body, vars) {
                 continue;
@@ -1182,12 +1074,12 @@ pub fn evaluate_decision(
             let Some(level) = rule.effective_level() else {
                 continue; // rule declares no level → no decision; skip.
             };
-            let key = (level.restrictiveness(), specificity(rule));
-            if best.is_none() || key > (best.unwrap().0, best.unwrap().1) {
-                best = Some((key.0, key.1, rule, level));
+            // Strictly stricter only: the first of equally strict rules stands.
+            if best.is_none_or(|(_, b)| level.restrictiveness() > b.restrictiveness()) {
+                best = Some((rule, level));
             }
         }
-        if let Some((_, _, rule, level)) = best {
+        if let Some((rule, level)) = best {
             // The rule's own ttl wins; else it inherits the default-floor window.
             let by = DecidedBy::Rule {
                 id: rule.id.clone(),
@@ -1246,12 +1138,21 @@ mod tests {
         PolicyRule {
             id: Some(id.into()),
             label: None,
-            match_patterns: vec![pat.into()],
+            select: sel(pat),
             body: None,
             when: None,
             level: Some(level),
             ttl: None,
         }
+    }
+
+    /// `"METHOD /path"` or `"/path"` (2.1 syntax) as a selection.
+    fn sel(spec: &str) -> Select {
+        let (methods, path) = match spec.split_once(' ') {
+            Some((m, p)) => (vec![m.to_string()], p),
+            None => (vec![], spec),
+        };
+        Select::new(methods, vec![PathPattern::compile(path).unwrap()])
     }
 
     // ── ask-once window (ttl) resolution ─────────────────────────────────────
@@ -1329,11 +1230,10 @@ mod tests {
             unenforceable_user_rule(&built_in, user, m, p, "purchase", &declared, &binds)
         };
         let add = |pat: Option<&str>, when: Option<&str>, body: Option<&str>| RuleConfig {
-            match_pattern: pat.map(str::to_string),
             when: when.map(str::to_string),
             body: body.map(BodyPattern::lenient),
             level: Some(AccessLevel::AskAlways),
-            ..Default::default()
+            ..pat.map(RuleConfig::selecting).unwrap_or_default()
         };
         let mut user = HashMap::new();
         // Gating on a bound field is enforceable.
@@ -1477,76 +1377,66 @@ mod tests {
         .is_some());
     }
 
+    /// A stored user rule in the 2.0 `match` syntax is refused (DESIGN.md
+    /// §2): a refused `deny` denies the whole connection, any other refused
+    /// rule makes every request on it ask every time, unless the decision
+    /// without it is stricter. It overrides no built-in rule.
     #[test]
-    fn method_word_is_case_insensitive_at_every_source() {
-        assert_eq!(
-            parse_match_pattern("delete /repos/*/*"),
-            (Some("delete"), "/repos/*/*")
-        );
-        assert_eq!(parse_match_pattern("Patch /x"), (Some("Patch"), "/x"));
-        assert_eq!(parse_match_pattern("/x"), (None, "/x"));
-        // A user edit's `match` is read the same way.
+    fn a_stored_2_0_rule_is_refused() {
+        let floor = Levels {
+            read: Some(AccessLevel::Allow),
+            write: Some(AccessLevel::Deny),
+            ttl: None,
+        };
+        let built_in = vec![rule("read", "GET /x", AccessLevel::Ask)];
+        let decide = |user: &HashMap<String, RuleConfig>, m: &str, p: &str| {
+            let rules = merge_rules(&built_in, user);
+            evaluate_decision(m, p, None, &VarMap::new(), Some(&rules), Some(&floor), &policy(), &[])
+        };
+        let old = |level: AccessLevel| RuleConfig {
+            match_pattern: Some("delete /repos/*/*".into()),
+            level: Some(level),
+            ..Default::default()
+        };
+        let mut user = HashMap::new();
+        user.insert("del".to_string(), old(AccessLevel::Deny));
+        for (m, p) in [("GET", "/x"), ("GET", "/elsewhere"), ("DELETE", "/repos/o/r")] {
+            let (level, by, _) = decide(&user, m, p);
+            assert_eq!(level, AccessLevel::Deny, "{m} {p}");
+            assert!(matches!(by, DecidedBy::Rule { id: Some(ref id), .. } if id == "del"));
+        }
+        for level in [AccessLevel::Allow, AccessLevel::Ask, AccessLevel::AskAlways] {
+            user.insert("del".to_string(), old(level));
+            assert_eq!(decide(&user, "GET", "/elsewhere").0, AccessLevel::AskAlways, "{level:?}");
+            assert_eq!(decide(&user, "GET", "/x").0, AccessLevel::AskAlways, "{level:?}");
+            // Stricter without it: that stands.
+            assert_eq!(decide(&user, "POST", "/elsewhere").0, AccessLevel::Deny, "{level:?}");
+        }
+        // On a built-in id it overrides nothing, and is refused too.
         let mut user = HashMap::new();
         user.insert(
-            "del".to_string(),
+            "read".to_string(),
             RuleConfig {
-                match_pattern: Some("delete /repos/*/*".into()),
-                level: Some(AccessLevel::Deny),
+                match_pattern: Some("GET /x".into()),
+                level: Some(AccessLevel::Allow),
                 ..Default::default()
             },
         );
+        let merged = merge_rules(&built_in, &user);
+        assert_eq!(merged[0].level, Some(AccessLevel::Ask));
+        assert_eq!(decide(&user, "GET", "/x").0, AccessLevel::AskAlways);
+        // A 2.1 `method` is stored uppercase and selects.
+        let edit: RuleConfig = serde_json::from_value(
+            serde_json::json!({"method": "delete", "path": "/repos/:owner/:repo", "level": "deny"}),
+        )
+        .unwrap();
+        assert_eq!(edit.method.as_deref(), Some(&["DELETE".to_string()][..]));
+        let mut user = HashMap::new();
+        user.insert("del".to_string(), edit);
         let rules = merge_rules(&[], &user);
-        let level = evaluate(
-            "DELETE",
-            "/repos/o/r",
-            None,
-            &VarMap::new(),
-            Some(&rules),
-            None,
-            &policy(),
-            &[],
-        );
-        assert_eq!(level, AccessLevel::Deny);
-        // Specificity counts the method in any case.
-        assert_eq!(
-            specificity(&rule("a", "delete /x", AccessLevel::Ask)),
-            specificity(&rule("b", "DELETE /x", AccessLevel::Ask))
-        );
-    }
-
-    #[test]
-    fn match_patterns_that_cannot_match_are_named() {
-        for good in [
-            "/x",
-            "GET /x",
-            "get /x/*",
-            "/repos/*/*/git/refs/**",
-            "POST /",
-        ] {
-            assert_eq!(match_pattern_problem(good), None, "{good}");
-        }
-        for bad in [
-            "x", "GET x", "/a b", "/x?y=1", "/x#f", "/a/**/b", "GE T /x", "", "DELETE /v*/projects/*",
-            "/a/b*", "/a/***",
-        ] {
-            assert!(match_pattern_problem(bad).is_some(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn pattern_overlap() {
-        assert!(patterns_overlap("POST /buy", "POST /buy"));
-        assert!(patterns_overlap("/buy", "POST /buy"));
-        assert!(patterns_overlap("post /buy", "POST /buy"));
-        assert!(patterns_overlap("POST /*", "POST /buy"));
-        assert!(patterns_overlap("/**", "POST /a/b"));
-        assert!(patterns_overlap("/a/**", "/a/*/c"));
-        assert!(patterns_overlap("/a/**", "/*/b/**"));
-        assert!(!patterns_overlap("GET /buy", "POST /buy"));
-        assert!(!patterns_overlap("POST /buy", "POST /refund"));
-        assert!(!patterns_overlap("/a/*", "/a/b/c"));
-        assert!(!patterns_overlap("/a/**", "/a"));
-        assert!(!patterns_overlap("/a/b/**", "/a/c/d"));
+        assert_eq!(rules[0].select.exec("DELETE", "/repos/o/r").map(|p| p.len()), Some(2));
+        assert_eq!(decide(&user, "DELETE", "/repos/o/r").0, AccessLevel::Deny);
+        assert_eq!(decide(&user, "GET", "/elsewhere").0, AccessLevel::Allow);
     }
 
     #[test]
@@ -1558,7 +1448,7 @@ mod tests {
         assert!(BodyPattern::compile(&"a".repeat(2000)).is_err());
         // Serde: a sealed user edit with a bad pattern still loads.
         let edit: RuleConfig = serde_json::from_value(
-            serde_json::json!({"match": "POST /x", "body": "(", "level": "deny"}),
+            serde_json::json!({"method": "POST", "path": "/x", "body": "(", "level": "deny"}),
         )
         .unwrap();
         let body = edit.body.as_ref().unwrap();
@@ -1657,37 +1547,75 @@ mod tests {
         assert_eq!(decide("GET").0, AccessLevel::Allow);
     }
 
-    // ── Path matching / specificity (unchanged engine) ───────────────────────
-    #[test]
-    fn wildcard_matches_one_segment() {
-        assert!(path_matches("/repos/*/issues", "/repos/r/issues"));
-        assert!(!path_matches("/repos/*", "/repos/o/r"));
+    // ── Path matching ────────────────────────────────────────────────────────
+    fn path_matches(pattern: &str, path: &str) -> bool {
+        sel(pattern).exec("GET", path).is_some()
     }
 
     #[test]
-    fn double_star_matches_variable_depth() {
+    fn a_named_group_matches_one_segment() {
+        assert!(path_matches("/repos/:owner/issues", "/repos/r/issues"));
+        assert!(!path_matches("/repos/:owner", "/repos/o/r"));
+    }
+
+    #[test]
+    fn a_final_wildcard_matches_variable_depth() {
         // One rule covers any-depth refs (heads/main, heads/feature/x, tags/v1).
-        let p = "/repos/*/*/git/refs/**";
+        let p = "/repos/:owner/:repo/git/refs/*";
         assert!(path_matches(p, "/repos/o/r/git/refs/heads/main"));
         assert!(path_matches(p, "/repos/o/r/git/refs/heads/feature/x"));
         assert!(path_matches(p, "/repos/o/r/git/refs/tags/v1"));
-        // `**` requires at least one segment — the bare prefix does not match.
+        // `/*` requires at least one more segment — the bare prefix does not match.
         assert!(!path_matches(p, "/repos/o/r/git/refs"));
+        assert!(!path_matches(p, "/repos/o/r/git/refs/"));
         // Fixed prefix still has to line up.
         assert!(!path_matches(p, "/repos/o/r/git/blobs/abc"));
-        // A single `*` is still exactly one segment (no accidental widening).
+        // A named group is still exactly one segment (no accidental widening).
         assert!(!path_matches(
-            "/repos/*/*/git/refs/*",
+            "/repos/:owner/:repo/git/refs/:ref",
             "/repos/o/r/git/refs/heads/main"
         ));
     }
 
+    /// Equally strict rules: the first in declaration order decides (the
+    /// definition's rules in file order, then added user rules by id), never
+    /// the more specific one.
     #[test]
-    fn specificity_exact_with_method_beats_wildcard() {
-        assert!(
-            specificity(&rule("a", "POST /m/send", AccessLevel::AskAlways))
-                > specificity(&rule("b", "POST /m/*", AccessLevel::Allow))
-        );
+    fn a_tie_goes_to_declaration_order() {
+        let decide = |rules: &Vec<PolicyRule>| {
+            evaluate_with_match("POST", "/m/send", None, &VarMap::new(), Some(rules), None, &policy(), &[]).1
+        };
+        let rules = vec![
+            rule("broad", "POST /m/:id", AccessLevel::Ask),
+            rule("narrow", "POST /m/send", AccessLevel::Ask),
+        ];
+        assert_eq!(decide(&rules).as_deref(), Some("broad"));
+        let rules = vec![
+            rule("narrow", "POST /m/send", AccessLevel::Ask),
+            rule("broad", "POST /m/:id", AccessLevel::Ask),
+        ];
+        assert_eq!(decide(&rules).as_deref(), Some("narrow"));
+        // A stricter rule still wins wherever it is.
+        let rules = vec![
+            rule("broad", "POST /m/:id", AccessLevel::Ask),
+            rule("narrow", "POST /m/send", AccessLevel::AskAlways),
+        ];
+        assert_eq!(decide(&rules).as_deref(), Some("narrow"));
+        // Added user rules follow the definition's, in id order.
+        let mut user = HashMap::new();
+        for id in ["b-user", "a-user"] {
+            user.insert(
+                id.to_string(),
+                RuleConfig {
+                    level: Some(AccessLevel::Ask),
+                    ..RuleConfig::selecting("POST /m/send")
+                },
+            );
+        }
+        let merged = merge_rules(&[], &user);
+        assert_eq!(decide(&merged).as_deref(), Some("a-user"));
+        let merged = merge_rules(&[rule("built-in", "POST /m/:id", AccessLevel::Ask)], &user);
+        assert_eq!(decide(&merged).as_deref(), Some("built-in"));
     }
 
     // ── Level resolution ─────────────────────────────────────────────────────
@@ -1709,7 +1637,7 @@ mod tests {
             ),
             AccessLevel::Allow
         );
-        let med = vec![rule("read", "GET /m/*", AccessLevel::Ask)];
+        let med = vec![rule("read", "GET /m/:id", AccessLevel::Ask)];
         assert_eq!(
             evaluate(
                 "GET",
@@ -1737,7 +1665,7 @@ mod tests {
             ),
             AccessLevel::AskAlways
         );
-        let del = vec![rule("del", "DELETE /m/*", AccessLevel::Deny)];
+        let del = vec![rule("del", "DELETE /m/:id", AccessLevel::Deny)];
         assert_eq!(
             evaluate(
                 "DELETE",
@@ -1760,10 +1688,13 @@ mod tests {
         let rules = vec![PolicyRule {
             id: Some("open-network".into()),
             label: None,
-            match_patterns: vec![
-                "POST /v1/projects/*/network-restrictions/apply".into(),
-                "PATCH /v1/projects/*/network-restrictions".into(),
-            ],
+            select: Select::new(
+                vec!["POST".into(), "PATCH".into()],
+                vec![
+                    PathPattern::compile("/v1/projects/:ref/network-restrictions/apply").unwrap(),
+                    PathPattern::compile("/v1/projects/:ref/network-restrictions").unwrap(),
+                ],
+            ),
             body: None,
             when: None,
             level: Some(AccessLevel::AskAlways),
@@ -1801,40 +1732,60 @@ mod tests {
     }
 
     #[test]
-    fn match_spec_roundtrips_string_and_list() {
-        // Single stays a bare string on the wire; a list stays a list.
-        let one = PolicyRule {
-            id: None,
-            label: None,
-            match_patterns: vec!["POST /a".into()],
-            body: None,
-            when: None,
-            level: Some(AccessLevel::Ask),
-            ttl: None,
-        };
-        let j = serde_json::to_value(&one).unwrap();
-        assert_eq!(j.get("match").unwrap(), &serde_json::json!("POST /a"));
-        let back: PolicyRule = serde_json::from_value(j).unwrap();
-        assert_eq!(back.match_patterns, vec!["POST /a".to_string()]);
+    fn a_stored_rule_reads_back_as_it_was_written() {
+        // `method` and `path` keep one string as a string and a list as a
+        // list.
+        for stored in [
+            serde_json::json!({"method": "POST", "path": "/a/:id", "level": "ask"}),
+            serde_json::json!({"method": ["POST", "PATCH"], "path": ["/a", "/b/*"], "level": "ask"}),
+        ] {
+            let edit: RuleConfig = serde_json::from_value(stored.clone()).unwrap();
+            assert!(edit.select().is_some_and(|s| s.problem().is_none()), "{stored}");
+            assert_eq!(serde_json::to_value(&edit).unwrap(), stored);
+        }
+        // An override carries no selector.
+        let edit: RuleConfig = serde_json::from_value(serde_json::json!({"level": "allow"})).unwrap();
+        assert!(edit.select().is_none());
+        // One the daemon refuses is kept as stored, and marked so.
+        for bad in [
+            serde_json::json!({"match": "delete /x/*", "level": "deny"}),
+            serde_json::json!({"path": "/a/:", "level": "deny"}),
+            serde_json::json!({"path": "/repos/*/issues", "level": "deny"}),
+            serde_json::json!({"method": "GE T", "level": "deny"}),
+            serde_json::json!({"method": [], "level": "deny"}),
+            serde_json::json!({"match": "POST /a", "path": "/a", "level": "deny"}),
+        ] {
+            let edit: RuleConfig = serde_json::from_value(bad.clone()).unwrap();
+            assert!(edit.select().unwrap().problem().is_some(), "{bad}");
+            assert_eq!(serde_json::to_value(&edit).unwrap(), bad);
+        }
+    }
 
-        let many = PolicyRule {
-            id: None,
-            label: None,
-            match_patterns: vec!["POST /a".into(), "PATCH /b".into()],
-            body: None,
-            when: None,
-            level: Some(AccessLevel::Ask),
+    /// A stored user rule whose selector can't be read is refused like one in
+    /// the 2.0 syntax: it never loosens a decision.
+    #[test]
+    fn an_unreadable_selector_is_a_refused_rule() {
+        let floor = Levels {
+            read: Some(AccessLevel::Allow),
+            write: Some(AccessLevel::Ask),
             ttl: None,
         };
-        let j = serde_json::to_value(&many).unwrap();
-        assert_eq!(
-            j.get("match").unwrap(),
-            &serde_json::json!(["POST /a", "PATCH /b"])
-        );
-        // A bare-string `match` still deserializes (back-compat).
-        let from_str: PolicyRule =
-            serde_json::from_value(serde_json::json!({"match": "GET /x", "level": "ask"})).unwrap();
-        assert_eq!(from_str.match_patterns, vec!["GET /x".to_string()]);
+        let decide = |level: AccessLevel| {
+            let mut user = HashMap::new();
+            user.insert(
+                "r".to_string(),
+                RuleConfig {
+                    path: Some(vec![PathPattern::lenient("/a/:")]),
+                    level: Some(level),
+                    ..Default::default()
+                },
+            );
+            let rules = merge_rules(&[], &user);
+            evaluate("GET", "/elsewhere", None, &VarMap::new(), Some(&rules), Some(&floor), &policy(), &[])
+        };
+        assert_eq!(decide(AccessLevel::Deny), AccessLevel::Deny);
+        assert_eq!(decide(AccessLevel::AskAlways), AccessLevel::AskAlways);
+        assert_eq!(decide(AccessLevel::Allow), AccessLevel::AskAlways);
     }
 
     #[test]
@@ -1844,7 +1795,7 @@ mod tests {
         let bad = vec![PolicyRule {
             id: Some("bad".into()),
             label: None,
-            match_patterns: vec!["GET /x".into()],
+            select: sel("GET /x"),
             body: None,
             when: None,
             level: None,
@@ -1871,7 +1822,7 @@ mod tests {
         // Two rules match the same request; the stricter (deny) wins even though
         // it's less specific — fail-safe, not most-specific.
         let rules = vec![
-            rule("broad", "DELETE /m/*", AccessLevel::Deny), // less specific, stricter
+            rule("broad", "DELETE /m/:id", AccessLevel::Deny), // less specific, stricter
             rule("narrow", "DELETE /m/safe", AccessLevel::Allow), // more specific, looser
         ];
         assert_eq!(
@@ -1985,7 +1936,7 @@ mod tests {
     // ── Merge: override by id + add new rule ──────────────────────────────────
     #[test]
     fn merge_overrides_level_by_id() {
-        let built_in = vec![rule("read", "GET /m/*", AccessLevel::Ask)];
+        let built_in = vec![rule("read", "GET /m/:id", AccessLevel::Ask)];
         let mut user = HashMap::new();
         user.insert(
             "read".into(),
@@ -1996,12 +1947,12 @@ mod tests {
         );
         let merged = merge_rules(&built_in, &user);
         assert_eq!(merged[0].level, Some(AccessLevel::Allow));
-        assert_eq!(merged[0].match_patterns, vec!["GET /m/*".to_string()]); // preserved
+        assert_eq!(merged[0].select.display(), ["GET /m/:id"]); // preserved
     }
 
     #[test]
     fn merge_lets_user_tighten_a_rule_to_deny() {
-        let built_in = vec![rule("del", "DELETE /m/*", AccessLevel::AskAlways)];
+        let built_in = vec![rule("del", "DELETE /m/:id", AccessLevel::AskAlways)];
         let mut user = HashMap::new();
         user.insert(
             "del".into(),
@@ -2033,9 +1984,8 @@ mod tests {
         user.insert(
             "vip".into(),
             RuleConfig {
-                match_pattern: Some("POST /m/vip".into()),
                 level: Some(AccessLevel::Allow),
-                ..Default::default()
+                ..RuleConfig::selecting("POST /m/vip")
             },
         );
         let merged = merge_rules(&built_in, &user);
@@ -2149,7 +2099,7 @@ mod tests {
             PolicyRule {
                 id: Some("p".into()),
                 label: None,
-                match_patterns: vec!["POST /buy".into()],
+                select: sel("POST /buy"),
                 body: None,
                 when: None,
                 level: Some(AccessLevel::Ask),
@@ -2158,7 +2108,7 @@ mod tests {
             PolicyRule {
                 id: Some("pl".into()),
                 label: None,
-                match_patterns: vec!["POST /buy".into()],
+                select: sel("POST /buy"),
                 body: None,
                 when: Some("vars.amount > 80".into()),
                 level: Some(AccessLevel::AskAlways),

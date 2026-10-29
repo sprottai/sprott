@@ -2882,19 +2882,17 @@ mod tests {
         rules.insert(
             "big".to_string(),
             RuleConfig {
-                match_pattern: Some("POST /pay".into()),
                 when: Some("vars.amount > 100".into()),
                 level: Some(AccessLevel::AskAlways),
-                ..Default::default()
+                ..RuleConfig::selecting("POST /pay")
             },
         );
         rules.insert(
             "pay".to_string(),
             RuleConfig {
-                match_pattern: Some("POST /pay".into()),
                 level: Some(AccessLevel::Ask),
                 ttl: Some(60),
-                ..Default::default()
+                ..RuleConfig::selecting("POST /pay")
             },
         );
         let mut policy = Policy::default();
@@ -3084,7 +3082,8 @@ name = "Shop"
 hosts = ["api.shop.com"]
 secrets = ["SHOP_KEY"]
 [requests.purchase]
-match = "POST /buy"
+method = "POST"
+path = "/buy"
 vars.amount = "/amount"
 vars.force  = { in = "query", at = "force" }
 scope = ["amount"]
@@ -3095,11 +3094,10 @@ scope = ["amount"]
             .extract_request_scope("POST", "/buy", Some("force=1"), Some(br#"{"amount":5}"#))
             .expect("shape matches");
         let rule = |when: Option<&str>, body: Option<&str>| RuleConfig {
-            match_pattern: Some("POST /buy".into()),
             when: when.map(str::to_string),
             body: body.map(crate::core::policy::BodyPattern::lenient),
             level: Some(AccessLevel::Ask),
-            ..Default::default()
+            ..RuleConfig::selecting("POST /buy")
         };
         let state = test_state();
         let problem = |rules: Vec<(&str, RuleConfig)>, conn: &str| {
@@ -3145,7 +3143,7 @@ scope = ["amount"]
             let src = format!(
                 "[service]\nid = \"acme\"\nname = \"Acme\"\nhosts = [{hosts}]\nsecrets = [\"ACME_KEY\"]\n\
                  [policy.levels]\nwrite = \"{write}\"\n\
-                 [requests.pay]\nmatch = \"POST /pay\"\nvars.amount = \"/amount\"\nvars.to = \"/to\"\nscope = [{scope}]\n"
+                 [requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.amount = \"/amount\"\nvars.to = \"/to\"\nscope = [{scope}]\n"
             );
             crate::service::gate::admit_toml(&src).unwrap()
         };

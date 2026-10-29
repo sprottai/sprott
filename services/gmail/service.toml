@@ -11,7 +11,8 @@ secrets = ["GMAIL_REFRESH_TOKEN"]
 # (the base64url RFC822 message) means an approved email cannot be swapped for a
 # different one on replay — the grant is tied to this exact message.
 [requests.send]
-match = "POST /gmail/v1/users/me/messages/send"
+method = "POST"
+path = "/gmail/v1/users/me/messages/send"
 vars.raw = "/raw"
 scope   = ["raw"]
 # The `email` filter (console code, like git's `| basic`) decodes the bound

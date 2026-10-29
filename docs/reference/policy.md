@@ -35,7 +35,8 @@ ttl   = 900               # optional window, in seconds, for an ask
 [[rule]]
 id    = "delete-repo"     # [a-z0-9][a-z0-9_-]*, unique in the file
 label = "Delete repository"
-match = "DELETE /repos/*/*"
+method = "DELETE"
+path  = "/repos/:owner/:repo"
 level = "ask-always"
 ```
 
@@ -47,7 +48,8 @@ level = "ask-always"
 |---|---|---|
 | `id` | yes | Stable id. Your overrides refer to it. |
 | `label` | yes | What the action is, in words. Shown on approval cards and in the console. |
-| `match` | yes | One pattern, or a list of patterns (any one matches). |
+| `method` | no | An HTTP method, or a list (any one matches). Unset: any method. |
+| `path` | no | A path pattern, or a list (any one matches). Unset: any path. |
 | `level` | yes | `allow`, `ask`, `ask-always` or `deny`. |
 | `body` | no | A regular expression the request body must match. |
 | `when` | no | A condition on a request value: `"vars.<name> <op> <literal>"`, with `>`, `<`, `>=`, `<=`, `==` or `!=`. |
@@ -55,28 +57,36 @@ level = "ask-always"
 
 Unknown keys reject the whole file.
 
-### Match patterns
+### Method and path
 
-- `"METHOD /path"` matches one method; `"/path"` matches any method. The
-  method is case-insensitive.
-- `*` matches exactly one path segment.
-- `**` matches one or more segments, and only as the last segment:
-  `PUT /repos/*/*/branches/**`.
-- The query string is ignored, and so is a trailing `/`.
-- Rules match on method and path. The host is fixed by the connection.
+A rule matches a request when its `method` and its `path` both match.
+
+- `method` is an HTTP method token, stored uppercase: `"DELETE"` or
+  `["PUT", "PATCH"]`.
+- `path` is a [URL Pattern](https://urlpattern.spec.whatwg.org/) pathname
+  starting with `/`. `:name` matches one segment; a final `/*` matches the rest
+  of the path: `"/repos/:owner/:repo/branches/*"`. `:name(a|b)` limits a
+  segment to those words; `{/:name}?` makes a segment optional.
+- A path is matched without its query string and without one trailing `/`.
+- The host is fixed by the connection.
+- A rule with no `method`, `path`, `body` or `when` rejects the file; the level
+  for every request is `[default]`.
+- `match` (the 2.0 `"METHOD /path"` with `*` and `**`) rejects the file.
+  Write `method = "DELETE"` and `path = "/repos/:owner/:repo"` instead.
 
 ### Limits
 
 - `ttl` is at most 31536000 seconds (one year). A larger value rejects the
   file; it is never cut down. Your own settings in the console have no cap.
-- A file is at most 64 KiB, with at most 128 rules, 32 patterns per rule and
-  16 `body` rules.
+- A file is at most 64 KiB, with at most 128 rules, 32 method × path pairs
+  per rule and 16 `body` rules.
 - A `body` pattern is at most 1024 bytes.
 
 ## How a request is decided
 
 1. **Rules.** Of all the rules that match, the strictest level wins. Among
-   rules at the same level, the most specific one is used for its window.
+   rules at the same level, the first one decides: the service's rules in
+   file order, then yours.
 2. **Connection floor.** No rule matched: the connection's `read` or `write`
    floor decides.
 3. **Tag floors.** Unset there: the floors of the service's tags. If several
@@ -130,7 +140,8 @@ A service can name the request values an approval binds to, in
 
 ```toml
 [requests.purchase]
-match   = "POST /v2/purchase"
+method  = "POST"
+path    = "/v2/purchase"
 vars.amount   = "/amount"            # a JSON pointer into the body
 vars.merchant = "/merchant_id"
 scope   = ["amount", "merchant"]     # these values bind the approval
@@ -143,7 +154,8 @@ and decide on them in `policy.toml`:
 [[rule]]
 id    = "purchase-large"
 label = "Large purchase"
-match = "POST /v2/purchase"
+method = "POST"
+path  = "/v2/purchase"
 when  = "vars.amount > 100"
 level = "ask-always"
 ```
@@ -167,18 +179,21 @@ write = "ask-always"
 [[rule]]
 id    = "list-emails"
 label = "List emails"
-match = "GET /gmail/v1/users/me/messages"
+method = "GET"
+path  = "/gmail/v1/users/me/messages"
 level = "allow"
 
 [[rule]]
 id    = "read-email"
 label = "Read email content"
-match = "GET /gmail/v1/users/me/messages/*"
+method = "GET"
+path  = "/gmail/v1/users/me/messages/:id"
 level = "ask"
 
 [[rule]]
 id    = "send-email"
 label = "Send email"
-match = "POST /gmail/v1/users/me/messages/send"
+method = "POST"
+path  = "/gmail/v1/users/me/messages/send"
 level = "ask-always"
 ```

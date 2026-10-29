@@ -76,6 +76,12 @@ const TOKENS: &[&str] = &[
     "allow",
     "level",
     "match",
+    "method",
+    "path",
+    ":id",
+    ":id(\\d+)",
+    "{/:id}?",
+    "/*",
     "body",
     "when",
     "id",
@@ -205,12 +211,12 @@ fn structural() -> Vec<(String, Option<String>)> {
         ),
         (
             svc.to_string(),
-            Some("[[rule]]\nid = \"r\"\nlabel = \"R\"\nmatch = \"/x\"\nlevel = \"ask\"\n".repeat(MAX_FILE_BYTES / 64)),
+            Some("[[rule]]\nid = \"r\"\nlabel = \"R\"\npath = \"/x\"\nlevel = \"ask\"\n".repeat(MAX_FILE_BYTES / 64)),
         ),
         (
             svc.to_string(),
             Some(format!(
-                "[[rule]]\nid = \"r\"\nlabel = \"R\"\nlevel = \"ask\"\nmatch = [{}]\n",
+                "[[rule]]\nid = \"r\"\nlabel = \"R\"\nlevel = \"ask\"\npath = [{}]\n",
                 vec!["\"/x\""; MAX_FILE_BYTES / 6].join(",")
             )),
         ),
@@ -221,7 +227,7 @@ fn structural() -> Vec<(String, Option<String>)> {
                 (0..MAX_FILE_BYTES / 1100)
                     .map(|i| {
                         format!(
-                            "[[rule]]\nid = \"r{i}\"\nlabel = \"R\"\nmatch = \"/x\"\nlevel = \"ask\"\nbody = '{}'\n",
+                            "[[rule]]\nid = \"r{i}\"\nlabel = \"R\"\npath = \"/x\"\nlevel = \"ask\"\nbody = '{}'\n",
                             "(\\w{99}){99}".repeat(70)
                         )
                     })
@@ -229,8 +235,40 @@ fn structural() -> Vec<(String, Option<String>)> {
             ),
         ),
         (
+            svc.to_string(),
+            // Path patterns with regex groups over the compiled-size limit, in
+            // as many rules as fit.
+            Some(
+                (0..MAX_FILE_BYTES / 1100)
+                    .map(|i| {
+                        format!(
+                            "[[rule]]\nid = \"p{i}\"\nlabel = \"P\"\nlevel = \"ask\"\npath = '/:x({})'\n",
+                            "(?:\\w{99}){99}".repeat(60)
+                        )
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            svc.to_string(),
+            // As many patterns with a regex group as fit.
+            Some(
+                (0..MAX_FILE_BYTES / 640)
+                    .map(|i| {
+                        format!(
+                            "[[rule]]\nid = \"q{i}\"\nlabel = \"Q\"\nlevel = \"ask\"\nmethod = \"POST\"\npath = [{}]\n",
+                            (0..MAX_MATCH_PATTERNS)
+                                .map(|j| format!("\"/a/:x{j}(b|c)/:y\""))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect(),
+            ),
+        ),
+        (
             format!(
-                "{svc}[requests.r]\nmatch = \"/x\"\nscope = []\nvars = {{ {} }}\n",
+                "{svc}[requests.r]\npath = \"/x\"\nscope = []\nvars = {{ {} }}\n",
                 (0..3000).map(|i| format!("v{i} = \"/a\"")).collect::<Vec<_>>().join(", ")
             ),
             None,
@@ -243,7 +281,7 @@ fn structural() -> Vec<(String, Option<String>)> {
         // Many consent tokens.
         (
             format!(
-                "{svc}[requests.r]\nmatch = \"/x\"\nvars.a = \"/a\"\nscope = [\"a\"]\nconsent = \"{}\"\n",
+                "{svc}[requests.r]\npath = \"/x\"\nvars.a = \"/a\"\nscope = [\"a\"]\nconsent = \"{}\"\n",
                 "{{ vars.a | email }}".repeat(40)
             ),
             None,

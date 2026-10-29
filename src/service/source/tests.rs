@@ -17,13 +17,15 @@ const ACME_POLICY: &str = r#"
 [[rule]]
 id = "no-delete"
 label = "Delete a thing"
-match = "DELETE /v1/things/*"
+method = "DELETE"
+path = "/v1/things/:thing"
 level = "deny"
 
 [[rule]]
 id = "pay"
 label = "Pay"
-match = "POST /v1/pay"
+method = "POST"
+path = "/v1/pay"
 level = "ask"
 "#;
 
@@ -142,7 +144,7 @@ fn old_string_entries_still_load() {
         "version": 4, "stores": {}, "store_order": [],
         "services": {
             "acme": ACME,
-            "beta": { "service": svc("beta", "api.beta.dev"), "policy": ACME_POLICY.replace("/v1/things/*", "/v2/*"),
+            "beta": { "service": svc("beta", "api.beta.dev"), "policy": ACME_POLICY.replace("/v1/things/:thing", "/v2/:thing"),
                       "source": { "kind": "github", "repo": "acme/tools", "commit": "a".repeat(40) } },
         }
     }))
@@ -366,7 +368,7 @@ fn gate_refuses_ttl_over_one_year() {
     use crate::service::limits::MAX_TTL_SECONDS;
     let rule = |ttl: u64| {
         format!(
-            "[[rule]]\nid = \"r\"\nlabel = \"R\"\nmatch = \"POST /x\"\nlevel = \"ask\"\nttl = {}\n",
+            "[[rule]]\nid = \"r\"\nlabel = \"R\"\nmethod = \"POST\"\npath = \"/x\"\nlevel = \"ask\"\nttl = {}\n",
             ttl
         )
     };
@@ -931,7 +933,7 @@ client_id = "public"
     assert_eq!(
         c.tightens,
         [
-            "acme: Delete a thing [DELETE /v1/things/*]: deny",
+            "acme: Delete a thing [DELETE /v1/things/:thing]: deny",
             "acme: Pay [POST /v1/pay]: ask"
         ],
         "each label beside what the rule matches"
@@ -1008,7 +1010,7 @@ fn first_add_card_shows_match_patterns_and_stated_windows() {
     let reg = crate::service::ServiceRegistry::compiled_only();
     let default_ttl = crate::proxy::handler::DEFAULT_ASK_TTL;
     let policy = format!(
-        "[default]\nwrite = \"ask\"\nttl = 3600\n\n[[rule]]\nid = \"pay\"\nlabel = \"Pay\"\nmatch = \"POST /v1/pay\"\nlevel = \"ask\"\nttl = 86400\n\n[[rule]]\nid = \"refund\"\nlabel = \"Refund\"\nmatch = [\"POST /v1/refund\", \"POST /v1/refund/*\"]\nlevel = \"ask\"\nttl = {default_ttl}\n\n[[rule]]\nid = \"no-delete\"\nlabel = \"Delete\"\nmatch = \"DELETE /v1/*\"\nlevel = \"deny\"\n"
+        "[default]\nwrite = \"ask\"\nttl = 3600\n\n[[rule]]\nid = \"pay\"\nlabel = \"Pay\"\nmethod = \"POST\"\npath = \"/v1/pay\"\nlevel = \"ask\"\nttl = 86400\n\n[[rule]]\nid = \"refund\"\nlabel = \"Refund\"\nmethod = \"POST\"\npath = [\"/v1/refund\", \"/v1/refund/:id\"]\nlevel = \"ask\"\nttl = {default_ttl}\n\n[[rule]]\nid = \"no-delete\"\nlabel = \"Delete\"\nmethod = \"DELETE\"\npath = \"/v1/:resource\"\nlevel = \"deny\"\n"
     );
     let snap: BTreeMap<_, _> = [("acme".to_string(), admitted("acme", ACME, Some(&policy)))].into();
     let c = add_card(
@@ -1023,8 +1025,8 @@ fn first_add_card_shows_match_patterns_and_stated_windows() {
         c.tightens,
         [
             "acme: Pay [POST /v1/pay]: ask, approval lasts 86400s",
-            format!("acme: Refund [POST /v1/refund | POST /v1/refund/*]: ask, approval lasts {default_ttl}s").as_str(),
-            "acme: Delete [DELETE /v1/*]: deny",
+            format!("acme: Refund [POST /v1/refund | POST /v1/refund/:id]: ask, approval lasts {default_ttl}s").as_str(),
+            "acme: Delete [DELETE /v1/:resource]: deny",
             "acme: default write: ask",
             "acme: default approval lasts 3600s",
         ],
@@ -1032,7 +1034,7 @@ fn first_add_card_shows_match_patterns_and_stated_windows() {
         c.tightens
     );
     // A rule deciding on the body alone shows that as what it matches.
-    let body_only = "[[rule]]\nid = \"refunds\"\nlabel = \"Refunds\"\nmatch = []\nbody = \"refund\"\nlevel = \"deny\"\n";
+    let body_only = "[[rule]]\nid = \"refunds\"\nlabel = \"Refunds\"\nbody = \"refund\"\nlevel = \"deny\"\n";
     let snap: BTreeMap<_, _> =
         [("acme".to_string(), admitted("acme", ACME, Some(body_only)))].into();
     let c = add_card(
@@ -1066,7 +1068,7 @@ fn update_card_highlights_new_hosts_loosened_rules_and_removals() {
     // New snapshot: a1 sends to one more host, its deny is now ask, its ask is gone;
     // b2 is dropped.
     let a1_new = "[service]\nid = \"a1\"\nname = \"a1\"\nhosts = [\"a.dev\", \"exfil.example\"]\nsecrets = [\"TOKEN\"]\n";
-    let pol_new = "[[rule]]\nid = \"no-delete\"\nlabel = \"Delete a thing\"\nmatch = \"DELETE /v1/things/*\"\nlevel = \"ask\"\n";
+    let pol_new = "[[rule]]\nid = \"no-delete\"\nlabel = \"Delete a thing\"\nmethod = \"DELETE\"\npath = \"/v1/things/:thing\"\nlevel = \"ask\"\n";
     let snap: BTreeMap<_, _> = [("a1".to_string(), admitted("a1", a1_new, Some(pol_new)))].into();
     let c = add_card(
         &snap,
@@ -1121,7 +1123,7 @@ fn diff_flags_loosened_defaults_and_ignores_tightening() {
     let tighter = summarize(&admitted(
         "a1",
         &svc("a1", "a.dev"),
-        Some("[default]\nwrite = \"deny\"\n[[rule]]\nid = \"x\"\nlabel = \"X\"\nmatch = \"GET /x\"\nlevel = \"deny\"\n"),
+        Some("[default]\nwrite = \"deny\"\n[[rule]]\nid = \"x\"\nlabel = \"X\"\nmethod = \"GET\"\npath = \"/x\"\nlevel = \"deny\"\n"),
     ));
     let d = diff(
         &[("a1".to_string(), old)].into(),
@@ -1283,12 +1285,12 @@ fn card_lists_every_host_an_oauth_artifact_reaches_and_pkce_off() {
 fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
     let svc_req = |scope: &str, extra: &str| {
         format!(
-            "{OAUTH_BASE}{extra}\n[requests.buy]\nmatch = \"POST /v1/pay\"\nvars.amount = \"/amount\"\nvars.merchant = \"/merchant\"\nscope = [{scope}]\n"
+            "{OAUTH_BASE}{extra}\n[requests.buy]\nmethod = \"POST\"\npath = \"/v1/pay\"\nvars.amount = \"/amount\"\nvars.merchant = \"/merchant\"\nscope = [{scope}]\n"
         )
     };
     let pol = |rule_ttl: &str, default_ttl: &str| {
         format!(
-            "[default]\nwrite = \"ask\"\n{default_ttl}\n[[rule]]\nid = \"pay\"\nlabel = \"Pay\"\nmatch = \"POST /v1/pay\"\nlevel = \"ask\"\n{rule_ttl}\n"
+            "[default]\nwrite = \"ask\"\n{default_ttl}\n[[rule]]\nid = \"pay\"\nlabel = \"Pay\"\nmethod = \"POST\"\npath = \"/v1/pay\"\nlevel = \"ask\"\n{rule_ttl}\n"
         )
     };
     let old = summarize(&admitted(
