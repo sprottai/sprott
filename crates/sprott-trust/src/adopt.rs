@@ -10,7 +10,7 @@ use crate::keyset::{
     decode_keys_data_field, DelegationEvent, KeysFieldError, KeysetUik, MemberRole, RekeyProof,
     RootSuccession, UikCred,
 };
-use crate::trust::fold_roles_of;
+use crate::trust::{fold_roles_of, prefix_len};
 
 /// The text the daemon's `AppError::BadRequest` gives a [`KeysFieldError`]. The
 /// adopt errors below carry it, so a sync error reads as it did before these
@@ -588,7 +588,7 @@ pub fn adopt_rekey_meta(
     // role_epoch, NOT re-derived at the proposed `generation`. A member's self-signed
     // proof fails here (a member is not an owner).
     let roles_at = match uik.as_ref() {
-        Some(u) => fold_roles_of(u, vault_id, Some(candidate.membership_len as usize)),
+        Some(u) => fold_roles_of(u, vault_id, Some(prefix_len(candidate.membership_len))),
         None => BTreeMap::new(),
     };
     if !roles_at

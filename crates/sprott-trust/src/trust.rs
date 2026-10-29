@@ -445,7 +445,7 @@ pub fn verify_rekey_proof(
     // the served log. Not today's roles: an admin who re-keyed and was later demoted
     // still signed with authority, and the vault must stay readable. (`is_admin`, not
     // a pattern: a legacy `"owner"` grant reads as `LegacyOwner`, also an admin.)
-    let admin = fold_roles_of(uik, vault_id, Some(proof.membership_len as usize))
+    let admin = fold_roles_of(uik, vault_id, Some(prefix_len(proof.membership_len)))
         .get(&proof.signer_id)
         .is_some_and(|r| r.is_admin());
     if !admin {
@@ -580,6 +580,13 @@ pub fn fold_roles_of(
     map
 }
 
+/// A re-key proof's committed log length (`membership_len`) as a count of
+/// events. Saturates where `usize` is narrower than `u64` (wasm32), so a 32-bit
+/// build reaches the 64-bit daemon's verdict: no log holds that many events.
+pub(crate) fn prefix_len(membership_len: u64) -> usize {
+    usize::try_from(membership_len).unwrap_or(usize::MAX)
+}
+
 /// Membership anti-rollback check (delegation-log-review-findings.md C2): the current
 /// re-key proof committed a delegation-log PREFIX (`membership_len` events at the current
 /// role-epoch, in `(seq, sig)` order, hashed to `membership_hash`). Recompute that
@@ -606,7 +613,7 @@ pub fn membership_prefix_ok(uik: &KeysetUik, vault_id: &str) -> bool {
         .filter(|e| e.role_epoch == role_epoch)
         .collect();
     events.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.sig.cmp(&b.sig)));
-    let n = proof.membership_len as usize;
+    let n = prefix_len(proof.membership_len);
     if events.len() < n {
         return false; // the server dropped committed events
     }
