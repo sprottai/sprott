@@ -7,6 +7,7 @@
 //! randomness. The daemon calls it with its stored keyset; the console (as
 //! wasm) calls it with the keyset adopted from the served membership alone.
 
+pub mod adopt;
 pub mod identity;
 pub mod keyset;
 pub mod trust;

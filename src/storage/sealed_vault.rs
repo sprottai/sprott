@@ -1156,37 +1156,23 @@ impl PerItemVault {
         role: crate::storage::plaintext::MemberRole,
         role_sig: Vec<u8>,
     ) {
-        let creds = &mut self.keyset.uik.get_or_insert_with(KeysetUik::default).creds;
-        let prev_content_ct = creds
-            .get(&cid_b64)
-            .map(|c| c.prev_content_ct.clone())
-            .unwrap_or_default();
-        creds.insert(
+        sprott_trust::adopt::set_uik_cred(
+            &mut self.keyset.uik,
             cid_b64,
-            UikCred {
-                user_id,
-                sig_pub,
-                enc_pub,
-                k_encapped,
-                k_ct,
-                role,
-                role_sig,
-                prev_content_ct,
-            },
+            user_id,
+            sig_pub,
+            enc_pub,
+            k_encapped,
+            k_ct,
+            role,
+            role_sig,
         );
     }
 
     /// Set the previous content keys an entry carries, as sealed (an adopted
     /// row's `uik_prev_content_ct`). A no-op for an entry that is not stored.
     pub fn set_uik_prev_content_ct(&mut self, cid_b64: &str, sealed: Vec<u8>) {
-        if let Some(c) = self
-            .keyset
-            .uik
-            .as_mut()
-            .and_then(|u| u.creds.get_mut(cid_b64))
-        {
-            c.prev_content_ct = sealed;
-        }
+        sprott_trust::adopt::set_uik_prev_content_ct(&mut self.keyset.uik, cid_b64, sealed);
     }
 
     /// Adopt a pulled `/keys` row's v2 UIK fields (base64, lenient-decoded like
@@ -1208,35 +1194,19 @@ impl PerItemVault {
         role_sig_b64: &str,
         prev_content_ct_b64: Option<&str>,
     ) -> Result<()> {
-        let prev_content_ct = prev_content_ct_b64
-            .filter(|s| !s.is_empty())
-            .map(decode_keys_data_field)
-            .transpose()?;
-        let sig_pub = decode_keys_data_field(sig_pub_b64)?;
-        let enc_pub = decode_keys_data_field(enc_pub_b64)?;
-        let k_encapped = decode_keys_data_field(k_encapped_b64)?;
-        let k_ct = decode_keys_data_field(k_ct_b64)?;
-        // Role signature is base64 (raw 64-byte Ed25519); an empty string = a
-        // legacy row with no grant (decodes to an empty vec → not an owner).
-        let role_sig = if role_sig_b64.is_empty() {
-            Vec::new()
-        } else {
-            decode_keys_data_field(role_sig_b64)?
-        };
-        self.set_uik_cred(
-            cid_b64.to_string(),
-            user_id.to_string(),
-            sig_pub,
-            enc_pub,
-            k_encapped,
-            k_ct,
+        sprott_trust::adopt::set_uik_cred_b64(
+            &mut self.keyset.uik,
+            cid_b64,
+            user_id,
+            sig_pub_b64,
+            enc_pub_b64,
+            k_encapped_b64,
+            k_ct_b64,
             role,
-            role_sig,
-        );
-        if let Some(sealed) = prev_content_ct {
-            self.set_uik_prev_content_ct(cid_b64, sealed);
-        }
-        Ok(())
+            role_sig_b64,
+            prev_content_ct_b64,
+        )
+        .map_err(|e| AppError::BadRequest(e.to_string()))
     }
 
     /// Adopt a credential's WebAuthn pubkey (`x`/`y` verbatim strings + device_name)
@@ -1990,10 +1960,7 @@ impl PerItemVault {
             return Err(AppError::BadRequest("approver credential has no identity".into()));
         }
         self.set_registry_pubkey(cid_b64, x_b64, y_b64, "")?;
-        let uik = self.keyset.uik.get_or_insert_with(KeysetUik::default);
-        uik.creds.remove(cid_b64);
-        uik.approver_cids
-            .insert(cid_b64.to_string(), identity_id.to_string());
+        sprott_trust::adopt::set_approver_label(&mut self.keyset.uik, cid_b64, identity_id);
         Ok(())
     }
 
@@ -2075,6 +2042,8 @@ impl PerItemVault {
 
     /// [`fold_roles`](Self::fold_roles) over only the first `events` delegation-log
     /// events: the roles at the log prefix a re-key proof commits (`membership_len`).
+    /// The re-key ratchet that called it now folds in `sprott_trust::adopt`.
+    #[allow(dead_code)]
     pub(crate) fn fold_roles_at(
         &self,
         vault_id: &str,
