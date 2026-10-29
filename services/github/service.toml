@@ -20,12 +20,28 @@ secrets = ["GITHUB_TOKEN"]
 # Where a human mints the secret (auxiliary; display-only helper link).
 secret_url = "https://github.com/settings/tokens?type=beta"
 
-# A repository's settings change. The visibility fields are read from the
-# parsed body, so policy decides on them and an approval binds them.
+# A repository settings change. An approval covers the whole request (its
+# make-public condition reads the visibility fields from the body).
 [requests.repo_settings]
 method = ["PATCH", "POST"]
 path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
-scope = ["request.body.private", "request.body.visibility"]
+
+# A secret's value is sealed afresh on every run (a sealed box to the
+# repository's public key), so an approval covers which secret and who can
+# read it: the path, the key it is sealed to, its visibility and its
+# repositories.
+[requests.secrets]
+method = "PUT"
+path = [
+  "/repos/:owner/:repo/:kind/secrets/:secret_name",
+  "/repositories/:repository_id/:kind/secrets/:secret_name",
+  "/repos/:owner/:repo/environments/:environment/secrets/:secret_name",
+  "/repositories/:repository_id/environments/:environment/secrets/:secret_name",
+  "/orgs/:org/:kind/secrets/:secret_name",
+  "/organizations/:org_id/:kind/secrets/:secret_name",
+  "/user/codespaces/secrets/:secret_name",
+]
+scope = ["request.body.key_id", "request.body.visibility", "request.body.selected_repository_ids"]
 
 # The GraphQL API reaches the same consequential actions as the REST routes
 # above. Policy decides on the called mutations; an approval binds the calls.

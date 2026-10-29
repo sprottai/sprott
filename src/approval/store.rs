@@ -115,6 +115,12 @@ pub struct PolicyContext {
     /// approver's identity signature must cover, and the digest that stands
     /// for it in the intent key. `None` when there is nothing to show.
     pub card: Option<crate::approval::card::SealedCard>,
+    /// The permit identity of the request, computed at mint from what the
+    /// approval covers (`crate::approval::coverage`) under the content-key
+    /// generation it was minted in: approve keys the permit by it. Kept here
+    /// only, never in the op the relay carries. `None` for an op minted
+    /// without one (nothing request-bound redeems it).
+    pub identity: Option<crate::approval::coverage::Identity>,
 }
 
 impl ApprovalRecord {
@@ -636,6 +642,7 @@ mod tests {
             credentials: None,
             policy_fp: None,
             card: None,
+            identity: None,
         }
     }
 

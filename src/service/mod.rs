@@ -43,9 +43,11 @@ pub struct ServiceDef {
     /// service.toml without one. `None` when it declares neither.
     pub policy: Option<ServicePolicy>,
     /// Request shapes (`[requests.<name>]`): which requests they read and in
-    /// what body format, which request values bind an approval (`scope`), and
-    /// how to phrase them (`consent`). See [`RequestShape`].
+    /// what body format, which request values an approval covers (`scope`),
+    /// and how to phrase them (`consent`). See [`RequestShape`].
     pub requests: HashMap<String, RequestShape>,
+    /// The shapes' names in declaration order: the order they are tried in.
+    pub request_order: Vec<String>,
     /// What the gate found worth saying about an admitted definition (a
     /// condition member read without a presence guard): printed by `sprott
     /// service validate` / `add`, never a refusal.
@@ -169,17 +171,16 @@ impl ServiceDef {
     }
 
     /// Read a request against this definition's `[requests]` shapes: the
-    /// first, in name order, whose `method`, `path` and `condition` select it
-    /// (a condition that errors doesn't select), with its request scope, and
-    /// the request object rules then read, in that shape's body format (`json`
-    /// when no shape matched). Shapes should not overlap; the stable order
-    /// makes "they shouldn't, but if they do" repeatable, so a replay binds
-    /// what its approval bound. A value a shape's condition, `scope` or
-    /// `consent` reads that can't be read refuses the request.
+    /// first, in declaration order, whose `method`, `path` and `condition`
+    /// select it (a condition that errors doesn't select), with what its
+    /// approval covers, and the request object rules then read, in that
+    /// shape's body format (`json` when no shape matched). A value a shape's
+    /// condition, `scope` or `consent` reads that can't be read refuses the
+    /// request.
     pub fn read_request<'a>(
         &self,
         input: crate::core::request::RequestInput<'a>,
-    ) -> Result<(Option<RequestScope>, crate::core::request::Request<'a>), Unreadable> {
+    ) -> Result<ReadRequest<'a>, Unreadable> {
         read_request(Some(self), input)
     }
 
@@ -493,10 +494,13 @@ pub struct RequestShape {
     /// The server's body format (`body = "json" | "form" | "graphql" |
     /// "text"`, absent = `json`), never the caller's Content-Type.
     pub format: BodyFormat,
-    /// The request paths whose values bind an approval, as written (`None`:
-    /// absent). Absent and `[]` both bind nothing beyond what `consent`
-    /// reads for now.
+    /// The request paths whose values an approval covers, as written
+    /// (`None`: absent, the whole request; `[]`: none beyond what is always
+    /// covered). The token `request` stands for the whole request
+    /// ([`Self::scope_whole`]).
     pub scope: Option<Vec<ReadPath>>,
+    /// `scope` lists the token `request`: the whole request, plus the paths.
+    pub scope_whole: bool,
     /// The approval card's phrasing: a template over request paths, with the
     /// `{{ x | filter }}` pipe syntax of git-integration's
     /// `{{ secret.X | basic }}` (the Liquid/Jinja convention):
@@ -508,12 +512,13 @@ pub struct RequestShape {
     /// the same split as `[auth]`). Interpolated values are escaped by the
     /// renderer (they come from the agent).
     pub consent: Option<String>,
-    /// The paths `consent` reads: always bound, so what the card phrases is
-    /// what an approval binds.
+    /// The paths `consent` reads: always covered, so what the card phrases
+    /// is what an approval covers.
     pub consent_reads: Vec<ReadPath>,
     /// Request paths whose string values carry encoded media, keyed by the
-    /// path's text, in JSON Schema's own content keywords (2020-12 §8).
-    /// Validated, not yet used.
+    /// path's text, in JSON Schema's own content keywords (2020-12 §8): a
+    /// compiled-in definition's are covered by their content
+    /// (`crate::approval::coverage`), a vault definition's are for display.
     pub encoded: std::collections::BTreeMap<String, Encoded>,
 }
 
@@ -527,9 +532,17 @@ pub struct Encoded {
 }
 
 impl RequestShape {
-    /// The paths an approval of a request this shape matched binds: its
-    /// `scope` and what its `consent` reads, sorted, each once.
-    pub fn binds(&self) -> Vec<ReadPath> {
+    /// Whether an approval of a request this shape matched covers the whole
+    /// request: `scope` absent, or listing the token `request`.
+    pub fn covers_whole(&self) -> bool {
+        self.scope.is_none() || self.scope_whole
+    }
+
+    /// What an approval of a request this shape matched covers, as text:
+    /// `request` for the whole request, then the listed paths and what
+    /// `consent` reads, sorted, each once. (A rule's condition reads join at
+    /// the request.)
+    pub fn covers(&self) -> Vec<String> {
         let mut paths: Vec<ReadPath> = self
             .scope
             .iter()
@@ -539,7 +552,11 @@ impl RequestShape {
             .collect();
         paths.sort();
         paths.dedup();
-        paths
+        self.covers_whole()
+            .then(|| "request".to_string())
+            .into_iter()
+            .chain(paths.iter().map(ToString::to_string))
+            .collect()
     }
 }
 
@@ -577,14 +594,16 @@ pub fn consent_refs(template: &str) -> Result<Vec<ConsentRef>, String> {
     Ok(out)
 }
 
-/// A bound value as text: a string is itself, anything else its JCS text
-/// (RFC 8785); `null` binds nothing.
-fn bound_text(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        other => String::from_utf8(sudp::canonical::canonicalize(other)).ok(),
-    }
+/// A request read against a definition's `[requests]` shapes.
+pub struct ReadRequest<'a> {
+    /// The matched shape, `None` when none matched.
+    pub scope: Option<RequestScope>,
+    /// The request object, in the matched shape's body format.
+    pub request: crate::core::request::Request<'a>,
+    /// No shape matched, and a shape whose `method` and `path` selected the
+    /// request has a condition that errored: an approval of it is
+    /// single-use (a window would be the whole rule's, which is looser).
+    pub errored: bool,
 }
 
 /// [`ServiceDef::read_request`] for a connection whose definition may be
@@ -592,102 +611,75 @@ fn bound_text(v: &serde_json::Value) -> Option<String> {
 pub fn read_request<'a>(
     def: Option<&ServiceDef>,
     input: crate::core::request::RequestInput<'a>,
-) -> Result<(Option<RequestScope>, crate::core::request::Request<'a>), Unreadable> {
+) -> Result<ReadRequest<'a>, Unreadable> {
     use crate::core::request::Request;
+    let mut errored = false;
     if let Some(def) = def {
-        let mut names: Vec<&String> = def.requests.keys().collect();
-        names.sort();
-        for name in names {
-            let shape = &def.requests[name];
+        for name in &def.request_order {
+            let Some(shape) = def.requests.get(name) else {
+                continue;
+            };
             let Some(params) = shape.select.exec(input.method, input.path) else {
                 continue;
             };
             let request = Request::new(input, shape.format, params);
             if let Some(c) = &shape.condition {
-                if c.eval(&request)? != Some(true) {
-                    continue;
+                match c.eval(&request)? {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => {
+                        errored = true;
+                        continue;
+                    }
                 }
             }
-            let mut bound = Vec::new();
-            for path in shape.binds() {
-                if let Some(text) = request.value(&path)?.as_ref().and_then(bound_text) {
-                    bound.push((path.to_string(), cap_bound_value(&text)));
-                }
+            // Every value the consent reads is read now: one that can't be
+            // read refuses the request before any decision.
+            for path in shape.scope.iter().flatten().chain(shape.consent_reads.iter()) {
+                request.value(path)?;
             }
-            bound.sort_by(|a, b| a.0.cmp(&b.0));
             let scope = RequestScope {
-                bound,
-                consent: shape.consent.clone(),
                 shape: name.clone(),
+                consent: shape.consent.clone(),
+                whole: shape.covers_whole(),
+                listed: shape.scope.clone().unwrap_or_default(),
+                consent_reads: shape.consent_reads.clone(),
+                encoded: shape.encoded.clone(),
             };
-            return Ok((Some(scope), request));
+            return Ok(ReadRequest {
+                scope: Some(scope),
+                request,
+                errored: false,
+            });
         }
     }
-    Ok((
-        None,
-        Request::new(input, BodyFormat::Json, crate::core::selector::Params::new()),
-    ))
+    Ok(ReadRequest {
+        scope: None,
+        request: Request::new(input, BodyFormat::Json, crate::core::selector::Params::new()),
+        errored,
+    })
 }
 
-/// What a request's matched `[requests]` shape binds.
+/// The `[requests]` shape a request matched, as its approval covers it.
 #[derive(Debug, Clone, Default)]
 pub struct RequestScope {
-    /// The bound `(request path, value)` pairs, sorted by path: what
-    /// [`scope_digest`] hashes into the permit identity, and what the
-    /// approval card lists. Empty ⇒ nothing bound.
-    pub bound: Vec<(String, String)>,
-    /// The shape's consent template.
-    pub consent: Option<String>,
     /// The matched shape's name (its `[requests.<name>]` key).
     pub shape: String,
+    /// The shape's consent template.
+    pub consent: Option<String>,
+    /// The whole request is covered ([`RequestShape::covers_whole`]).
+    pub whole: bool,
+    /// The paths its `scope` lists.
+    pub listed: Vec<ReadPath>,
+    /// The paths its `consent` reads.
+    pub consent_reads: Vec<ReadPath>,
+    /// Its `encoded` declarations.
+    pub encoded: std::collections::BTreeMap<String, Encoded>,
 }
 
-impl RequestScope {
-    /// The digest of the bound values — the grant-identity extension.
-    pub fn digest(&self) -> String {
-        scope_digest(&self.bound)
-    }
-}
-
-/// A bound value larger than this is bound by digest, not verbatim, so the op
-/// that carries it (through the approval relay) stays small. 8 KiB keeps a
-/// normal email/JSON field verbatim (the console renders it legibly) while a
-/// message with a big attachment degrades to a summary instead of 413-ing.
+/// How much of a GraphQL request's calls `request.graphql.calls` shows
+/// (graphql.rs `calls_var`).
 pub(crate) const BOUND_VALUE_CAP: usize = 8 * 1024;
-
-/// Cap a bound value: verbatim if small, else `sha256:<hex>#<len>` — applied
-/// identically at op-create AND at redeem, so the grant identity is stable; the
-/// console shows the marker when it can't render the (absent) full value.
-fn cap_bound_value(v: &str) -> String {
-    if v.len() <= BOUND_VALUE_CAP {
-        v.to_string()
-    } else {
-        use sha2::{Digest, Sha256};
-        format!("sha256:{:x}#{}", Sha256::digest(v.as_bytes()), v.len())
-    }
-}
-
-/// A stable digest over the sorted `(path, value)` pairs a shape binds. `""`
-/// when nothing is bound, so a request with no shape / empty scope collapses
-/// to the Phase-1 `(conn, method, host, path)` key (no field binding). The
-/// approve write and the redeem read compute this identically over the same
-/// pairs, so a tampered field value yields a different key → a miss → a fresh
-/// prompt.
-pub fn scope_digest(bound: &[(String, String)]) -> String {
-    if bound.is_empty() {
-        return String::new();
-    }
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    // Length-prefix each field so `(ab, c)` and `(a, bc)` can't collide.
-    for (k, v) in bound {
-        h.update((k.len() as u64).to_le_bytes());
-        h.update(k.as_bytes());
-        h.update((v.len() as u64).to_le_bytes());
-        h.update(v.as_bytes());
-    }
-    format!("{:x}", h.finalize())
-}
 
 // ── Vault-custom definitions ──────────────────────────────────────────────────
 
@@ -2051,11 +2043,11 @@ secrets = ["GITHUB_TOKEN"]
             // The whole API is one POST endpoint; the mutation name lives in the
             // body and reaches policy as `request.graphql.fields` through
             // [requests.graphql].
-            let (rs, request) = def
+            let read = def
                 .read_request(input("POST", "/graphql/v2", body))
                 .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"));
-            assert!(rs.is_some(), "the graphql shape covers every POST");
-            evaluate(&request, Some(&rules), None, &policy, &["app".into()]).unwrap()
+            assert!(read.scope.is_some(), "the graphql shape covers every POST");
+            evaluate(&read.request, Some(&rules), None, &policy, &["app".into()]).unwrap()
         };
         // Routine GraphQL (queries + non-destroy mutations) rides the allow floor.
         assert_eq!(
@@ -2156,19 +2148,40 @@ secrets = ["GITHUB_TOKEN"]
         let rules = r.default_policy_rules(service).expect("policy").to_vec();
         let def = r.get(service).expect("service");
         let body = String::from_utf8_lossy(input.body.unwrap_or_default()).into_owned();
-        let (_, request) = def
+        let read = def
             .read_request(input)
             .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"));
-        evaluate(&request, Some(&rules), None, &Policy::default(), &["dev".into()])
+        evaluate(&read.request, Some(&rules), None, &Policy::default(), &["dev".into()])
             .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"))
     }
 
-    /// The request scope a service's shape gives a request.
+    /// The shape a service's shapes match a request with.
     fn scope_of(def: &ServiceDef, method: &str, path: &str, body: &str) -> RequestScope {
         def.read_request(input(method, path, body))
             .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"))
-            .0
+            .scope
             .expect("a shape matches")
+    }
+
+    /// What a single-use approval of a request covers (the shape's scope and
+    /// consent; no rule's condition reads), as the card shows it and as its
+    /// permit identity under a test key.
+    fn covered(
+        def: &ServiceDef,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (Vec<(String, String)>, String) {
+        let read = def
+            .read_request(input(method, path, body))
+            .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"));
+        let c = crate::approval::coverage::cover_read(&read, path, &[], true, true).unwrap();
+        let id = crate::approval::coverage::IdentityKey::derive(&[3u8; 32], 0).identity(&c);
+        (c.shown, id.digest)
+    }
+
+    fn shown<'s>(shown: &'s [(String, String)], label: &str) -> Option<&'s str> {
+        shown.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str())
     }
 
     /// Why a service's shapes and rules refuse a request (its status).
@@ -2293,10 +2306,10 @@ secrets = ["GITHUB_TOKEN"]
         for body in ["[]", r#"[null,"cmF3"]"#, r#""raw""#, "5", "true"] {
             assert_eq!(refusal(gmail, "POST", send, body), Some(422), "{body}");
         }
-        let ok = scope_of(gmail, "POST", send, r#"{"raw":"cmF3"}"#);
-        assert_eq!(ok.bound, vec![("request.body.raw".to_string(), "cmF3".to_string())]);
+        let (ok, _) = covered(gmail, "POST", send, r#"{"raw":"cmF3"}"#);
+        assert_eq!(shown(&ok, "request.body.raw"), Some("cmF3"));
         for absent in ["{}", r#"{"raw":null}"#] {
-            assert!(scope_of(gmail, "POST", send, absent).bound.is_empty(), "{absent}");
+            assert_eq!(refusal(gmail, "POST", send, absent), None, "{absent}");
         }
 
         let snaplii = r.get("snaplii").expect("snaplii service");
@@ -2329,31 +2342,26 @@ secrets = ["GITHUB_TOKEN"]
 
         let r = ServiceRegistry::load();
         let def = r.get("snaplii").expect("snaplii service");
-        let bound = |path: &str, body: &str| scope_of(def, "POST", path, body).bound;
-        assert_eq!(
-            bound("/v2/purchase", &purchase(r#""40.00""#)),
-            vec![
-                (
-                    "request.body.orderInfo".to_string(),
-                    r#"{"item":{"itemId":"CB_1","price":"40.00"},"orderType":"GIFT_CARD"}"#.to_string()
-                ),
-                ("request.body.orderInfo.item.itemId".to_string(), "CB_1".to_string()),
-                ("request.body.orderInfo.item.price".to_string(), "40.00".to_string()),
-                ("request.body.orderInfo.orderType".to_string(), "GIFT_CARD".to_string()),
-            ]
-        );
+        // A purchase approval covers the whole order (DESIGN §7) and shows
+        // what the consent reads.
+        let body = purchase(r#""40.00""#);
+        let (card, _) = covered(def, "POST", "/v2/purchase", &body);
+        assert_eq!(shown(&card, "request.body"), Some(body.as_str()));
+        assert_eq!(shown(&card, "request.body.orderInfo.item.itemId"), Some("CB_1"));
+        assert_eq!(shown(&card, "request.body.orderInfo.item.price"), Some("40.00"));
+        assert_eq!(shown(&card, "request.body.orderInfo.orderType"), Some("GIFT_CARD"));
         // A gift to someone else, or another payment method, is another approval.
         let mine = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
         let gift = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}, "orderContext": {{"giftOrder": "true"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
-        let scope = |body: &str| scope_of(def, "POST", "/v2/purchase", body);
-        assert_ne!(scope(&mine).digest(), scope(&gift).digest());
-        assert_eq!(
-            bound("/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
-            vec![
-                ("request.body.amount".to_string(), "12.50".to_string()),
-                ("request.body.to_phone".to_string(), "4165550006".to_string()),
-            ]
-        );
+        let identity = |body: &str| covered(def, "POST", "/v2/purchase", body).1;
+        assert_ne!(identity(&mine), identity(&gift));
+        assert_eq!(identity(&mine), identity(&mine.clone()));
+        // A transfer covers its recipient, amount and note.
+        let (card, _) = covered(def, "POST", "/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#);
+        assert_eq!(shown(&card, "request.body.amount"), Some("12.50"));
+        assert_eq!(shown(&card, "request.body.to_phone"), Some("4165550006"));
+        assert_eq!(shown(&card, "request.body.remark"), None);
+        assert_eq!(shown(&card, "request.body"), None, "a narrowed scope shows what it covers");
     }
 
     /// Every Cloudflare change that can remove or re-point traffic is gated,
@@ -2381,15 +2389,17 @@ secrets = ["GITHUB_TOKEN"]
 
         let r = ServiceRegistry::load();
         let def = r.get("cloudflare").expect("cloudflare service");
-        let scope = |path: &str, body: &str| scope_of(def, "PATCH", path, body);
         let path = format!("{z}/dns_records/r1");
-        let rs = scope(&path, r#"{"proxied": true, "comment": "x"}"#);
-        assert_eq!(rs.bound, vec![("request.body.proxied".to_string(), "true".to_string())]);
-        // The same approval can't carry a new target.
-        let other = scope(&path, r#"{"proxied": true, "content": "198.51.100.7"}"#);
-        assert_ne!(rs.digest(), other.digest());
-        let batch = scope_of(def, "POST", &format!("{z}/dns_records/batch"), r#"{"deletes": [{"id": "r1"}]}"#);
-        assert_eq!(batch.bound, vec![("request.body.deletes".to_string(), r#"[{"id":"r1"}]"#.to_string())]);
+        let (card, id) = covered(def, "PATCH", &path, r#"{"proxied": true, "comment": "x"}"#);
+        assert_eq!(shown(&card, "request.body.proxied"), Some("true"));
+        assert_eq!(shown(&card, "request.body.comment"), None);
+        // The same approval can't carry a new target; a comment is not covered.
+        let (_, other) = covered(def, "PATCH", &path, r#"{"proxied": true, "content": "198.51.100.7"}"#);
+        assert_ne!(id, other);
+        let (_, commented) = covered(def, "PATCH", &path, r#"{"proxied": true, "comment": "y"}"#);
+        assert_eq!(id, commented);
+        let (batch, _) = covered(def, "POST", &format!("{z}/dns_records/batch"), r#"{"deletes": [{"id": "r1"}]}"#);
+        assert_eq!(shown(&batch, "request.body.deletes"), Some(r#"[{"id":"r1"}]"#));
     }
 
     /// Every Railway mutation that deletes, mints a credential or changes who
@@ -2493,21 +2503,20 @@ secrets = ["GITHUB_TOKEN"]
     fn railway_graphql_shape_binds_and_refuses_what_it_cannot_read() {
         let r = ServiceRegistry::load();
         let def = r.get("railway").expect("railway service");
-        let scope = |body: &str| scope_of(def, "POST", "/graphql/v2", body);
-        let rs = scope(r#"{"query":"mutation { serviceDelete(id: \"3ec1\") }"}"#);
+        let body = r#"{"query":"mutation { serviceDelete(id: \"3ec1\") }"}"#;
+        let (card, id) = covered(def, "POST", "/graphql/v2", body);
         let call = r#"[{"args":{"id":"3ec1"},"field":"serviceDelete"}]"#.to_string();
+        assert_eq!(shown(&card, "request.graphql.calls"), Some(call.as_str()));
+        assert_eq!(shown(&card, "request.graphql.fields"), Some(r#"["serviceDelete"]"#));
+        let request = format!(r#"{{"calls":{call}}}"#);
+        assert_eq!(shown(&card, "request.graphql.request"), Some(request.as_str()));
         assert_eq!(
-            rs.bound,
-            vec![
-                ("request.graphql.calls".to_string(), call.clone()),
-                ("request.graphql.fields".to_string(), r#"["serviceDelete"]"#.to_string()),
-                ("request.graphql.request".to_string(), format!(r#"{{"calls":{call}}}"#)),
-            ]
+            scope_of(def, "POST", "/graphql/v2", body).consent.as_deref(),
+            Some("{{ request.graphql.calls | graphql }}")
         );
-        assert_eq!(rs.consent.as_deref(), Some("{{ request.graphql.calls | graphql }}"));
         // A different target is a different approval.
-        let other = scope(r#"{"query":"mutation { serviceDelete(id: \"9999\") }"}"#);
-        assert_ne!(rs.digest(), other.digest());
+        let (_, other) = covered(def, "POST", "/graphql/v2", r#"{"query":"mutation { serviceDelete(id: \"9999\") }"}"#);
+        assert_ne!(id, other);
         // A request a server would refuse is refused with the server's status.
         for (body, status) in [
             (r#"[{"query":"mutation { serviceDelete(id: \"s\") }"}]"#, 400),
@@ -2629,40 +2638,42 @@ consent = "Buy from {{ request.body.merchant_id }} for {{ request.body.amount }}
     fn a_shape_binds_its_scope_and_what_its_consent_reads() {
         let def = snaplii_def();
         let body = r#"{"amount": 80, "merchant_id": "m_1", "nonce": "xyz"}"#;
-        let rs = def
+        let read = def
             .read_request(RequestInput {
                 query: Some("force=true"),
                 ..input("POST", "/v2/purchase", body)
             })
-            .unwrap()
-            .0
-            .expect("purchase shape matches");
-        // Bound = the scope and the consent's paths, sorted by path; the body
-        // `nonce` is not bound.
+            .unwrap();
+        let c = crate::approval::coverage::cover_read(&read, "/v2/purchase", &[], true, true).unwrap();
+        // Shown = covered: the scope and the consent's paths; the body
+        // `nonce` is not covered.
+        let mut card = c.shown.clone();
+        card.sort();
         assert_eq!(
-            rs.bound,
+            card,
             vec![
                 ("request.body.amount".to_string(), "80".to_string()),
                 ("request.body.merchant_id".to_string(), "m_1".to_string()),
                 ("request.query.force".to_string(), "true".to_string()),
             ]
         );
+        let rs = read.scope.expect("purchase shape matches");
         assert_eq!(
             rs.consent.as_deref(),
             Some("Buy from {{ request.body.merchant_id }} for {{ request.body.amount }}")
         );
         assert_eq!(rs.shape, "purchase");
-        // No shape matches a GET; an absent value is not bound.
-        assert!(def.read_request(input("GET", "/v2/balance", "")).unwrap().0.is_none());
-        let rs = scope_of(&def, "POST", "/v2/purchase", r#"{"amount": 5}"#);
-        assert_eq!(rs.bound, vec![("request.body.amount".to_string(), "5".to_string())]);
+        // No shape matches a GET; an absent value is covered as absent.
+        assert!(def.read_request(input("GET", "/v2/balance", "")).unwrap().scope.is_none());
+        let (card, _) = covered(&def, "POST", "/v2/purchase", r#"{"amount": 5}"#);
+        assert_eq!(card, vec![("request.body.amount".to_string(), "5".to_string())]);
         // A read value given twice refuses the request; one nothing reads
         // doesn't.
         let twice = def.read_request(RequestInput {
             query: Some("force=1&force=2"),
             ..input("POST", "/v2/purchase", "{}")
         });
-        assert_eq!(twice.unwrap_err().status, 400);
+        assert_eq!(twice.err().map(|e| e.status), Some(400));
         assert!(def
             .read_request(RequestInput {
                 query: Some("other=1&other=2"),
@@ -2695,6 +2706,18 @@ scope = ["request.body.memo"]
         assert_eq!(scope_of(&def, "POST", "/pay", r#"{"amount": 5}"#).shape, "small");
         // An erroring condition (an absent amount) doesn't select.
         assert_eq!(scope_of(&def, "POST", "/pay", "{}").shape, "small");
+        // Shapes are tried in declaration order, and an erroring condition
+        // with no shape matched makes the approval single-use.
+        assert_eq!(def.request_order, ["big", "small"]);
+        let only_big = gate::admit_toml(
+            "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n[requests.z]\nmethod = \"POST\"\npath = \"/pay\"\ncondition = \"request.body.amount > 100\"\n[requests.a]\nmethod = \"POST\"\npath = \"/other\"\n",
+        )
+        .unwrap();
+        assert_eq!(only_big.request_order, ["z", "a"]);
+        let read = only_big.read_request(input("POST", "/pay", "{}")).unwrap();
+        assert!(read.scope.is_none() && read.errored);
+        let read = only_big.read_request(input("POST", "/pay", r#"{"amount": 5}"#)).unwrap();
+        assert!(read.scope.is_none() && !read.errored, "false is not an error");
     }
 
     #[test]
@@ -2729,34 +2752,62 @@ scope = ["request.body.memo"]
         assert!(consent_refs("{{ request.body.raw").is_err());
     }
 
+    /// DESIGN §7: a GitHub secret's sealed value is fresh on every run, so an
+    /// approval covers the secret's path, the key it is sealed to, its
+    /// visibility and its repositories; Gmail's sends are covered whole, with
+    /// the email by its content, on any `users/:user`.
     #[test]
-    fn scope_digest_stable_and_tamper_sensitive() {
-        // The $80/$180 guarantee at the digest level: same bound values → same
-        // digest; a changed value → a different digest; a field NOT in scope
-        // (a nonce) never affects it.
-        let d80 = scope_digest(&[
-            ("amount".into(), "80".into()),
-            ("merchant".into(), "m_1".into()),
-        ]);
-        let d80_reordered = scope_digest(&[
-            ("merchant".into(), "m_1".into()),
-            ("amount".into(), "80".into()),
-        ]);
-        let d180 = scope_digest(&[
-            ("amount".into(), "180".into()),
-            ("merchant".into(), "m_1".into()),
-        ]);
-        assert_ne!(d80, d180);
-        assert_ne!(d80, d80_reordered); // the raw fn is order-sensitive…
-        // …which is why a request scope is always sorted before hashing:
+    fn compiled_scopes_follow_the_built_in_rule_sets() {
+        let r = ServiceRegistry::load();
+        let gh = r.get("github").unwrap();
+        let secret = "/repos/o/r/actions/secrets/TOKEN";
+        let id = |body: &str| covered(gh, "PUT", secret, body).1;
+        let a = id(r#"{"encrypted_value":"c2VhbGVkLTE=","key_id":"k1"}"#);
+        assert_eq!(a, id(r#"{"encrypted_value":"c2VhbGVkLTI=","key_id":"k1"}"#));
+        assert_ne!(a, id(r#"{"encrypted_value":"c2VhbGVkLTI=","key_id":"k2"}"#));
+        assert_ne!(a, covered(gh, "PUT", "/repos/o/r/actions/secrets/OTHER", r#"{"encrypted_value":"x","key_id":"k1"}"#).1);
+        let org = "/orgs/acme/actions/secrets/TOKEN";
+        let vis = |v: &str| covered(gh, "PUT", org, &format!(r#"{{"encrypted_value":"x","key_id":"k1","visibility":"{v}"}}"#)).1;
+        assert_ne!(vis("private"), vis("all"));
+        // The repository settings shape covers the whole request.
+        let repo = |body: &str| covered(gh, "PATCH", "/repos/o/r", body).1;
+        assert_ne!(repo(r#"{"private":false}"#), repo(r#"{"private":false,"description":"x"}"#));
+
+        let gmail = r.get("gmail").unwrap();
+        let email = |date: &str, b: &str| {
+            format!("Content-Type: multipart/alternative; boundary=\"{b}\"\nTo: b@y.com\nSubject: Hi\nDate: {date}\n\n--{b}\nContent-Type: text/plain\n\nhello\n--{b}--\n")
+        };
+        let raw = |e: &str| {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE.encode(e.as_bytes())
+        };
+        for (path, field) in [
+            ("/gmail/v1/users/me/messages/send", "raw"),
+            ("/gmail/v1/users/a@x.com/messages/send", "raw"),
+            ("/gmail/v1/users/me/drafts/send", "message"),
+        ] {
+            let body = |e: &str| match field {
+                "raw" => format!(r#"{{"raw":"{}"}}"#, raw(e)),
+                _ => format!(r#"{{"message":{{"raw":"{}"}}}}"#, raw(e)),
+            };
+            let send = |e: &str| covered(gmail, "POST", path, &body(e)).1;
+            assert_eq!(send(&email("Mon", "b1")), send(&email("Tue", "b2")), "{path}");
+            assert_ne!(send(&email("Mon", "b1")), send(&email("Mon", "b1").replace("hello", "bye")), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_narrowed_identity_is_stable_and_tamper_sensitive() {
+        // The $80/$180 guarantee: the same covered values → the same
+        // identity whatever the member order; a field not covered (a nonce)
+        // never affects it; a changed value does.
         let def = snaplii_def();
-        let a = scope_of(&def, "POST", "/v2/purchase", r#"{"amount":80,"merchant_id":"m_1"}"#);
-        let b = scope_of(&def, "POST", "/v2/purchase", r#"{"merchant_id":"m_1","amount":80,"nonce":"Q"}"#);
-        assert_eq!(a.digest(), b.digest(), "same bound values (nonce ignored) → same digest");
-        let c = scope_of(&def, "POST", "/v2/purchase", r#"{"amount":180,"merchant_id":"m_1"}"#);
-        assert_ne!(a.digest(), c.digest(), "changed amount → different digest → re-prompt");
-        // Empty scope collapses to "" (the Phase-1 key).
-        assert_eq!(scope_digest(&[]), "");
+        let id = |body: &str| covered(&def, "POST", "/v2/purchase", body).1;
+        let a = id(r#"{"amount":80,"merchant_id":"m_1"}"#);
+        assert_eq!(a, id(r#"{"merchant_id":"m_1","amount":80,"nonce":"Q"}"#));
+        assert_ne!(a, id(r#"{"amount":180,"merchant_id":"m_1"}"#));
+        assert_ne!(a, id(r#"{"amount":"80","merchant_id":"m_1"}"#), "JCS keeps the type");
+        assert_ne!(id(r#"{"merchant_id":"m_1"}"#), id(r#"{"amount":null,"merchant_id":"m_1"}"#), "absent is not null");
     }
 
     /// Body format (DESIGN §9): GitHub's make-public is read from a JSON body
@@ -2819,7 +2870,7 @@ scope = ["request.body.memo"]
         let mut evaluated = std::collections::BTreeSet::new();
         for (service, method, path, body) in routine {
             let def = r.get(service).expect("service");
-            let (_, request) = def.read_request(input(method, path, body)).expect("readable");
+            let request = def.read_request(input(method, path, body)).expect("readable").request;
             for rule in r.default_policy_rules(service).unwrap_or_default() {
                 let Some(c) = &rule.condition else { continue };
                 if rule.select.exec(method, path).is_none() {
@@ -2873,27 +2924,10 @@ scope = ["request.body.memo"]
         let body = r#"{"model": "gpt-4o-mini", "Model": "o3"}"#;
         let refused = def
             .read_request(input("POST", "/v1/chat/completions", body))
-            .and_then(|(_, req)| {
+            .and_then(|read| {
+                let req = read.request;
                 crate::core::policy::evaluate(&req, Some(&rules), None, &crate::core::policy::Policy::default(), &[])
             });
         assert_eq!(refused.unwrap_err().status, 422);
-    }
-
-    #[test]
-    fn large_bound_value_is_digested_not_verbatim() {
-        // A big field (a whole email) binds by digest so the op stays small —
-        // and the digest is still deterministic and tamper-sensitive.
-        let big = "x".repeat(BOUND_VALUE_CAP + 100);
-        let capped = cap_bound_value(&big);
-        assert!(
-            capped.starts_with("sha256:"),
-            "large value → digest marker, got {capped}"
-        );
-        assert!(capped.len() < 100, "marker is small, not the whole value");
-        // Small values stay verbatim.
-        assert_eq!(cap_bound_value("hello"), "hello");
-        // Same big value → same marker (stable identity); a changed one differs.
-        assert_eq!(cap_bound_value(&big), capped);
-        assert_ne!(cap_bound_value(&"y".repeat(BOUND_VALUE_CAP + 100)), capped);
     }
 }

@@ -204,8 +204,39 @@ impl PolicyInputs {
         })
     }
 
-    // `rule_problem` (a user rule edit an approval on a scoped path could not
-    // bind) went with `when` and `body`: step 3 covers condition reads.
+    /// The condition reads of every rule that matches `request` at `level`
+    /// on this connection, across the passes [`Self::decide`] makes (the
+    /// rules without a vault definition's, and with them): what an approval
+    /// of a request decided at `level` covers besides its scope.
+    pub fn matched_reads(
+        &self,
+        services: &ServiceRegistry,
+        connection_id: &str,
+        service_id: &str,
+        request: &Request<'_>,
+        level: AccessLevel,
+    ) -> Result<Vec<crate::core::request::Read>, Unreadable> {
+        use crate::core::policy::{matched_reads, merge_rules};
+        let no_rules = HashMap::new();
+        let user_rules = self
+            .policy
+            .connections
+            .get(connection_id)
+            .map(|c| &c.rules)
+            .unwrap_or(&no_rules);
+        let mut reads = Vec::new();
+        let passes: Vec<&[crate::core::policy::PolicyRule]> =
+            match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
+                Some(p) => vec![&[], &p.rules],
+                None => vec![services.default_policy_rules(service_id).unwrap_or(&[])],
+            };
+        for built_in in passes {
+            reads.extend(matched_reads(request, &merge_rules(built_in, user_rules), level)?);
+        }
+        reads.sort();
+        reads.dedup();
+        Ok(reads)
+    }
 
     /// Whether a connection's GET floor is `allow`: [`Self::decide`] on a
     /// `GET /` with every rule left out (the service's recipe, the owner's
@@ -255,6 +286,7 @@ impl PolicyInputs {
             for (name, s) in &d.requests {
                 let mut shape = Map::new();
                 shape.insert("select".into(), to_value(&s.select)?);
+                shape.insert("whole".into(), to_value(s.scope_whole)?);
                 shape.insert("condition".into(), to_value(&s.condition)?);
                 shape.insert("body".into(), to_value(s.format)?);
                 let scope: Option<Vec<String>> = s
@@ -270,6 +302,7 @@ impl PolicyInputs {
             decided.insert("defaults".into(), to_value(d.policy.as_ref().map(|p| &p.defaults))?);
             decided.insert("rules".into(), to_value(d.policy.as_ref().map(|p| &p.rules))?);
             decided.insert("requests".into(), Value::Object(shapes));
+            decided.insert("order".into(), to_value(&d.request_order)?);
             custom.insert(id.clone(), Value::Object(decided));
         }
         let mut canonical = Map::new();

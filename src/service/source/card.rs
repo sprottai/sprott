@@ -35,9 +35,9 @@ pub struct DefSummary {
     /// The `[default]` approval window (seconds), when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u64>,
-    /// `[requests]` name → the request paths an approval binds (its `scope`
-    /// and what its `consent` reads), sorted. Requests that bind nothing are
-    /// left out.
+    /// `[requests]` name → what an approval covers (`request` for the whole
+    /// request, then the paths its `scope` lists and its `consent` reads).
+    /// Requests that cover nothing beyond the request line are left out.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scopes: BTreeMap<String, Vec<String>>,
     /// The OAuth connect flow runs without PKCE (`pkce = false`).
@@ -204,9 +204,7 @@ pub fn summarize(def: &ServiceDef) -> DefSummary {
         }
     }
     for (name, shape) in &applied.requests {
-        let mut paths: Vec<String> = shape.binds().iter().map(ToString::to_string).collect();
-        paths.sort();
-        paths.dedup();
+        let paths = shape.covers();
         if !paths.is_empty() {
             s.scopes.insert(name.clone(), paths);
         }
@@ -250,7 +248,7 @@ pub struct Diff {
     pub new_destinations: Vec<String>,
     /// What a service in both now lets through more easily: a rule or default
     /// that is gone or decides less strictly, an `ask` approval that lasts
-    /// longer, a request variable an approval no longer binds, PKCE turned
+    /// longer, a request value an approval no longer covers, PKCE turned
     /// off.
     pub loosens: Vec<String>,
 }
@@ -339,10 +337,12 @@ fn loosened(id: &str, o: &DefSummary, n: &DefSummary, out: &mut Vec<String>) {
     }
     for (req, vars) in &o.scopes {
         let now = n.scopes.get(req);
+        // `request` (the whole request) covers every path.
+        let whole = now.is_some_and(|n| n.iter().any(|p| p == "request"));
         for v in vars {
-            if !now.is_some_and(|n| n.contains(v)) {
+            if !whole && !now.is_some_and(|n| n.contains(v)) {
                 out.push(format!(
-                    "{}: request {} no longer binds {} to an approval",
+                    "{}: request {} no longer covers {} in an approval",
                     id, req, v
                 ));
             }

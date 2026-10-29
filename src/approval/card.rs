@@ -43,14 +43,22 @@ const MIN_CLASS: usize = 1024;
 /// `op_summary`).
 pub const MAX_CARD_JSON: usize = 96 * 1024;
 
-/// What the approver reads: the bound `[requests]` values and the consent
-/// template they fill.
+/// What the approver reads: the values the approval covers that a card can
+/// show (`crate::approval::coverage`), and the consent template they fill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
-    /// `(request path, value)` pairs sorted by path, the exact input of the
-    /// permit identity.
+    /// `(request path, value)` pairs.
     pub vars: Vec<(String, String)>,
     pub consent: Option<String>,
+}
+
+/// A value too large to show, as its SHA-256 and size: `sha256:<hex>#<len>`.
+pub fn summary(bytes: &[u8]) -> String {
+    format!(
+        "sha256:{}#{}",
+        crate::approval::coverage::sha256_hex(bytes),
+        bytes.len()
+    )
 }
 
 /// A sealed card as the daemon keeps it beside the op.
@@ -78,7 +86,29 @@ impl std::fmt::Debug for SealedCard {
 }
 
 impl Card {
-    /// Nothing to show: no bound value and no consent template.
+    /// This card within [`MAX_CARD_JSON`]: past it, the largest values,
+    /// largest first, show their SHA-256 and size instead
+    /// ([`summary`]).
+    pub fn fit(mut self) -> Card {
+        loop {
+            let fits = self.json().map(|j| j.len() <= MAX_CARD_JSON).unwrap_or(true);
+            if fits {
+                return self;
+            }
+            let largest = self
+                .vars
+                .iter_mut()
+                .map(|(_, v)| v)
+                .filter(|v| !v.starts_with("sha256:"))
+                .max_by_key(|v| v.len());
+            match largest {
+                Some(v) => *v = summary(v.as_bytes()),
+                None => return self,
+            }
+        }
+    }
+
+    /// Nothing to show: no value and no consent template.
     pub fn is_empty(&self) -> bool {
         self.vars.is_empty() && self.consent.is_none()
     }
@@ -139,6 +169,7 @@ pub fn binding_mac(content_key: &[u8], json: &[u8]) -> [u8; 32] {
 
 /// Seal `card` for `vault_id` under the content key of generation `gen`.
 pub fn seal(card: Card, content_key: &[u8], vault_id: &str, gen: u64) -> Result<SealedCard> {
+    let card = card.fit();
     let json = card.json()?;
     if json.len() > MAX_CARD_JSON {
         return Err(AppError::BadRequest(format!(
@@ -284,12 +315,22 @@ mod tests {
         println!("{}", serde_json::to_string_pretty(&doc).unwrap());
     }
 
+    /// Past the cap, the largest values show their size and SHA-256, largest
+    /// first; the card is sealed.
     #[test]
-    fn an_oversized_card_is_refused() {
+    fn an_oversized_card_summarizes_its_largest_values() {
         let big = Card {
-            vars: vec![("request.body.raw".into(), "x".repeat(MAX_CARD_JSON))],
+            vars: vec![
+                ("request.body".into(), "x".repeat(MAX_CARD_JSON)),
+                ("request.query".into(), "y".repeat(MAX_CARD_JSON / 4)),
+                ("request.headers['content-type']".into(), "text/plain".into()),
+            ],
             consent: None,
         };
-        assert!(seal(big, &[0u8; 32], "v", 0).is_err());
+        let sealed = seal(big, &[0u8; 32], "v", 0).unwrap();
+        let vars = &sealed.card.vars;
+        assert!(vars[0].1.starts_with("sha256:") && vars[0].1.ends_with(&format!("#{}", MAX_CARD_JSON)));
+        assert_eq!(vars[1].1.len(), MAX_CARD_JSON / 4, "it fits once the largest is summarized");
+        assert_eq!(vars[2].1, "text/plain");
     }
 }

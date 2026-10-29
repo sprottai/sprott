@@ -225,7 +225,7 @@ fn assert_signed_level(
     let expected = crate::approval::Reuse::of(
         pc.level,
         &pc.decided_by,
-        crate::approval::reuse::is_scoped(scope),
+        crate::approval::reuse::scoped(scope),
         method,
     )
     .ok_or("a deny-level op has nothing to approve")?;
@@ -2275,8 +2275,8 @@ pub async fn approve_op(
 ///     permit for the approved request and its tier, redeemable for
 ///     [`crate::state::ASK_ALWAYS_REPLAY_WINDOW_SECS`] (the replay deadline,
 ///     not a reuse window).
-///   - `exact` (scoped ask): a window for the request, its bound values and
-///     unit, for the policy window.
+///   - `exact` (scoped ask): a window for the request, what its approval
+///     covers and its unit, for the policy window.
 ///   - `rule` / `floor`: a window for the approving agent, connection, host
 ///     and unit, for the policy window.
 ///
@@ -2312,27 +2312,21 @@ pub(crate) fn plan_use_grant(
     if conn.is_empty() || host.is_empty() {
         return None;
     }
-    // The bound `[requests]` values fold into the permit identity, as the SAME
-    // sorted pairs the replay re-extracts from the live request. They come
-    // from the approval card the daemon kept at mint (the op carries it
-    // sealed, and the approver's signature covers its MAC); an op minted
-    // without a card binds what its scope carries in the clear (none, for an
-    // op this daemon minted). Empty ⇒ `""`.
-    let bound = match &p.card {
-        Some(card) => card.card.vars.clone(),
-        None => crate::approval::reuse::bound_values(scope),
-    };
-    let scope_digest = crate::service::scope_digest(&bound);
+    // The permit identity the daemon computed at mint from what the
+    // approval covers, kept in the record (never in the op the relay
+    // carries); the replay recomputes it from the live request. An op minted
+    // without one keys nothing a request redeems.
+    let identity = p.identity.clone().unwrap_or_default();
     let key = crate::state::PermitKey::of(
         p.level,
         &p.decided_by,
-        crate::approval::reuse::is_scoped(scope),
+        crate::approval::reuse::scoped(scope),
         agent,
         conn,
         method,
         &host,
         path,
-        &scope_digest,
+        &identity,
         credentials,
     )?;
     // A request-bound permit is keyed by the exact request the user saw:
@@ -2347,11 +2341,16 @@ pub(crate) fn plan_use_grant(
     } else {
         p.ttl_seconds
     };
+    let approved = key.single_use().then(|| crate::state::Approved {
+        at: now,
+        components: identity.components.clone(),
+    });
     Some(DeferredGrant {
         vault_id: vault_id.to_string(),
         window_fp: if key.single_use() { None } else { p.policy_fp },
         key,
         expires_at: now + window,
+        approved,
     })
 }
 
@@ -2363,11 +2362,19 @@ pub(crate) struct DeferredGrant {
     expires_at: u64,
     /// For a window: the policy fingerprint the op was minted under.
     window_fp: Option<[u8; 32]>,
+    /// For a single-use permit: the request it was approved for.
+    approved: Option<crate::state::Approved>,
 }
 
 impl DeferredGrant {
     fn write(self, state: &AppState) {
-        let stored = state.permit_insert(&self.vault_id, self.key, self.expires_at, self.window_fp);
+        let stored = state.permit_insert_approved(
+            &self.vault_id,
+            self.key,
+            self.expires_at,
+            self.window_fp,
+            self.approved,
+        );
         if !stored {
             tracing::info!(vault = %self.vault_id, "use approved: no permit stored (the vault is locked, or its policy changed since the request); the replay asks again");
         }
@@ -3271,6 +3278,7 @@ mod tests {
             credentials: None,
             policy_fp: None,
             card: None,
+            identity: None,
         }
     }
 
@@ -3762,13 +3770,6 @@ mod tests {
         );
         if scope_shape {
             scope["scoped"] = json!(true);
-            if !bound.is_empty() {
-                let m: serde_json::Map<String, Value> = bound
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), json!(v)))
-                    .collect();
-                scope["scope_vars"] = Value::Object(m);
-            }
         }
         let window = crate::approval::Reuse::of(level, &decided_by, scope_shape, method)
             .and_then(|r| r.window(ttl))
@@ -3782,6 +3783,7 @@ mod tests {
             credentials: Some(creds()),
             policy_fp: if window { fingerprint } else { None },
             card: None,
+            identity: Some(identity_of(bound)),
         };
         assert_signed_level(&scope, Some(&pc)).expect("stamp passes the apply assertion");
         (scope, pc)
@@ -3838,11 +3840,7 @@ mod tests {
         if level == AccessLevel::Deny {
             return false;
         }
-        let pairs: Vec<(String, String)> = bound
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let digest = crate::service::scope_digest(&pairs);
+        let identity = identity_of(bound);
         let permit = match level {
             AccessLevel::Allow => None,
             _ => Some(
@@ -3855,7 +3853,7 @@ mod tests {
                     method,
                     host,
                     path,
-                    &digest,
+                    &identity,
                     creds(),
                 )
                 .expect("an ask has a permit key"),
@@ -3908,25 +3906,34 @@ mod tests {
         path: &str,
         bound: &[(&str, &str)],
     ) -> Option<u64> {
-        let pairs: Vec<(String, String)> = bound
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let digest = crate::service::scope_digest(&pairs);
+        let digest = identity_of(bound).digest;
         state.permits(RV).into_iter().find_map(|(k, exp)| match k.of {
-            // Whatever tier minted it: the request line + digest identify it.
+            // Whatever tier minted it: the request line + identity identify it.
             crate::state::PermitFor::Request(g)
                 if g.agent == "agA"
                     && g.conn == RC
                     && g.method == method
                     && g.host == RH
                     && g.path == path
-                    && g.scope_digest == digest =>
+                    && g.identity == digest =>
             {
                 Some(exp)
             }
             _ => None,
         })
+    }
+
+    /// The permit identity of a request covering these values (what the
+    /// proxy computes from a live request), under a fixed test key.
+    fn identity_of(bound: &[(&str, &str)]) -> crate::approval::coverage::Identity {
+        let covered = crate::approval::coverage::Covered {
+            components: bound
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
+                .collect(),
+            ..Default::default()
+        };
+        crate::approval::coverage::IdentityKey::derive(&[7u8; 32], 0).identity(&covered)
     }
 
     fn by_rule(id: Option<&str>) -> crate::core::policy::DecidedBy {
@@ -4345,9 +4352,11 @@ mod tests {
                         unit: GrantUnit::Rule("read".into(), Class::Read),
                     },
                     credentials: credentials.clone(),
+                    generation: 0,
                 },
                 expires_at: u64::MAX / 2,
                 window_fp: fp,
+                approved: None,
             },
             DeferredGrant {
                 vault_id: "v1".into(),
@@ -4362,9 +4371,11 @@ mod tests {
                         &exact_read_tier(),
                     )),
                     credentials,
+                    generation: 0,
                 },
                 expires_at: u64::MAX / 2,
                 window_fp: fp,
+                approved: None,
             },
         )
     }

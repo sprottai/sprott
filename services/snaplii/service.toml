@@ -34,17 +34,12 @@ type = "snaplii"
 # user approves. Field names are Snaplii's OpenAPI spec (agent-to-merchant-
 # payments openapi.yaml, v0.20.2): a purchase is `orderInfo.item` with `price`
 # as a decimal string ("50.00") and `orderType` GIFT_CARD or BILL_PAY; a
-# transfer is `to_phone` + `amount` (decimal string). An approval binds the
-# whole order, payment and delivery, so approving one purchase can't be
-# replayed as another item, price, recipient (a gift order) or payment method.
+# transfer is `to_phone` + `amount` (decimal string). A purchase approval covers
+# the whole request, so approving one purchase can't be replayed as another
+# item, price, recipient (a gift order) or payment method.
 [requests.purchase]
 method = "POST"
 path = "/v2/purchase"
-scope = [
-  "request.body.orderInfo.orderType", "request.body.orderInfo.item.itemId",
-  "request.body.orderInfo.item.price", "request.body.orderInfo",
-  "request.body.paymentContext", "request.body.delivery",
-]
 consent = "Buy {{ request.body.orderInfo.item.itemId }} ({{ request.body.orderInfo.orderType }}) for {{ request.body.orderInfo.item.price }}"
 
 # A P2P transfer sends wallet balance to a phone number once its short undo

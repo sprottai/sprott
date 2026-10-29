@@ -94,7 +94,7 @@ struct RawService {
     #[serde(default)]
     policy: Option<RawInlinePolicy>,
     #[serde(default)]
-    requests: HashMap<String, RawRequestShape>,
+    requests: HashMap<String, toml::Spanned<RawRequestShape>>,
 }
 
 /// A `[requests.<name>]` shape as written.
@@ -279,7 +279,7 @@ fn admit_inner(
 
     check_service(key, &raw, &mut errs);
     let mut warnings = Vec::new();
-    let requests = check_requests(raw.requests, &mut errs, &mut warnings);
+    let (requests, request_order) = check_requests(raw.requests, &mut errs, &mut warnings);
     let policy = match (raw_policy, raw.policy.as_ref()) {
         (Some(_), Some(_)) => {
             errs.push(
@@ -303,6 +303,7 @@ fn admit_inner(
         setup: raw.setup,
         policy,
         requests,
+        request_order,
         warnings: warnings
             .into_iter()
             .map(|w| crate::util::terminal_safe(&w).into_owned())
@@ -1090,20 +1091,28 @@ fn check_path(what: &str, text: &str, format: BodyFormat, errs: &mut Vec<String>
     }
 }
 
-/// Check every `[requests]` shape and compile it. The shapes that pass;
-/// every problem is recorded.
+/// Check every `[requests]` shape and compile it. The shapes that pass, and
+/// their names in declaration order (the order they are tried in); every
+/// problem is recorded.
 fn check_requests(
-    requests: HashMap<String, RawRequestShape>,
+    requests: HashMap<String, toml::Spanned<RawRequestShape>>,
     errs: &mut Vec<String>,
     warnings: &mut Vec<String>,
-) -> HashMap<String, RequestShape> {
+) -> (HashMap<String, RequestShape>, Vec<String>) {
     let mut out = HashMap::new();
     if !check_count("[requests]", requests.len(), MAX_REQUESTS, errs) {
-        return out;
+        return (out, Vec::new());
     }
-    let mut shapes: Vec<(String, RawRequestShape)> = requests.into_iter().collect();
-    shapes.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, shape) in shapes {
+    let mut shapes: Vec<(String, usize, RawRequestShape)> = requests
+        .into_iter()
+        .map(|(name, s)| {
+            let at = s.span().start;
+            (name, at, s.into_inner())
+        })
+        .collect();
+    shapes.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    let order: Vec<String> = shapes.iter().map(|(n, _, _)| n.clone()).collect();
+    for (name, _, shape) in shapes {
         let what = format!("[requests.{}]", name);
         let before = errs.len();
         if !is_ident(&name) {
@@ -1145,13 +1154,19 @@ fn check_requests(
             .as_deref()
             .and_then(|c| check_condition(&what, c, Decides::Shape, errs, warnings));
 
-        // scope: request paths, each once.
+        // scope: request paths, each once, and the token `request` for the
+        // whole request.
+        let scope_whole = shape
+            .scope
+            .iter()
+            .flatten()
+            .any(|e| e.trim() == "request");
         let scope = shape.scope.map(|entries| {
             if !check_count(&format!("{} scope", what), entries.len(), MAX_SCOPE, errs) {
                 return Vec::new();
             }
             let mut paths: Vec<ReadPath> = Vec::new();
-            for entry in &entries {
+            for entry in entries.iter().filter(|e| e.trim() != "request") {
                 if let Some(p) = check_path(&format!("{} scope", what), entry, format, errs) {
                     if paths.contains(&p) {
                         errs.push(format!("{} scope lists {} more than once", what, p));
@@ -1223,6 +1238,7 @@ fn check_requests(
                     condition,
                     format,
                     scope,
+                    scope_whole,
                     consent: shape.consent,
                     consent_reads,
                     encoded,
@@ -1230,7 +1246,7 @@ fn check_requests(
             );
         }
     }
-    out
+    (out, order)
 }
 
 /// A consent template is literal text and `{{ request.<path> }}` or

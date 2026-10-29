@@ -159,12 +159,38 @@ What it lets through afterwards:
 |---|---|
 | `ask` from a rule | Later requests the same rule decides, for the rule's window, of the same kind (read or write). |
 | `ask` from a floor | Later reads (or writes) on that connection that no rule matches, for the floor's window. |
-| `ask` on a request a `[requests]` shape matched | This exact request with the same `scope` values, for the window. |
+| `ask` on a request a `[requests]` shape matched | Later requests covered the same way (below), for the window. |
 | `ask-always` | This one request. |
 
 With no `ttl` on the rule or floor, the window is 900 seconds. A read
 approval never lets a write through. Locking the vault or changing it ends
-every window. An approval request waits 1800 seconds for a decision.
+every window, and a re-key of the vault ends every approval. An approval
+request waits 1800 seconds for a decision.
+
+### What an approval covers
+
+An approval covers the method, the host (with its port) and the path, and:
+
+- with no request shape, or a shape with no `scope`: the whole request. That
+  is the query string, the headers HTTP defines for a request
+  (`content-type`, `content-language`, `content-location`, `content-range`,
+  `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`,
+  `if-range`, `destination`, `overwrite`, `depth`, `prefer`), every header
+  carrying a phantom, and the body;
+- with `scope = [...]`: the values it lists; `scope = []`: nothing more;
+  `"request"` in the list adds the whole request;
+- always: the values the deciding rules' conditions read and every value the
+  consent shows.
+
+A request that differs in anything covered asks again. A body is covered by
+its content: a multipart body's boundary and its parts' `Content-ID`, a batch
+part's SDK headers, and an email's `Date` and `Message-ID` are left out, so a
+client that builds the same request again is let through. A one-time approval
+from a service added with `sprott service add` always covers the whole request.
+
+When a request misses a one-time approval made for the same request line, the
+agent is told which parts differ, by name only (`query`, `headers.if-match`,
+`body.amount`).
 
 ## Request shapes
 
@@ -193,15 +219,16 @@ level = "ask-always"
 ```
 
 - `method`, `path` and `condition` select requests, as in a rule. The first
-  shape by name that selects a request reads it.
+  shape in the file that selects a request reads it.
 - `body` is the format the service reads the body in. With `graphql`, rules
   can read `request.graphql`.
-- `scope` lists the request paths whose values an approval binds. A
-  different value asks again.
+- `scope` lists the request paths whose values an approval covers (above).
+  Unset: the whole request.
 - `consent` is the line on the approval card, over request paths, with the
-  filters `email` and `graphql`. The values it shows are bound too.
+  filters `email` and `graphql`. The values it shows are covered too.
 - `encoded."<request path>"` names a value that carries encoded media, with
-  JSON Schema's `contentEncoding` and `contentMediaType`.
+  JSON Schema's `contentEncoding` and `contentMediaType`. A built-in
+  service's encoded values are covered by their content.
 - `vars` (2.0) rejects the file. Name each value by its request path.
 
 ## Example: Gmail

@@ -1024,6 +1024,26 @@ fn meets(rule: &PolicyRule, request: &Request<'_>) -> Result<Met, Unreadable> {
     })
 }
 
+/// The condition reads of every rule in `rules` that matches `request` at
+/// `level` (cleanly or through an error): what an approval of a request
+/// decided at `level` covers besides its scope (DESIGN §4).
+pub fn matched_reads(
+    request: &Request<'_>,
+    rules: &[PolicyRule],
+    level: AccessLevel,
+) -> Result<Vec<Read>, Unreadable> {
+    let mut out = Vec::new();
+    for rule in rules.iter().filter(|r| r.level == Some(level)) {
+        let Some(condition) = &rule.condition else {
+            continue;
+        };
+        if meets(rule, request)? != Met::No {
+            out.extend(condition.reads().iter().cloned());
+        }
+    }
+    Ok(out)
+}
+
 /// [`evaluate_decision`] over the rules that can be read.
 fn decide_readable(
     request: &Request<'_>,

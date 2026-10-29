@@ -494,13 +494,10 @@ fn requests_shapes_are_checked() {
     let def = ok(REQ_SERVICE);
     let shape = &def.requests["purchase"];
     assert_eq!(shape.format, BodyFormat::Json);
-    assert_eq!(shape.binds().iter().map(ToString::to_string).collect::<Vec<_>>(), ["request.body.amount"]);
+    assert_eq!(shape.covers(), ["request.body.amount"]);
     // A consent path is bound with the scope.
     let def = ok(&REQ_SERVICE.replace("{{ request.body.amount }}", "{{ request.body.memo }}"));
-    assert_eq!(
-        def.requests["purchase"].binds().iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["request.body.amount", "request.body.memo"]
-    );
+    assert_eq!(def.requests["purchase"].covers(), ["request.body.amount", "request.body.memo"]);
     // `scope` absent or empty is accepted.
     ok(&REQ_SERVICE.replace("scope = [\"request.body.amount\"]\n", ""));
     ok(&REQ_SERVICE.replace("scope = [\"request.body.amount\"]", "scope = []"));

@@ -1312,7 +1312,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
         [
             "acme: Pay: ask, approval lasts 60s (now 86400s)",
             "acme: default approval lasts 300s (now 3600s)",
-            "acme: request buy no longer binds request.body.merchant to an approval",
+            "acme: request buy no longer covers request.body.merchant in an approval",
             "acme: PKCE: off (was on)",
         ]
     );
@@ -1380,7 +1380,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
         c.loosens,
         [
             "acme: Pay: ask, approval lasts 60s (now 600s)",
-            "acme: request buy no longer binds request.body.merchant to an approval",
+            "acme: request buy no longer covers request.body.merchant in an approval",
         ]
     );
 }

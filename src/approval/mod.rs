@@ -1,4 +1,5 @@
 pub mod card;
+pub mod coverage;
 pub mod reuse;
 pub mod store;
 

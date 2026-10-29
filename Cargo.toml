@@ -104,6 +104,13 @@ percent-encoding = "2"
 # The media type of a Content-Type source (request.body readings,
 # core/request.rs). Already in the tree via reqwest.
 mime = "0.3"
+# What an approval covers (approval/coverage.rs): MIME header fields of a
+# multipart part or an email (field lines kept as sent), embedded HTTP
+# requests of a batch, and the dash-boundary search. httparse and memchr are
+# already in the tree.
+mailparse = "0.18"
+httparse = "1"
+memchr = "2"
 # Rule and `[requests]` paths are WHATWG URL Pattern pathnames, matched by the
 # crate Deno's `URLPattern` is built on (the console uses the browser's).
 urlpattern = "0.6"

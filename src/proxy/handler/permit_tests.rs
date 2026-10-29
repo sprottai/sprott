@@ -181,8 +181,8 @@ impl Vault {
 enum Out {
     /// Forwarded: the Authorization header and the URL it went with.
     Sent(String, String),
-    /// Asked for an approval: the op.
-    Ask(String),
+    /// Asked for an approval: the op, and the response body.
+    Ask(String, String),
     /// Asked to widen the host: the op.
     Widen(String),
     /// Refused: the code and the message.
@@ -193,7 +193,7 @@ impl Out {
     fn describe(&self) -> String {
         match self {
             Out::Sent(a, u) => format!("sent ({a}) to {u}"),
-            Out::Ask(op) => format!("ask {op}"),
+            Out::Ask(op, _) => format!("ask {op}"),
             Out::Widen(op) => format!("widen {op}"),
             Out::No(c, m) => format!("refused {c}: {m}"),
         }
@@ -210,7 +210,7 @@ impl Out {
     #[track_caller]
     fn ask(&self) -> String {
         match self {
-            Out::Ask(op) => op.clone(),
+            Out::Ask(op, _) => op.clone(),
             other => panic!("no approval asked: {}", other.describe()),
         }
     }
@@ -225,13 +225,27 @@ impl Out {
 }
 
 async fn send(state: &Arc<AppState>, method: &str, url: &str, auth: &str, body: &str) -> Out {
-    let req = Request::builder()
+    send_with(state, method, url, auth, &[], body).await
+}
+
+/// [`send`] with more headers.
+async fn send_with(
+    state: &Arc<AppState>,
+    method: &str,
+    url: &str,
+    auth: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Out {
+    let mut req = Request::builder()
         .method(method)
         .uri(url)
         .header("authorization", auth)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
+        .header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let req = req.body(Body::from(body.to_string())).unwrap();
     let mut handler = BrokerHandler {
         state: state.clone(),
         vid: Some(V.to_string()),
@@ -261,7 +275,10 @@ async fn send(state: &Arc<AppState>, method: &str, url: &str, auth: &str, body: 
                 .unwrap_or_default()
                 .to_string();
             match (op, r.status()) {
-                (Some(op), StatusCode::UNAUTHORIZED) => Out::Ask(op),
+                (Some(op), StatusCode::UNAUTHORIZED) => {
+                    let body = r.into_body().collect().await.unwrap().to_bytes();
+                    Out::Ask(op, String::from_utf8_lossy(&body).into_owned())
+                }
                 (Some(op), StatusCode::FORBIDDEN) => Out::Widen(op),
                 _ => {
                     let body = r.into_body().collect().await.unwrap().to_bytes();
@@ -282,6 +299,20 @@ fn ops(state: &AppState) -> usize {
 
 fn target(state: &AppState, op: &str) -> String {
     state.approvals.lock().unwrap().get_any(op).unwrap().op.act.target.clone()
+}
+
+/// The permit identity the proxy computed for an op's request.
+fn identity(state: &AppState, op: &str) -> crate::approval::coverage::Identity {
+    state
+        .approvals
+        .lock()
+        .unwrap()
+        .get_any(op)
+        .unwrap()
+        .policy_context
+        .as_ref()
+        .and_then(|pc| pc.identity.clone())
+        .expect("an identity")
 }
 
 fn bearer(phantom: &str) -> String {
@@ -668,11 +699,12 @@ async fn a_replay_with_another_or_an_extra_role_is_not_redeemed() {
     }
 }
 
-/// The body is not bound unless a `[requests]` shape binds it (P5): a
-/// replay of an approved ask-always request whose body carries a fresh
-/// nonce is redeemed.
+/// With no `[requests]` shape an approval covers the whole request (DESIGN
+/// §4): the same replay redeems, also with a new `traceparent` or
+/// `user-agent`; a body swap, an added query parameter or another port asks
+/// again, and the miss names what differs, never a value.
 #[tokio::test]
-async fn a_nonce_bearing_body_replay_of_an_ask_always_approval_is_redeemed() {
+async fn an_approval_covers_the_whole_request() {
     let (_dir, state) = new_state();
     Vault::new()
         .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
@@ -681,9 +713,133 @@ async fn a_nonce_bearing_body_replay_of_an_ask_always_approval_is_redeemed() {
         .unlock(&state);
     let url = "https://api.svc.dev/charge";
     let auth = bearer("__sprott__svc__");
-    let op = send(&state, "POST", url, &auth, r#"{"nonce":"a1"}"#).await.ask();
+    let body = r#"{"amount":5,"card":{"last4":"1111"}}"#;
+    let op = send(&state, "POST", url, &auth, body).await.ask();
     approve(&state, &op);
-    assert_eq!(send(&state, "POST", url, &auth, r#"{"nonce":"b2"}"#).await.sent().0, "Bearer tok");
+    let replay = send_with(&state, "POST", url, &auth, &[("traceparent", "00-1-2-01"), ("user-agent", "x/1")], body);
+    assert_eq!(replay.await.sent().0, "Bearer tok");
+    let op = send(&state, "POST", url, &auth, body).await.ask();
+    approve(&state, &op);
+    for (url, body) in [
+        (url, r#"{"amount":5000,"card":{"last4":"1111"}}"#),
+        ("https://api.svc.dev/charge?capture=false", body),
+        ("https://api.svc.dev:9443/charge", body),
+    ] {
+        send(&state, "POST", url, &auth, body).await.ask();
+    }
+    // An approved, unredeemed request for this line: a re-run that differs
+    // is told where, never a value.
+    let Out::Ask(_, text) = send(&state, "POST", url, &auth, r#"{"amount":5,"card":{"last4":"2222"}}"#).await
+    else {
+        panic!("asks");
+    };
+    assert!(text.contains("differs from the request approved at"), "{text}");
+    assert!(text.contains("in: body.card."), "{text}");
+    assert!(!text.contains("2222") && !text.contains("1111"), "no value: {text}");
+    let tail: serde_json::Value = serde_json::from_str(text.trim_end().lines().last().unwrap()).unwrap();
+    assert_eq!(tail["differs"]["components"], json!(["body.card"]));
+    assert_eq!(send(&state, "POST", url, &auth, body).await.sent().0, "Bearer tok");
+}
+
+/// An `ask` window on a path a vault definition's `[requests]` shape matched
+/// is keyed by what its consent shows (it may not narrow a single-use
+/// approval, but a window is its scope and reads); a shape whose condition
+/// errors makes the approval single-use; a rule's condition reads join what
+/// an approval covers.
+#[tokio::test]
+async fn consent_and_condition_reads_are_covered_and_custom_definitions_dont_narrow() {
+    const PAY: &str = r#"
+[service]
+id = "pay"
+name = "Pay"
+hosts = ["api.pay.dev"]
+secrets = ["PAY_TOKEN"]
+[requests.buy]
+method = "POST"
+path = "/buy"
+scope = []
+consent = "Buy for {{ request.body.amount }}"
+[requests.refund]
+method = "POST"
+path = "/refund"
+condition = "request.body.amount > 1"
+scope = []
+[requests.send]
+method = "POST"
+path = "/send"
+scope = []
+"#;
+    let (_dir, state) = new_state();
+    Vault::new()
+        .service("pay", PAY)
+        .secret("PAY_TOKEN", "tok")
+        .rule("pay", "buy", "POST /buy", AccessLevel::Ask, None)
+        .rule("pay", "refund", "POST /refund", AccessLevel::Ask, None)
+        .rule("pay", "send", "POST /send", AccessLevel::AskAlways, None)
+        .rule("pay", "acct", "POST /send", AccessLevel::AskAlways, Some("request.headers['x-account'] != 'dev'"))
+        .unlock(&state);
+    let auth = bearer("__sprott__pay__");
+    // The window covers the consent's value only.
+    let buy = "https://api.pay.dev/buy";
+    let op = send(&state, "POST", buy, &auth, r#"{"amount":5,"note":"a"}"#).await.ask();
+    approve(&state, &op);
+    assert_eq!(send(&state, "POST", buy, &auth, r#"{"amount":5,"note":"b"}"#).await.sent().0, "Bearer tok");
+    send(&state, "POST", buy, &auth, r#"{"amount":6,"note":"a"}"#).await.ask();
+    // A shape condition that errors: single-use.
+    let refund = "https://api.pay.dev/refund";
+    let op = send(&state, "POST", refund, &auth, "{}").await.ask();
+    {
+        let approvals = state.approvals.lock().unwrap();
+        let scope = &approvals.get_any(&op).unwrap().op.act.scope;
+        assert_eq!(scope["single_use"], true);
+        assert_eq!(scope["reuse"], "none");
+    }
+    // A vault definition's `scope = []` doesn't narrow a single-use approval;
+    // a condition read joins what it covers.
+    let send_url = "https://api.pay.dev/send";
+    let prod = [("x-account", "prod")];
+    let op = send_with(&state, "POST", send_url, &auth, &prod, r#"{"to":"a"}"#).await.ask();
+    approve(&state, &op);
+    send_with(&state, "POST", send_url, &auth, &prod, r#"{"to":"b"}"#).await.ask();
+    assert_eq!(send_with(&state, "POST", send_url, &auth, &prod, r#"{"to":"a"}"#).await.sent().0, "Bearer tok");
+    let op = send_with(&state, "POST", send_url, &auth, &prod, r#"{"to":"a"}"#).await.ask();
+    approve(&state, &op);
+    send_with(&state, "POST", send_url, &auth, &[("x-account", "staging")], r#"{"to":"a"}"#).await.ask();
+    assert_eq!(send_with(&state, "POST", send_url, &auth, &prod, r#"{"to":"a"}"#).await.sent().0, "Bearer tok");
+}
+
+/// The permit identity is keyed by the vault's current content key: it
+/// never rides the op the relay carries; an op minted before a lock and
+/// approved after the unlock redeems; a daemon whose key is an earlier
+/// generation's mints nothing and redeems nothing until `sprott unlock`.
+#[tokio::test]
+async fn the_identity_is_the_daemons_and_follows_the_content_key() {
+    let (_dir, state) = new_state();
+    let vault = Vault::new()
+        .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
+        .secret("SVC_TOKEN", "tok")
+        .rule("svc", "t", "POST /x", AccessLevel::AskAlways, None);
+    vault.unlock(&state);
+    let url = "https://api.svc.dev/x";
+    let auth = bearer("__sprott__svc__");
+    let op = send(&state, "POST", url, &auth, r#"{"a":1}"#).await.ask();
+    let id = identity(&state, &op);
+    assert_eq!(id.digest.len(), 64);
+    let wire = serde_json::to_string(&state.approvals.lock().unwrap().get_any(&op).unwrap().op).unwrap();
+    assert!(!wire.contains(&id.digest), "the relay never sees the identity");
+    state.lock_vault(V);
+    vault.unlock(&state);
+    approve(&state, &op);
+    assert_eq!(send(&state, "POST", url, &auth, r#"{"a":1}"#).await.sent().0, "Bearer tok");
+    // Another member re-keyed: this session's key is the earlier generation's.
+    let fx = crate::storage::sealed_vault::tests::rekeyed_fixture();
+    let path = state.vaults.per_item_path(V).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::storage::sealed_vault::write_per_item_atomic(&path, &fx.pv).unwrap();
+    let before = ops(&state);
+    let (code, _) = send(&state, "POST", url, &auth, r#"{"a":2}"#).await.refused();
+    assert_eq!(code, "vault_locked");
+    assert_eq!(ops(&state), before, "nothing minted");
 }
 
 /// A connection rebound to other KEYs after the approval: its permit is for
@@ -890,6 +1046,7 @@ async fn the_permit_is_spent_once_and_a_lock_before_spending_is_vault_locked() {
     let auth = bearer("__sprott__svc__");
     let op = send(&state, "POST", url, &auth, "{}").await.ask();
     approve(&state, &op);
+    let identity = identity(&state, &op);
     let snapshot = state.snapshot(V).unwrap();
     let key = || {
         crate::state::PermitKey::of(
@@ -904,7 +1061,7 @@ async fn the_permit_is_spent_once_and_a_lock_before_spending_is_vault_locked() {
             "POST",
             "api.svc.dev",
             "/x",
-            "",
+            &identity,
             crate::state::CredentialSet::new("svc", ["SVC_TOKEN".to_string()]),
         )
     };
