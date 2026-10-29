@@ -699,6 +699,19 @@ pub fn grant_id_input(
     out
 }
 
+/// Domain tag of the approval-card binding (request-model design §5).
+pub const DS_GRANT_CARD: &[u8] = b"sprott/v1/grant-card";
+
+/// The signing input of a grant whose op carries a sealed approval card:
+/// [`grant_id_input`], then `lp("sprott/v1/grant-card") ‖ lp(card_mac)`, where
+/// `card_mac` is [`crate::approval::card::binding_mac`] of the card as the
+/// approver opened it. A console that never opened the card can't produce it.
+pub fn with_card_binding(mut input: Vec<u8>, card_mac: &[u8; 32]) -> Vec<u8> {
+    push_lp(&mut input, DS_GRANT_CARD);
+    push_lp(&mut input, card_mac);
+    input
+}
+
 /// `SHA256(lp(sig_1) ‖ … ‖ lp(sig_n))` over the ledger's event signatures in
 /// `seq` order: the `events_hash` an owner-signed ledger head commits to (C4).
 pub fn principal_events_hash<S: AsRef<[u8]>>(sigs: &[S]) -> [u8; 32] {

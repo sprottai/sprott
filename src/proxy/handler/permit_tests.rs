@@ -348,6 +348,63 @@ async fn cloudflare_role_phantom_ask_always_replay_is_forwarded() {
     send(&state, "PATCH", url, &auth, body).await.ask();
 }
 
+/// A shaped ask carries its card sealed (design §5): the op shows the request
+/// line and the decision in the clear, the bound values and the consent only
+/// inside `scope.card`, which opens under the vault's content key. The values
+/// kept beside the op key the permit, so a replay with another value asks.
+#[tokio::test]
+async fn a_shaped_ask_carries_its_card_sealed_and_its_values_key_the_permit() {
+    let (_dir, state) = new_state();
+    Vault::new()
+        .secret("CLOUDFLARE_API_TOKEN", "cf-token")
+        .secret("CLOUDFLARE_ACCOUNT_ID", "cf-account")
+        .unlock(&state);
+    let url = "https://api.cloudflare.com/client/v4/zones/z1/dns_records/r1";
+    let auth = bearer("__sprott__cloudflare__cloudflare_api_token__");
+    let body = r#"{"content":"1.2.3.4"}"#;
+    let op = send(&state, "PATCH", url, &auth, body).await.ask();
+    let (scope, kept) = {
+        let store = state.approvals.lock().unwrap();
+        let rec = store.get_any(&op).unwrap();
+        let card = rec.policy_context.as_ref().and_then(|pc| pc.card.clone());
+        (rec.op.act.scope.clone(), card.expect("the card is kept beside the op"))
+    };
+    assert!(scope.get("scope_vars").is_none() && scope.get("consent").is_none());
+    let wire = scope.get("card").expect("the op carries the sealed card");
+    assert_eq!(wire["gen"], 0);
+    assert!(!wire["sealed"].as_str().unwrap().contains("1.2.3.4"));
+    let json = crate::approval::card::open(wire["sealed"].as_str().unwrap(), &K, V, 0)
+        .expect("opens under the content key");
+    let card: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(card["vars"]["content"], "1.2.3.4");
+    assert_eq!(kept.mac, crate::approval::card::binding_mac(&K, &json));
+    approve(&state, &op);
+    let other = r#"{"content":"5.6.7.8"}"#;
+    send(&state, "PATCH", url, &auth, other).await.ask();
+    assert_eq!(send(&state, "PATCH", url, &auth, body).await.sent().0, "Bearer cf-token");
+}
+
+/// Two retries of one shaped request chain (the inbox's `supersedes`) though
+/// each carries a freshly sealed card.
+#[tokio::test]
+async fn retries_of_a_shaped_request_chain_despite_fresh_seals() {
+    let (_dir, state) = new_state();
+    Vault::new()
+        .secret("CLOUDFLARE_API_TOKEN", "cf-token")
+        .secret("CLOUDFLARE_ACCOUNT_ID", "cf-account")
+        .unlock(&state);
+    let url = "https://api.cloudflare.com/client/v4/zones/z1/dns_records/r1";
+    let auth = bearer("__sprott__cloudflare__cloudflare_api_token__");
+    let body = r#"{"content":"1.2.3.4"}"#;
+    let a = send(&state, "PATCH", url, &auth, body).await.ask();
+    let b = send(&state, "PATCH", url, &auth, body).await.ask();
+    let store = state.approvals.lock().unwrap();
+    let (ra, rb) = (store.get_any(&a).unwrap(), store.get_any(&b).unwrap());
+    assert_ne!(ra.op.act.scope["card"]["sealed"], rb.op.act.scope["card"]["sealed"]);
+    assert!(ra.intent_key.is_some());
+    assert_eq!(ra.intent_key, rb.intent_key);
+}
+
 // ── tier × phantom × store × service ────────────────────────────────────────
 
 /// A vault service with two secrets, an id-less ask rule (only a vault

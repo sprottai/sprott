@@ -1144,30 +1144,31 @@ impl BrokerHandler {
         let window = crate::approval::Reuse::of(level, &decided_by, req_scope.is_some(), method)
             .and_then(|r| r.window(grant_ttl))
             .is_some();
-        // Phase 2: fold the bound `[requests]` scope-field VALUES and the consent
-        // template into the op scope. They are signed into β (the user's passkey
-        // authorizes exactly the fields shown) and re-derived at approve to build
-        // the grant-identity digest. Values are STRINGS — the canonical (JCS)
-        // encoder rejects floats, and it keeps approve/redeem digests byte-equal.
+        // The bound `[requests]` values and the consent template are what the
+        // approver reads: they ride sealed to the vault's current content key
+        // (`scope.card`, design §5), never in the clear. The daemon keeps the
+        // plaintext in the PolicyContext: its values key the permit an
+        // approval stores, and its MAC is what the approver's signature must
+        // cover.
+        let mut card = None;
         if let Some(rs) = req_scope {
             // Mark this a scoped path (a `[requests]` shape matched), so approve
             // never records a value-blind coarse-window key for it — even when
             // NO field values resolved (an empty-body ask). Without this, one
             // approved blank ask would open a window any later value could ride.
             scope["scoped"] = serde_json::Value::Bool(true);
-            if !rs.bound.is_empty() {
-                let obj: serde_json::Map<String, serde_json::Value> = rs
-                    .bound
-                    .iter()
-                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                    .collect();
-                scope["scope_vars"] = serde_json::Value::Object(obj);
-            }
-            // Display-only (not in the digest); still signed into β, a string so
-            // JCS is happy. The `{{ vars.x | filter }}` template; the console
-            // interpolates (auto-escaping values) and dispatches filters.
-            if let Some(c) = &rs.consent {
-                scope["consent"] = serde_json::Value::String(c.clone());
+            let plain = crate::approval::card::Card {
+                vars: rs.bound.clone(),
+                consent: rs.consent.clone(),
+            };
+            if !plain.is_empty() {
+                match seal_card(&self.state, vault_id, plain) {
+                    Ok(sealed) => {
+                        scope["card"] = sealed.scope_value();
+                        card = Some(sealed);
+                    }
+                    Err(refusal) => return refusal.into(),
+                }
             }
         }
         let op = Operation {
@@ -1189,6 +1190,7 @@ impl BrokerHandler {
             host: Some(host.to_string()),
             credentials: Some(credentials.clone()),
             policy_fp: window.then_some(*fingerprint),
+            card,
         };
 
         match crate::server::broker_flow::register_pending_use(
@@ -1371,6 +1373,32 @@ pub(crate) fn stamp_signed_level(
     if let Some(reuse) = crate::approval::Reuse::of(level, decided_by, scoped, method) {
         reuse.stamp(scope, grant_ttl);
     }
+}
+
+/// Seal an approval card to the vault's current-generation content key
+/// (design §5). Refused with the unlock text when the vault is locked, or when
+/// the key this session holds is not the current generation's (another member
+/// re-keyed since this machine unlocked): a card sealed to an old key is one a
+/// removed member could open.
+fn seal_card(
+    state: &crate::state::AppState,
+    vault_id: &str,
+    card: crate::approval::card::Card,
+) -> std::result::Result<crate::approval::card::SealedCard, Response<Body>> {
+    let locked = || err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG);
+    let material = state.cloned_state_key(vault_id).ok_or_else(locked)?;
+    let keys = crate::storage::item::VaultKeys::from_material(&material);
+    let pv = state
+        .vaults
+        .per_item_path(vault_id)
+        .ok()
+        .and_then(|p| crate::storage::sealed_vault::read_per_item(&p).ok().flatten());
+    let gen = match pv {
+        Some(pv) => pv.seal_generation(keys).ok_or_else(locked)?,
+        None => 0,
+    };
+    crate::approval::card::seal(card, keys.content, vault_id, gen)
+        .map_err(|e| err_response(ScCode::ApprovalRegister, &e.to_string()))
 }
 
 /// The waiter line for pending-approval bodies — only when the approve link

@@ -669,6 +669,7 @@ fn verify_grant_identity(
     grant: &Grant,
     stored_op: &crate::protocol::operation::Operation,
     stored_r: &str,
+    card_mac: Option<&[u8; 32]>,
 ) -> Result<String> {
     let invalid = |m: &str| AppError::GrantIdInvalid(m.to_string());
     let id = grant
@@ -706,8 +707,14 @@ fn verify_grant_identity(
         &serde_json::to_value(stored_op)?,
     )?;
     let sc_pk = state.sc.pk_bytes();
-    let input =
+    let mut input =
         crate::identity::grant_id_input(vault_id, op_id, &beta, &cid, &k_enc, &k_ct, &sc_pk, id);
+    // An op with a sealed approval card: the signature must cover the card as
+    // the approver opened it (design §5), so a console that never opened it,
+    // or opened another, can't approve.
+    if let Some(mac) = card_mac {
+        input = crate::identity::with_card_binding(input, mac);
+    }
     let certifies =
         |pk: &[u8; 32]| crate::identity::derive_id(crate::identity::IdKind::User, pk) == id;
     let sig_pub = paired_account_pub()
@@ -1023,6 +1030,7 @@ pub async fn approve_op(
         &grant,
         &approval_op,
         &stored_r,
+        stored_pc.as_ref().and_then(|pc| pc.card.as_ref()).map(|c| &c.mac),
     )
     .map_err(refuse)?;
     check_approval_authority(existing_per_item.as_ref(), &vault_id, &signer).map_err(refuse)?;
@@ -2304,11 +2312,17 @@ pub(crate) fn plan_use_grant(
     if conn.is_empty() || host.is_empty() {
         return None;
     }
-    // Phase 2: the bound `[requests]` values the proxy stamped into
-    // `scope.scope_vars` (and the passkey signed) fold into the permit
-    // identity, rebuilt as the SAME sorted pairs the replay re-extracts from
-    // the live request. Empty (no requests shape, or none resolved) ⇒ `""`.
-    let scope_digest = crate::service::scope_digest(&crate::approval::reuse::bound_values(scope));
+    // The bound `[requests]` values fold into the permit identity, as the SAME
+    // sorted pairs the replay re-extracts from the live request. They come
+    // from the approval card the daemon kept at mint (the op carries it
+    // sealed, and the approver's signature covers its MAC); an op minted
+    // without a card binds what its scope carries in the clear (none, for an
+    // op this daemon minted). Empty ⇒ `""`.
+    let bound = match &p.card {
+        Some(card) => card.card.vars.clone(),
+        None => crate::approval::reuse::bound_values(scope),
+    };
+    let scope_digest = crate::service::scope_digest(&bound);
     let key = crate::state::PermitKey::of(
         p.level,
         &p.decided_by,
@@ -3256,6 +3270,7 @@ mod tests {
             host: Some("api.github.com".into()),
             credentials: None,
             policy_fp: None,
+            card: None,
         }
     }
 
@@ -3773,6 +3788,7 @@ mod tests {
             host: Some(RH.into()),
             credentials: Some(creds()),
             policy_fp: if window { fingerprint } else { None },
+            card: None,
         };
         assert_signed_level(&scope, Some(&pc)).expect("stamp passes the apply assertion");
         (scope, pc)
@@ -5315,14 +5331,66 @@ mod tests {
         g.id_sig = Some(URL_SAFE_NO_PAD.encode(me.signing().sign(&input)));
         pin_account_key(me.signing().public_bytes());
         let signer =
-            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r).unwrap();
+            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r, None).unwrap();
         assert_eq!(signer, me.user_id());
         check_approval_authority(None, "v-personal", &signer).unwrap();
         // Another account pinned: the signer's key is unknown here.
         pin_account_key(UikRoot::from_root([0x66u8; 32]).signing().public_bytes());
         let err =
-            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r).unwrap_err();
+            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r, None).unwrap_err();
         assert!(matches!(err, AppError::GrantIdInvalid(_)), "{err}");
+        pin_account(None);
+    }
+
+    /// An op with a sealed approval card (design §5): the approver's signature
+    /// must cover the card as opened. One signed without the card binding (a
+    /// console that never opened it) or over another card is refused; one
+    /// over this card verifies.
+    #[test]
+    fn a_sealed_card_op_needs_the_signature_to_cover_the_opened_card() {
+        use crate::crypto::vault_key::UikRoot;
+        let state = test_state_in("-v3card");
+        let me = UikRoot::from_root([0x57u8; 32]);
+        let op = team_export_op("v-personal", "FOO");
+        let r = b64r(6);
+        let beta = crate::crypto::binding::binding_for_op(
+            crate::crypto::binding::DOMAIN_STANDARD,
+            &STANDARD.decode(&r).unwrap(),
+            &serde_json::to_value(&op).unwrap(),
+        )
+        .unwrap();
+        let base = || {
+            crate::identity::grant_id_input(
+                "v-personal",
+                "op-1",
+                &beta,
+                b"c",
+                &[1u8; 32],
+                &[2u8; 48],
+                &state.sc.pk_bytes(),
+                &me.user_id(),
+            )
+        };
+        let signed = |input: Vec<u8>| {
+            let mut g = plain_grant(op.clone(), &r);
+            g.credential_id = "Yw".into();
+            g.k_enc = Some(URL_SAFE_NO_PAD.encode([1u8; 32]));
+            g.k_ct = Some(URL_SAFE_NO_PAD.encode([2u8; 48]));
+            g.id = Some(me.user_id());
+            g.id_sig = Some(URL_SAFE_NO_PAD.encode(me.signing().sign(&input)));
+            g
+        };
+        let mac = [9u8; 32];
+        pin_account_key(me.signing().public_bytes());
+        let verify = |g: &Grant| {
+            verify_grant_identity(&state, None, "v-personal", "op-1", g, &op, &r, Some(&mac))
+        };
+        let unopened = signed(base());
+        assert!(matches!(verify(&unopened).unwrap_err(), AppError::GrantIdInvalid(_)));
+        let other = signed(crate::identity::with_card_binding(base(), &[8u8; 32]));
+        assert!(matches!(verify(&other).unwrap_err(), AppError::GrantIdInvalid(_)));
+        let opened = signed(crate::identity::with_card_binding(base(), &mac));
+        assert_eq!(verify(&opened).unwrap(), me.user_id());
         pin_account(None);
     }
 }
