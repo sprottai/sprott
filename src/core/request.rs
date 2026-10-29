@@ -370,6 +370,45 @@ pub(crate) fn chain(e: &cel::IdedExpr) -> Option<Result<ReadPath, String>> {
     Some(Ok(ReadPath::new(field, steps.collect())))
 }
 
+// ── Method readings ─────────────────────────────────────────────────────────
+
+/// The headers some servers read a request's method from instead of its
+/// request line (the convention Google's and other HTTP APIs document).
+pub const METHOD_OVERRIDES: &[&str] = &["x-http-method-override", "x-http-method", "x-method-override"];
+
+/// The methods a request may be read as (DESIGN §6): its request line, and
+/// each method-override header it is forwarded with, each uppercase, each
+/// once. A reading must be exactly one RFC 9110 method token after trimming
+/// whitespace; anything else (a list, a control character, a header given
+/// twice) is refused with why. A `_method` parameter is not read (a
+/// framework convention whose parsers differ).
+pub fn method_readings(line: &str, headers: &[(String, Vec<u8>)]) -> Result<Vec<String>, String> {
+    let mut out = vec![line.to_ascii_uppercase()];
+    for name in METHOD_OVERRIDES {
+        let values: Vec<&[u8]> = headers
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.as_slice())
+            .collect();
+        match values.as_slice() {
+            [] => {}
+            [one] => {
+                let reading = std::str::from_utf8(one)
+                    .ok()
+                    .map(str::trim)
+                    .filter(|m| crate::core::selector::is_method_token(m))
+                    .ok_or_else(|| format!("the {name} header is not one HTTP method"))?;
+                let reading = reading.to_ascii_uppercase();
+                if !out.contains(&reading) {
+                    out.push(reading);
+                }
+            }
+            _ => return Err(format!("the {name} header is given more than once")),
+        }
+    }
+    Ok(out)
+}
+
 // ── Input ────────────────────────────────────────────────────────────────────
 
 /// What the proxy has of a request, as it is decided and forwarded.
@@ -1221,6 +1260,31 @@ mod tests {
         assert_eq!(r.value(&path("request.graphql.fields")).unwrap_err().status, 400);
         let r = with(&[], None, r#"{"query":"mutation { a }"}"#, BodyFormat::Json);
         assert_eq!(r.value(&path("request.graphql.fields")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_method_is_read_from_the_line_and_each_override() {
+        let h = |pairs: &[(&str, &str)]| -> Vec<(String, Vec<u8>)> {
+            pairs.iter().map(|(k, v)| (k.to_string(), v.as_bytes().to_vec())).collect()
+        };
+        assert_eq!(method_readings("post", &[]).unwrap(), ["POST"]);
+        assert_eq!(
+            method_readings("POST", &h(&[("x-http-method-override", " delete ")])).unwrap(),
+            ["POST", "DELETE"]
+        );
+        assert_eq!(
+            method_readings("POST", &h(&[("x-http-method", "GET"), ("x-method-override", "POST")])).unwrap(),
+            ["POST", "GET"]
+        );
+        for bad in [
+            h(&[("x-http-method-override", "DELETE, GET")]),
+            h(&[("x-http-method-override", "")]),
+            h(&[("x-method-override", "DEL ETE")]),
+            h(&[("x-http-method", "GET"), ("x-http-method", "GET")]),
+        ] {
+            assert!(method_readings("POST", &bad).is_err(), "{bad:?}");
+        }
+        assert!(method_readings("POST", &[("x-http-method".into(), b"DELETE\0".to_vec())]).is_err());
     }
 
     #[test]

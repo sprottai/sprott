@@ -193,7 +193,7 @@ impl Out {
     fn describe(&self) -> String {
         match self {
             Out::Sent(a, u) => format!("sent ({a}) to {u}"),
-            Out::Ask(op, _) => format!("ask {op}"),
+            Out::Ask(op, body) => format!("ask {op}: {body}"),
             Out::Widen(op) => format!("widen {op}"),
             Out::No(c, m) => format!("refused {c}: {m}"),
         }
@@ -228,7 +228,8 @@ async fn send(state: &Arc<AppState>, method: &str, url: &str, auth: &str, body: 
     send_with(state, method, url, auth, &[], body).await
 }
 
-/// [`send`] with more headers.
+/// [`send`] with more headers (a `content-type` among them replaces
+/// `application/json`).
 async fn send_with(
     state: &Arc<AppState>,
     method: &str,
@@ -240,8 +241,10 @@ async fn send_with(
     let mut req = Request::builder()
         .method(method)
         .uri(url)
-        .header("authorization", auth)
-        .header("content-type", "application/json");
+        .header("authorization", auth);
+    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+        req = req.header("content-type", "application/json");
+    }
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
@@ -806,6 +809,117 @@ scope = []
     approve(&state, &op);
     send_with(&state, "POST", send_url, &auth, &[("x-account", "staging")], r#"{"to":"a"}"#).await.ask();
     assert_eq!(send_with(&state, "POST", send_url, &auth, &prod, r#"{"to":"a"}"#).await.sent().0, "Bearer tok");
+}
+
+/// A method-override header is a reading of the method (DESIGN §6): `POST`
+/// with `X-HTTP-Method-Override: DELETE` asks like the DELETE; a header that
+/// isn't one method is refused; a long GET (`POST` + override + form body)
+/// on a path where a `POST` rule reads the body is forwarded.
+#[tokio::test]
+async fn a_method_override_is_decided_as_that_method() {
+    let (_dir, state) = new_state();
+    Vault::new()
+        .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
+        .secret("SVC_TOKEN", "tok")
+        .floor("svc", AccessLevel::Allow, AccessLevel::Allow)
+        .rule("svc", "drop", "DELETE /repos/:repo", AccessLevel::AskAlways, None)
+        .rule("svc", "op", "POST /q", AccessLevel::AskAlways, Some("has(request.body.op) && request.body.op == 'drop'"))
+        .unlock(&state);
+    let auth = bearer("__sprott__svc__");
+    let repo = "https://api.svc.dev/repos/r";
+    assert_eq!(send(&state, "POST", repo, &auth, "{}").await.sent().0, "Bearer tok");
+    for name in ["x-http-method-override", "X-HTTP-Method", "x-method-override"] {
+        send_with(&state, "POST", repo, &auth, &[(name, "delete")], "{}").await.ask();
+    }
+    for bad in [&[("x-http-method-override", "DELETE, GET")][..], &[("x-http-method", "GET"), ("x-http-method", "GET")]] {
+        let (code, _) = send_with(&state, "POST", repo, &auth, bad, "{}").await.refused();
+        assert_eq!(code, "request_unreadable", "{bad:?}");
+    }
+    let long_get = [("x-http-method-override", "GET"), ("content-type", "application/x-www-form-urlencoded")];
+    let q = "https://api.svc.dev/q";
+    assert_eq!(send_with(&state, "POST", q, &auth, &long_get, "q=a&page=2").await.sent().0, "Bearer tok");
+    send_with(&state, "POST", q, &auth, &long_get, "op=drop").await.ask();
+}
+
+/// Readings tied at the decided level under different units (here two
+/// rules) make the approval single-use: a window under either rule would
+/// serve requests the other decides.
+#[tokio::test]
+async fn tied_readings_under_different_units_are_single_use() {
+    let (_dir, state) = new_state();
+    Vault::new()
+        .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
+        .secret("SVC_TOKEN", "tok")
+        .rule("svc", "edit", "POST /x", AccessLevel::Ask, None)
+        .rule("svc", "drop", "DELETE /x", AccessLevel::Ask, None)
+        .unlock(&state);
+    let auth = bearer("__sprott__svc__");
+    let url = "https://api.svc.dev/x";
+    let reuse = |op: &str| {
+        let approvals = state.approvals.lock().unwrap();
+        let scope = &approvals.get_any(op).unwrap().op.act.scope;
+        (scope["reuse"].as_str().unwrap_or_default().to_string(), scope["single_use"] == true)
+    };
+    let op = send(&state, "POST", url, &auth, "{}").await.ask();
+    assert_eq!(reuse(&op), ("rule".to_string(), false));
+    let op = send_with(&state, "POST", url, &auth, &[("x-http-method-override", "DELETE")], "{}").await.ask();
+    assert_eq!(reuse(&op), ("none".to_string(), true));
+}
+
+/// A multipart/mixed batch of `application/http` requests (boundary `b`),
+/// each a request line and its header lines.
+fn batch_body(requests: &[&str]) -> String {
+    let mut body = String::new();
+    for (i, r) in requests.iter().enumerate() {
+        body.push_str(&format!(
+            "--b\r\nContent-Type: application/http\r\nContent-ID: <{i}>\r\n\r\n{r}\r\n\r\n"
+        ));
+    }
+    body + "--b--\r\n"
+}
+
+/// A Google batch is decided by its requests (DESIGN §7): a batch of reads
+/// is forwarded; one carrying a gated request asks, and its approval covers
+/// the whole batch by content (a fresh boundary or Content-ID redeems,
+/// another request asks again); a batch that can't be read one request at a
+/// time asks.
+#[tokio::test]
+async fn a_google_batch_is_decided_by_its_requests() {
+    let (_dir, state) = new_state();
+    Vault::new()
+        .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
+        .secret("SVC_TOKEN", "tok")
+        .floor("svc", AccessLevel::Allow, AccessLevel::Allow)
+        .rule("svc", "drop", "DELETE /items/:id", AccessLevel::AskAlways, None)
+        .unlock(&state);
+    let auth = bearer("__sprott__svc__");
+    let url = "https://api.svc.dev/batch/items/v1";
+    let mixed = |b: &str| format!("multipart/mixed; boundary={b}");
+    let ct = mixed("b");
+    let headers = [("content-type", ct.as_str())];
+    let get = "GET /items/1 HTTP/1.1\r\n";
+    let delete = "DELETE /items/1 HTTP/1.1\r\n";
+    let reads = batch_body(&[get, "GET /items?page=2 HTTP/1.1\r\n"]);
+    assert_eq!(send_with(&state, "POST", url, &auth, &headers, &reads).await.sent().0, "Bearer tok");
+    // The same delete, overridden inside the batch.
+    let overridden = "POST /items/1 HTTP/1.1\r\nX-HTTP-Method-Override: DELETE\r\n";
+    send_with(&state, "POST", url, &auth, &headers, &batch_body(&[get, overridden])).await.ask();
+
+    let gated = batch_body(&[get, delete]);
+    let op = send_with(&state, "POST", url, &auth, &headers, &gated).await.ask();
+    let names: Vec<String> = identity(&state, &op).components.iter().map(|(n, _)| n.clone()).collect();
+    assert!(names.iter().any(|n| n.starts_with("batch[1].")), "{names:?}");
+    approve(&state, &op);
+    send_with(&state, "POST", url, &auth, &headers, &batch_body(&[get, delete, get])).await.ask();
+    let fresh = gated.replace("--b", "--c").replace("<0>", "<x7>");
+    let ct_c = mixed("c");
+    let fresh_headers = [("content-type", ct_c.as_str())];
+    let rerun = send_with(&state, "POST", url, &auth, &fresh_headers, &fresh);
+    assert_eq!(rerun.await.sent().0, "Bearer tok");
+
+    for unreadable in [reads.replace("--b--\r\n", ""), reads.replace(" HTTP/1.1", "")] {
+        send_with(&state, "POST", url, &auth, &headers, &unreadable).await.ask();
+    }
 }
 
 /// The permit identity is keyed by the vault's current content key: it

@@ -20,6 +20,13 @@ encoded."request.body.raw" = { contentEncoding = "base64url", contentMediaType =
 # syntax as `{{ secret.X | basic }}`.
 consent = "{{ request.body.raw | email }}"
 
+# A draft sent by its id alone: the card names the draft.
+[requests.draft_send_by_id]
+method = "POST"
+path = "/gmail/v1/users/:user/drafts/send"
+condition = "!has(request.body.message)"
+consent = "Send draft {{ request.body.id }}"
+
 [requests.draft_send]
 method = "POST"
 path = "/gmail/v1/users/:user/drafts/send"

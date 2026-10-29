@@ -677,95 +677,54 @@ impl BrokerHandler {
             write_forward_audit(&state, &refused, 0, None, Some(code));
             err_response(code, &u.message)
         };
-        // An encoded slash has two readings, and servers differ on which they
-        // take (core/path.rs): decide on both and keep the stricter. The permit
-        // keys, the audit row and the upstream all use the path as normalized.
-        let readings: Vec<String> = match crate::core::path::slash_decoded(&path) {
-            Err(e) => {
-                write_forward_audit(&state, &refused, 0, None, Some(ScCode::RequestUnreadable));
-                return err_response(ScCode::RequestUnreadable, &e.to_string()).into();
-            }
-            Ok(others) => std::iter::once(path.clone()).chain(others).collect(),
-        };
         use crate::core::policy::AccessLevel;
         // The decision, and what an approval of this request covers: worked
-        // out here, while the request object is held, before anything awaits.
+        // out here, while the request objects are held, before anything
+        // awaits. A request has readings, and servers differ on which they
+        // take: each is decided and the strictest kept (service/readings.rs).
+        // The permit keys, the audit row and the upstream all use the request
+        // line and the path as normalized.
         let (level, decided_by, ttl, scoped, shaped, identity, card) = {
-            let mut decided: Vec<(crate::service::ReadRequest<'_>, crate::core::policy::Decision)> =
-                Vec::with_capacity(readings.len());
-            for p in &readings {
-                // A body that isn't valid in its own coding is refused whatever
-                // reads it: a decoder that stops early may run what this one
-                // can't see, and no client sends one by mistake. One in a coding
-                // this proxy can't undo is refused where a shape selects the
-                // request.
-                if let Some(Err(e)) = &decoded {
-                    if !matches!(e, DecodeError::Unsupported(_))
-                        || shape_def.is_some_and(|d| d.shape_selects(&method, p))
-                    {
-                        write_forward_audit(&state, &refused, 0, None, Some(e.code()));
-                        return err_response(e.code(), &e.to_string()).into();
-                    }
+            let input = crate::core::request::RequestInput {
+                method: &method,
+                host: &request_host,
+                path: &path,
+                query: parts.uri.query(),
+                headers: &request_headers,
+                body: readable,
+                body_error: body_error.as_ref(),
+            };
+            let readings = match crate::service::readings::Readings::of(input) {
+                Ok(readings) => readings,
+                Err(why) => {
+                    write_forward_audit(&state, &refused, 0, None, Some(ScCode::RequestUnreadable));
+                    return err_response(ScCode::RequestUnreadable, &why).into();
                 }
-                let input = crate::core::request::RequestInput {
-                    method: &method,
-                    host: &request_host,
-                    path: p,
-                    query: parts.uri.query(),
-                    headers: &request_headers,
-                    body: readable,
-                    body_error: body_error.as_ref(),
-                };
-                let read = match crate::service::read_request(shape_def, input) {
-                    Ok(read) => read,
-                    Err(u) => return refuse(u).into(),
-                };
-                let decision = match state.evaluate_request_decision(
-                    &snapshot.inputs,
-                    &conn,
-                    &service_id,
-                    &read.request,
-                ) {
-                    Ok(d) => d,
-                    Err(u) => return refuse(u).into(),
-                };
-                decided.push((read, decision));
+            };
+            // A body that isn't valid in its own coding is refused whatever
+            // reads it: a decoder that stops early may run what this one
+            // can't see, and no client sends one by mistake. One in a coding
+            // this proxy can't undo is refused where a shape selects the
+            // request.
+            if let Some(Err(e)) = &decoded {
+                if !matches!(e, DecodeError::Unsupported(_)) || readings.selected(shape_def) {
+                    write_forward_audit(&state, &refused, 0, None, Some(e.code()));
+                    return err_response(e.code(), &e.to_string()).into();
+                }
             }
-            // The stricter reading wins; on a tie, the one a shape read (so
-            // the approval covers and shows what it can).
-            let kept = (1..decided.len()).fold(0, |k, i| {
-                let (n, kk) = (
-                    decided[i].1 .0.restrictiveness(),
-                    decided[k].1 .0.restrictiveness(),
-                );
-                let shaped = decided[k].0.scope.is_none() && decided[i].0.scope.is_some();
-                if n > kk || (n == kk && shaped) {
-                    i
-                } else {
-                    k
-                }
-            });
-            let (level, decided_by, ttl) = decided[kept].1.clone();
+            let decided = match readings.decide(shape_def, |request| {
+                state.evaluate_request_decision(&snapshot.inputs, &conn, &service_id, request)
+            }) {
+                Ok(decided) => decided,
+                Err(u) => return refuse(u).into(),
+            };
+            let (level, decided_by, ttl) = decided.decision.clone();
             // Deny refuses before any value is located, let alone read.
             if level == AccessLevel::Deny {
                 return deny(ScCode::PolicyDenied, "this request is blocked by policy");
             }
-            let tied: Vec<usize> = (0..decided.len())
-                .filter(|&i| decided[i].1 .0 == level)
-                .collect();
-            // Single-use when tied readings decide by different units, or a
-            // shape's condition errored where no shape matched.
-            let unit = |by: &crate::core::policy::DecidedBy| {
-                crate::approval::reuse::GrantUnit::of(by, &method)
-            };
-            let kept_read = &decided[kept].0;
-            let scoped = if tied.iter().any(|&i| unit(&decided[i].1 .1) != unit(&decided_by))
-                || (kept_read.scope.is_none() && kept_read.errored)
-            {
-                crate::approval::reuse::Scoped::Once
-            } else {
-                crate::approval::reuse::Scoped::from(kept_read.scope.is_some())
-            };
+            let scoped = decided.scoped;
+            let (kept, kept_read, _) = &decided.readings[decided.kept];
             // What an approval covers, keyed under the vault's current
             // content-key generation: a daemon that doesn't hold it mints and
             // redeems nothing until `sprott unlock`.
@@ -785,9 +744,19 @@ impl BrokerHandler {
                             .get(&d.service.id)
                             .is_some_and(|r| std::ptr::eq(r, d))
                     });
-                    let mut covered: Option<crate::approval::coverage::Covered> = None;
-                    for &i in &tied {
-                        let read = &decided[i].0;
+                    // A batch is covered whole, each of its requests by its
+                    // content, whichever decided it.
+                    let mut covered = if readings.is_batch() || readings.batch_unreadable {
+                        let (_, request, _) = &decided.readings[0];
+                        match crate::approval::coverage::whole_request(&request.request, &path) {
+                            Ok(c) => c,
+                            Err(u) => return refuse(u).into(),
+                        }
+                    } else {
+                        crate::approval::coverage::Covered::default()
+                    };
+                    for &i in &decided.tied {
+                        let (reading, read, _) = &decided.readings[i];
                         let reads = match snapshot.inputs.matched_reads(
                             &state.services,
                             &conn,
@@ -798,9 +767,10 @@ impl BrokerHandler {
                             Ok(reads) => reads,
                             Err(u) => return refuse(u).into(),
                         };
+                        let at = reading.part.map_or(path.as_str(), |p| readings.part_path(p));
                         let c = match crate::approval::coverage::cover_read(
                             read,
-                            &path,
+                            at,
                             &reads,
                             compiled_in,
                             tier.single_use(),
@@ -808,20 +778,26 @@ impl BrokerHandler {
                             Ok(c) => c,
                             Err(u) => return refuse(u).into(),
                         };
-                        covered = Some(match covered {
+                        covered = covered.union(match reading.part {
+                            Some(p) => c.batch_part(p),
                             None => c,
-                            Some(m) => m.union(c),
                         });
                     }
-                    let covered = covered.unwrap_or_default();
                     identity = key.identity(&covered);
                     card = Some(crate::approval::card::Card {
                         vars: covered.shown,
-                        consent: kept_read.scope.as_ref().and_then(|s| s.consent.clone()),
+                        // A batch request's consent would name values the
+                        // card shows under that request's label.
+                        consent: match kept.part {
+                            Some(_) => None,
+                            None => kept_read.scope.as_ref().and_then(|s| s.consent.clone()),
+                        },
                     });
                 }
             }
-            let shaped = kept_read.scope.is_some();
+            // A body a shape (or a batch's requests) decided on goes upstream
+            // as it was read: decoded.
+            let shaped = kept_read.scope.is_some() || readings.is_batch();
             (level, decided_by, ttl, scoped, shaped, identity, card)
         };
 
@@ -1475,20 +1451,68 @@ fn permit_identity_key(
 }
 
 /// The keyset generation this session's keys seal under (`None`: an earlier
-/// generation's); 0 for a vault with no keyset or no store on disk.
+/// generation's); 0 for a vault with no keyset or no store on disk. The vault
+/// file is read again only once it has changed (another file in its place,
+/// another length or modification time) or for another key: a busy window
+/// reads it once.
 fn session_generation(
     state: &crate::state::AppState,
     vault_id: &str,
     keys: crate::storage::item::VaultKeys<'_>,
 ) -> Option<u64> {
-    let pv = state
-        .vaults
-        .per_item_path(vault_id)
-        .ok()
-        .and_then(|p| crate::storage::sealed_vault::read_per_item(&p).ok().flatten());
-    match pv {
-        Some(pv) => pv.seal_generation(keys),
-        None => Some(0),
+    use std::sync::{Mutex, OnceLock};
+    /// A file as last read: what it was then, the key's commitment, and the
+    /// answer.
+    type Seen = (FileStamp, [u8; 32], Option<u64>);
+    static SEEN: OnceLock<Mutex<HashMap<std::path::PathBuf, Seen>>> = OnceLock::new();
+    let Ok(path) = state.vaults.per_item_path(vault_id) else {
+        return Some(0);
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Some(0);
+    };
+    let stamp = FileStamp::of(&meta);
+    let key = crate::storage::sealed_vault::rekey_commitment(keys.content);
+    let seen = SEEN.get_or_init(Default::default);
+    let lock = || seen.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((s, k, generation)) = lock().get(&path) {
+        if Some(*s) == stamp && *k == key {
+            return *generation;
+        }
+    }
+    let generation = match crate::storage::sealed_vault::read_per_item(&path) {
+        Ok(Some(pv)) => pv.seal_generation(keys),
+        Ok(None) => Some(0),
+        // Unreadable now: answered as before, and read again next time.
+        Err(_) => return Some(0),
+    };
+    if let Some(stamp) = stamp {
+        lock().insert(path, (stamp, key, generation));
+    }
+    generation
+}
+
+/// What a file on disk is now: a write that replaces it (a new inode) or
+/// changes its length or modification time changes this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    inode: u64,
+}
+
+impl FileStamp {
+    /// `None` where the platform keeps no modification time.
+    fn of(meta: &std::fs::Metadata) -> Option<FileStamp> {
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Some(FileStamp {
+            len: meta.len(),
+            modified: meta.modified().ok()?,
+            inode,
+        })
     }
 }
 

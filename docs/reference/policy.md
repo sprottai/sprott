@@ -129,6 +129,18 @@ all match.
 
 `GET`, `HEAD` and `OPTIONS` are reads. Every other method is a write.
 
+Servers differ in how they read a request, so it is decided on each reading
+and the strictest decision wins:
+
+- the method on the request line, and the value of each of
+  `X-HTTP-Method-Override`, `X-HTTP-Method` and `X-Method-Override`. A value
+  that isn't exactly one method, or a header given twice, is refused. A
+  `_method` parameter is not read; on a server that takes one, gate `POST` too;
+- the path as sent, and with an encoded slash (`%2F`) read as `/`;
+- for a Google batch (a `multipart/mixed` body of `application/http` parts),
+  each request in it, on its own method, path, query and body, at the batch's
+  host. A batch whose requests can't be read one by one is `ask-always`.
+
 Out of the box, the global floor and the `ai` and `messaging` tag floors are
 `allow` for reads and writes. A key you add works right away, and a service's
 rules tighten the actions it names.
@@ -163,7 +175,9 @@ What it lets through afterwards:
 | `ask-always` | This one request. |
 
 With no `ttl` on the rule or floor, the window is 900 seconds. A read
-approval never lets a write through. Locking the vault or changing it ends
+approval never lets a write through. When the readings that decide a request
+fall under different rules or floors, or one reads and one writes, its
+approval is for that one request. Locking the vault or changing it ends
 every window, and a re-key of the vault ends every approval. An approval
 request waits 1800 seconds for a decision.
 
@@ -175,12 +189,14 @@ An approval covers the method, the host (with its port) and the path, and:
   is the query string, the headers HTTP defines for a request
   (`content-type`, `content-language`, `content-location`, `content-range`,
   `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`,
-  `if-range`, `destination`, `overwrite`, `depth`, `prefer`), every header
-  carrying a phantom, and the body;
+  `if-range`, `destination`, `overwrite`, `depth`, `prefer`), the three
+  method-override headers, every header carrying a phantom, and the body;
 - with `scope = [...]`: the values it lists; `scope = []`: nothing more;
   `"request"` in the list adds the whole request;
 - always: the values the deciding rules' conditions read and every value the
-  consent shows.
+  consent shows;
+- for a Google batch: the whole batch, besides what covers each deciding
+  request in it.
 
 A request that differs in anything covered asks again. A body is covered by
 its content: a multipart body's boundary and its parts' `Content-ID`, a batch

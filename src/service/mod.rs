@@ -9,6 +9,7 @@
 pub mod gate;
 pub mod graphql;
 pub mod limits;
+pub mod readings;
 pub mod source;
 pub mod strict_json;
 
@@ -2155,6 +2156,44 @@ secrets = ["GITHUB_TOKEN"]
             .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"))
     }
 
+    /// A `multipart/mixed` body (boundary `b`) of `application/http` parts,
+    /// one per request line.
+    fn batch_of(requests: &[&str]) -> String {
+        let mut body = String::new();
+        for (i, line) in requests.iter().enumerate() {
+            body.push_str(&format!(
+                "--b\r\nContent-Type: application/http\r\nContent-ID: <{i}>\r\n\r\n{line} HTTP/1.1\r\n\r\n\r\n"
+            ));
+        }
+        body.push_str("--b--\r\n");
+        body
+    }
+
+    /// A compiled service's default policy and floor on a batch `body`
+    /// posted to `path`, decided on all its readings.
+    fn eval_batch(service: &str, path: &str, body: &str) -> crate::core::policy::AccessLevel {
+        use crate::core::policy::{evaluate_decision, Policy};
+        let r = ServiceRegistry::load();
+        let rules = r.default_policy_rules(service).expect("policy").to_vec();
+        let floor = r.default_policy_levels(service);
+        let headers = [("content-type".to_string(), b"multipart/mixed; boundary=b".to_vec())];
+        let input = RequestInput {
+            method: "POST",
+            path,
+            host: "www.googleapis.com",
+            headers: &headers,
+            body: Some(body.as_bytes()),
+            ..Default::default()
+        };
+        let readings = readings::Readings::of(input).unwrap();
+        let decided = readings
+            .decide(r.get(service), |request| {
+                evaluate_decision(request, Some(&rules), floor.as_ref(), &Policy::default(), &[])
+            })
+            .unwrap();
+        decided.decision.0
+    }
+
     /// The shape a service's shapes match a request with.
     fn scope_of(def: &ServiceDef, method: &str, path: &str, body: &str) -> RequestScope {
         def.read_request(input(method, path, body))
@@ -2217,9 +2256,6 @@ secrets = ["GITHUB_TOKEN"]
             ("gcp", "DELETE", "/storage/v1/b/bkt"),
             ("gcp", "DELETE", "/bkt"),
             ("gcp", "DELETE", "/bkt/"),
-            ("gcp", "POST", "/batch/storage/v1"),
-            ("gcp", "POST", "/batch/compute/v1"),
-            ("gcalendar", "POST", "/batch/calendar/v3"),
             ("github", "POST", "/repos/o/r/rulesets"),
             ("github", "PUT", "/repos/o/r/rulesets/7"),
             ("github", "DELETE", "/repos/o/r/rulesets/7"),
@@ -2282,6 +2318,34 @@ secrets = ["GITHUB_TOKEN"]
             let body = format!(r#"{{"query":"mutation {{ {field}(id: \"x\") }}"}}"#);
             assert_eq!(eval_compiled("railway", "POST", "/graphql/v2", &body), AccessLevel::AskAlways, "{field}");
         }
+        // A Google batch is decided by its requests (DESIGN §7): one gated
+        // request asks, through any batch endpoint; a batch that can't be read
+        // one request at a time asks too.
+        for (service, endpoint, gated) in [
+            ("gcp", "/batch/storage/v1", "DELETE /storage/v1/b/bkt"),
+            ("gcp", "/batch/compute/v1", "DELETE /compute/v1/projects/p/zones/z/instances/vm"),
+            ("gcp", "/batch", "POST /v1/projects/p/serviceAccounts/a/keys"),
+            ("gcalendar", "/batch/calendar/v3", "DELETE /calendar/v3/calendars/primary/events/e1"),
+        ] {
+            let body = batch_of(&["GET /storage/v1/b/bkt/o", gated]);
+            assert_eq!(eval_batch(service, endpoint, &body), AccessLevel::AskAlways, "{service} {gated}");
+        }
+        let reads = batch_of(&["GET /storage/v1/b/bkt/o"]);
+        for unreadable in [
+            reads.replace("--b--\r\n", ""),
+            reads.replace("GET /storage/v1/b/bkt/o HTTP/1.1", "GET /storage/v1/b/bkt/o"),
+            reads.replace("GET /storage", "GET https://storage.googleapis.com/storage"),
+            // A request beside a part that is none.
+            reads.replace("--b--", "--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--"),
+        ] {
+            assert_eq!(eval_batch("gcp", "/batch/storage/v1", &unreadable), AccessLevel::AskAlways, "{unreadable}");
+        }
+        let reads = batch_of(&["GET /storage/v1/b/bkt/o", "GET /storage/v1/b/bkt/o/obj?alt=json"]);
+        assert_eq!(eval_batch("gcp", "/batch/storage/v1", &reads), AccessLevel::Allow);
+        // The batch request is decided too: gcalendar's `write = "ask"` floor
+        // asks for it, as for any other write.
+        let reads = batch_of(&["GET /calendar/v3/calendars/primary/events"]);
+        assert_eq!(eval_batch("gcalendar", "/batch/calendar/v3", &reads), AccessLevel::Ask);
         // An assistant on a routine model, and a run without an override, ride the floor.
         assert_eq!(eval_compiled("openai", "POST", "/v1/assistants", r#"{"model": "gpt-4o-mini"}"#), AccessLevel::Allow);
         assert_eq!(eval_compiled("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a"}"#), AccessLevel::Allow);
@@ -2794,6 +2858,25 @@ scope = ["request.body.memo"]
             assert_eq!(send(&email("Mon", "b1")), send(&email("Tue", "b2")), "{path}");
             assert_ne!(send(&email("Mon", "b1")), send(&email("Mon", "b1").replace("hello", "bye")), "{path}");
         }
+    }
+
+    /// A Gmail `drafts/send` that names only a draft id reads as its own
+    /// shape, whose card names the draft; one carrying the message reads as
+    /// the send of that message.
+    #[test]
+    fn a_draft_sent_by_its_id_shows_the_id() {
+        let r = ServiceRegistry::load();
+        let gmail = r.get("gmail").expect("gmail service");
+        let path = "/gmail/v1/users/a@x.com/drafts/send";
+        for body in [r#"{"id":"r-5"}"#, r#"{"id":"r-5","threadId":"t"}"#] {
+            let scope = scope_of(gmail, "POST", path, body);
+            assert_eq!(scope.shape, "draft_send_by_id", "{body}");
+            assert_eq!(scope.consent.as_deref(), Some("Send draft {{ request.body.id }}"));
+            let (card, _) = covered(gmail, "POST", path, body);
+            assert_eq!(shown(&card, "request.body.id"), Some("r-5"));
+        }
+        let with_message = scope_of(gmail, "POST", path, r#"{"id":"r-5","message":{"raw":"cmF3"}}"#);
+        assert_eq!(with_message.shape, "draft_send");
     }
 
     #[test]

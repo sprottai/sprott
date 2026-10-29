@@ -41,8 +41,9 @@ use crate::service::Encoded;
 
 /// The request headers covered with the whole request: those whose meaning
 /// HTTP itself defines for a request (RFC 9110), the WebDAV headers that
-/// define what a method does (RFC 4918), and `prefer` (RFC 7240; PostgREST
-/// turns an insert into an upsert under `resolution=merge-duplicates`).
+/// define what a method does (RFC 4918), `prefer` (RFC 7240; PostgREST turns
+/// an insert into an upsert under `resolution=merge-duplicates`), and the
+/// method-override headers whose readings are decided (DESIGN §6).
 pub const COVERED_HEADERS: &[&str] = &[
     "content-type",
     "content-language",
@@ -57,6 +58,10 @@ pub const COVERED_HEADERS: &[&str] = &[
     "overwrite",
     "depth",
     "prefer",
+    // The method readings (DESIGN §6).
+    "x-http-method-override",
+    "x-http-method",
+    "x-method-override",
 ];
 
 /// HKDF info of the permit identity key.
@@ -94,6 +99,23 @@ impl Covered {
             if !self.shown.iter().any(|(l, _)| *l == label) {
                 self.shown.push((label, text));
             }
+        }
+        self
+    }
+
+    /// The coverage of batch request `i` (DESIGN §7), named under
+    /// `batch[i].`. The card shows the values it read; the request itself
+    /// shows in the batch's body.
+    pub fn batch_part(mut self, i: usize) -> Covered {
+        let prefix = format!("batch[{i}].");
+        for (name, _) in self.components.iter_mut().chain(self.detail.iter_mut()) {
+            *name = format!("{prefix}{name}");
+        }
+        self.shown.retain(|(label, _)| {
+            label != "request.query" && label != "request.body" && !label.starts_with("request.headers")
+        });
+        for (label, _) in &mut self.shown {
+            *label = format!("{prefix}{label}");
         }
         self
     }
@@ -187,6 +209,22 @@ pub fn cover(request: &Request<'_>, scope: &Scope<'_>) -> Result<Covered, Unread
     let mut seen = BTreeSet::new();
     c.shown.retain(|(label, _)| seen.insert(label.clone()));
     Ok(c)
+}
+
+/// The whole of `request`, decided on `path` (a batch: its requests by
+/// their content).
+pub fn whole_request(request: &Request<'_>, path: &str) -> Result<Covered, Unreadable> {
+    let none = BTreeMap::new();
+    cover(
+        request,
+        &Scope {
+            path,
+            whole: true,
+            listed: &[],
+            reads: &[],
+            encoded: &none,
+        },
+    )
 }
 
 /// One listed or read value: absent is covered as absent, distinct from
@@ -521,9 +559,9 @@ impl Walker {
         structured
     }
 
-    /// A multipart body (RFC 2046), when unambiguous: the preamble, each
-    /// part's header fields as sent but `Content-ID`, each part's content by
-    /// its own Content-Type, the epilogue.
+    /// A multipart body (RFC 2046), when unambiguous ([`split_multipart`]):
+    /// the preamble, each part's header fields as sent but `Content-ID`,
+    /// each part's content by its own Content-Type, the epilogue.
     fn multipart(
         &mut self,
         prefix: &str,
@@ -532,100 +570,30 @@ impl Walker {
         depth: usize,
         out: &mut Vec<(String, Vec<u8>)>,
     ) -> bool {
-        let dash = [b"--".as_slice(), boundary].concat();
-        let finder = memchr::memmem::Finder::new(&dash);
-        let mut at = Vec::new();
-        let mut from = 0;
-        while let Some(i) = finder.find(&body[from..]) {
-            at.push(from + i);
-            from += i + 1;
-        }
-        let Some(&first) = at.first() else {
+        let Some(mp) = split_multipart(body, boundary) else {
             return false;
         };
-        // The structural line ending, from the first delimiter line.
-        let after = &body[first + dash.len()..];
-        let eol: &[u8] = if after.starts_with(b"\r\n") {
-            b"\r\n"
-        } else if after.starts_with(b"\n") {
-            b"\n"
-        } else {
-            return false;
-        };
-        let line_start = |o: usize| {
-            o == 0
-                || (body[..o].ends_with(eol)
-                    && (eol == b"\r\n" || !body[..o].ends_with(b"\r\n")))
-        };
-        for &o in &at {
-            let rest = &body[o + dash.len()..];
-            let ends = (rest.starts_with(eol) && !(eol == b"\n" && rest.starts_with(b"\r")))
-                || rest.starts_with(b"--");
-            if !line_start(o) || !ends {
-                return false;
-            }
-        }
-        let Some(close) = at
-            .iter()
-            .position(|&o| body[o + dash.len()..].starts_with(b"--"))
-        else {
-            return false;
-        };
-        if close != at.len() - 1 || close == 0 {
+        if self.parts + mp.parts.len() > MAX_PARTS {
             return false;
         }
-        if self.parts + close > MAX_PARTS {
-            return false;
-        }
-        self.parts += close;
-        let preamble = if first == 0 {
-            &body[..0]
-        } else {
-            &body[..first - eol.len()]
-        };
-        let mut covered = vec![(format!("{prefix}.preamble"), preamble.to_vec())];
-        for i in 0..close {
-            let start = at[i] + dash.len() + eol.len();
-            let Some(end) = at[i + 1].checked_sub(eol.len()).filter(|&e| e >= start) else {
-                return false;
-            };
-            let part = &body[start..end];
-            // The header section, up to the blank line, in the structural
-            // line ending.
-            let (section, content) = if part.starts_with(eol) {
-                (&part[..0], &part[eol.len()..])
-            } else {
-                let blank = [eol, eol].concat();
-                match memchr::memmem::find(part, &blank) {
-                    Some(p) => (&part[..p + eol.len()], &part[p + blank.len()..]),
-                    None => return false,
-                }
-            };
-            let mixed = if eol == b"\r\n" {
-                section
-                    .iter()
-                    .enumerate()
-                    .any(|(j, &b)| (b == b'\n' && (j == 0 || section[j - 1] != b'\r')) || (b == b'\r' && section.get(j + 1) != Some(&b'\n')))
-            } else {
-                section.contains(&b'\r')
-            };
-            if mixed {
-                return false;
-            }
-            let Some((fields, used, _)) = header_fields(section) else {
-                return false;
-            };
-            if used != section.len() {
-                return false;
-            }
+        self.parts += mp.parts.len();
+        let mut covered = vec![(format!("{prefix}.preamble"), mp.preamble.to_vec())];
+        for (i, part) in mp.parts.iter().enumerate() {
             let at_prefix = format!("{prefix}.parts[{i}]");
-            let declared = one_content_type(&fields).flatten();
-            let structured =
-                self.entity(&format!("{at_prefix}.content"), declared, content, depth + 1, &mut covered);
-            covered.push((format!("{at_prefix}.headers"), field_bytes(&fields, &["content-id"], structured.as_deref())));
+            let declared = one_content_type(&part.fields).flatten();
+            let structured = self.entity(
+                &format!("{at_prefix}.content"),
+                declared,
+                part.content,
+                depth + 1,
+                &mut covered,
+            );
+            covered.push((
+                format!("{at_prefix}.headers"),
+                field_bytes(&part.fields, &["content-id"], structured.as_deref()),
+            ));
         }
-        let close_end = at[close] + dash.len() + 2;
-        covered.push((format!("{prefix}.epilogue"), body[close_end..].to_vec()));
+        covered.push((format!("{prefix}.epilogue"), mp.epilogue.to_vec()));
         out.extend(covered);
         true
     }
@@ -729,6 +697,215 @@ impl Walker {
         out.extend(covered);
         true
     }
+}
+
+/// A multipart body split by its structure.
+struct Multipart<'b> {
+    preamble: &'b [u8],
+    parts: Vec<Part<'b>>,
+    epilogue: &'b [u8],
+}
+
+/// One part: its header fields and its content.
+struct Part<'b> {
+    fields: Vec<FieldLine<'b>>,
+    content: &'b [u8],
+}
+
+/// Split a multipart body (RFC 2046) by `boundary`, only when unambiguous:
+/// one structural line ending, CRLF or bare LF, taken from the first
+/// delimiter (as Go and Google's front end do) and used by every delimiter
+/// line, the line break before it, and every part's header section; every
+/// occurrence of the dash-boundary at the start of the body or after that
+/// line ending, followed directly by the line ending or `--`; a close
+/// delimiter, last. `None` otherwise.
+fn split_multipart<'b>(body: &'b [u8], boundary: &[u8]) -> Option<Multipart<'b>> {
+    let dash = [b"--".as_slice(), boundary].concat();
+    let finder = memchr::memmem::Finder::new(&dash);
+    let mut at = Vec::new();
+    let mut from = 0;
+    while let Some(i) = finder.find(&body[from..]) {
+        at.push(from + i);
+        from += i + 1;
+    }
+    let first = *at.first()?;
+    // The structural line ending, from the first delimiter line.
+    let after = &body[first + dash.len()..];
+    let eol: &[u8] = if after.starts_with(b"\r\n") {
+        b"\r\n"
+    } else if after.starts_with(b"\n") {
+        b"\n"
+    } else {
+        return None;
+    };
+    let crlf = eol == b"\r\n";
+    let line_start =
+        |o: usize| o == 0 || (body[..o].ends_with(eol) && (crlf || !body[..o].ends_with(b"\r\n")));
+    for &o in &at {
+        let rest = &body[o + dash.len()..];
+        let ends = rest.starts_with(eol) || rest.starts_with(b"--");
+        if !line_start(o) || !ends {
+            return None;
+        }
+    }
+    let close = at
+        .iter()
+        .position(|&o| body[o + dash.len()..].starts_with(b"--"))?;
+    if close != at.len() - 1 || close == 0 {
+        return None;
+    }
+    let preamble = if first == 0 {
+        &body[..0]
+    } else {
+        &body[..first - eol.len()]
+    };
+    let mut parts = Vec::with_capacity(close);
+    for i in 0..close {
+        let start = at[i] + dash.len() + eol.len();
+        let end = at[i + 1].checked_sub(eol.len()).filter(|&e| e >= start)?;
+        let part = &body[start..end];
+        // The header section, up to the blank line, in the structural line
+        // ending.
+        let (section, content) = if part.starts_with(eol) {
+            (&part[..0], &part[eol.len()..])
+        } else {
+            let blank = [eol, eol].concat();
+            let p = memchr::memmem::find(part, &blank)?;
+            (&part[..p + eol.len()], &part[p + blank.len()..])
+        };
+        let mixed = if crlf {
+            section.iter().enumerate().any(|(j, &b)| {
+                (b == b'\n' && (j == 0 || section[j - 1] != b'\r'))
+                    || (b == b'\r' && section.get(j + 1) != Some(&b'\n'))
+            })
+        } else {
+            section.contains(&b'\r')
+        };
+        if mixed {
+            return None;
+        }
+        let (fields, used, _) = header_fields(section)?;
+        if used != section.len() {
+            return None;
+        }
+        parts.push(Part { fields, content });
+    }
+    let close_end = at[close] + dash.len() + 2;
+    Some(Multipart {
+        preamble,
+        parts,
+        epilogue: &body[close_end..],
+    })
+}
+
+/// One request of a Google batch (an `application/http` part): its method,
+/// its request target, its headers (lowercase names, in order) and its
+/// body.
+#[derive(Debug, Clone)]
+pub struct Embedded<'b> {
+    pub method: String,
+    pub target: String,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: &'b [u8],
+}
+
+/// How a request's body reads as a Google batch (DESIGN §7).
+#[derive(Debug)]
+pub enum Batch<'b> {
+    /// Not one: the body isn't declared `multipart/mixed`, or none of its
+    /// parts is `application/http`.
+    No,
+    /// Its requests, each an `application/http` part `httparse` accepts
+    /// whole.
+    Requests(Vec<Embedded<'b>>),
+    /// A `multipart/mixed` body that can't be read unambiguously as one
+    /// (§4 "Covered by content"), or that mixes requests with other parts:
+    /// it is decided as `ask-always`.
+    Unreadable,
+}
+
+/// Read a request body as a Google batch: a `multipart/mixed` body of
+/// `application/http` parts, split with the same unambiguity rules as its
+/// coverage.
+pub fn batch<'b>(headers: &[(String, Vec<u8>)], query: Option<&str>, body: &'b [u8]) -> Batch<'b> {
+    let types: Vec<&[u8]> = headers
+        .iter()
+        .filter(|(k, _)| k == "content-type")
+        .map(|(_, v)| v.as_slice())
+        .collect();
+    let ct_query: Vec<String> = query
+        .into_iter()
+        .flat_map(|q| url::form_urlencoded::parse(q.as_bytes()))
+        .filter(|(k, _)| k == "$ct")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    let mixed = |raw: &[u8]| {
+        let loose = String::from_utf8_lossy(raw)
+            .trim_start()
+            .split(|c: char| c == ';' || c == ',' || c.is_whitespace())
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        loose == "multipart/mixed"
+            || content_type(raw).is_some_and(|ct| ct.essence == "multipart/mixed")
+    };
+    let declared = types.iter().any(|t| mixed(t)) || ct_query.iter().any(|t| mixed(t.as_bytes()));
+    if !declared {
+        return Batch::No;
+    }
+    let ([one], true) = (types.as_slice(), ct_query.is_empty()) else {
+        return Batch::Unreadable;
+    };
+    let Some(ct) = content_type(one) else {
+        return Batch::Unreadable;
+    };
+    let ([boundary], true) = (ct.boundaries.as_slice(), ct.essence == "multipart/mixed") else {
+        return Batch::Unreadable;
+    };
+    if !valid_boundary(boundary) {
+        return Batch::Unreadable;
+    }
+    let Some(mp) = split_multipart(body, boundary.as_bytes()) else {
+        return Batch::Unreadable;
+    };
+    if mp.parts.len() > MAX_PARTS {
+        return Batch::Unreadable;
+    }
+    let http = |p: &Part<'_>| {
+        one_content_type(&p.fields)
+            .flatten()
+            .and_then(content_type)
+            .is_some_and(|ct| ct.essence == "application/http")
+    };
+    let n = mp.parts.iter().filter(|p| http(p)).count();
+    if n == 0 {
+        return Batch::No;
+    }
+    if n != mp.parts.len() {
+        return Batch::Unreadable;
+    }
+    let mut out = Vec::with_capacity(n);
+    for part in &mp.parts {
+        let mut slots = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut slots);
+        let Ok(httparse::Status::Complete(used)) = req.parse(part.content) else {
+            return Batch::Unreadable;
+        };
+        let (Some(method), Some(target)) = (req.method, req.path) else {
+            return Batch::Unreadable;
+        };
+        out.push(Embedded {
+            method: method.to_string(),
+            target: target.to_string(),
+            headers: req
+                .headers
+                .iter()
+                .map(|h| (h.name.to_ascii_lowercase(), h.value.to_vec()))
+                .collect(),
+            body: &part.content[used..],
+        });
+    }
+    Batch::Requests(out)
 }
 
 /// A part's header fields as sent, in order, without those named in

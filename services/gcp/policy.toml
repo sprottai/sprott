@@ -57,13 +57,3 @@ label = "Create a service-account key (a durable credential outside the broker)"
 method = "POST"
 path = "/v1/projects/:project/serviceAccounts/:account/keys"
 level = "ask-always"
-
-# ── A batch of calls (can carry any of the deletes above) ─────────────────────
-# Google's batch endpoints (POST /batch/<api>/<version>, multipart/mixed) run up
-# to 100 calls in one request; Cloud Storage and Compute both have one.
-[[rule]]
-id = "batch"
-label = "Send a batch of API calls (can delete a bucket or a VM)"
-method = "POST"
-path = "/batch/*"
-level = "ask-always"
