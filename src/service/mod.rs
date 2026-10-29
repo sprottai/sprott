@@ -661,6 +661,52 @@ pub struct VarAt {
     pub at: String,
 }
 
+/// The value at JSON Pointer `ptr` (RFC 6901) in a parsed body. `Ok(None)`
+/// when a member is absent (or a step is null, which reads as absent);
+/// `Err` (422) when the path meets something that has no members to read: a
+/// string, number or bool, or an array where the step isn't an index. Such a
+/// body (Google's array-encoded JSPB, for one) is read by its server in a way
+/// the shape can't see, so the request is refused rather than bound to nothing.
+fn body_member<'a>(
+    body: &'a serde_json::Value,
+    ptr: &str,
+) -> Result<Option<&'a serde_json::Value>, Unreadable> {
+    use serde_json::Value as Json;
+    if ptr.is_empty() {
+        return Ok(Some(body));
+    }
+    let Some(rest) = ptr.strip_prefix('/') else {
+        return Ok(None);
+    };
+    let unreadable = || Unreadable {
+        status: 422,
+        message: format!("the request body can't be read at {ptr}: it is not a JSON object there"),
+    };
+    let mut cur = body;
+    for raw in rest.split('/') {
+        let token = raw.replace("~1", "/").replace("~0", "~");
+        cur = match cur {
+            Json::Object(m) => match m.get(&token) {
+                Some(v) => v,
+                None => return Ok(None),
+            },
+            Json::Array(a) => {
+                let index = (token == "0" || !token.starts_with('0'))
+                    .then(|| token.parse::<usize>().ok())
+                    .flatten()
+                    .ok_or_else(unreadable)?;
+                match a.get(index) {
+                    Some(v) => v,
+                    None => return Ok(None),
+                }
+            }
+            Json::Null => return Ok(None),
+            _ => return Err(unreadable()),
+        };
+    }
+    Ok(Some(cur))
+}
+
 impl VarDef {
     /// Resolve this var's value, keeping its JSON type. `Ok(None)` = absent
     /// (an undefined var; a JSON null too); `Err` = its source can't be read
@@ -672,11 +718,12 @@ impl VarDef {
             | VarDef::Located(VarAt {
                 location: VarLoc::Body,
                 at: ptr,
-            }) => Ok(reads
-                .json()?
-                .and_then(|b| b.pointer(ptr))
-                .filter(|v| !v.is_null())
-                .cloned()),
+            }) => Ok(match reads.json()? {
+                Some(b) => body_member(b, ptr)?
+                    .filter(|v| !v.is_null())
+                    .cloned(),
+                None => None,
+            }),
             VarDef::Located(VarAt {
                 location: VarLoc::Query,
                 at,
@@ -2482,6 +2529,46 @@ secrets = ["GITHUB_TOKEN"]
         ] {
             assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::Allow, "{service} {method} {path}");
         }
+    }
+
+    /// A shape reads members of an object. A body that has no object where a
+    /// shape reads one (Google's array-encoded JSPB, a bare string) is refused
+    /// (422) instead of binding nothing; a null or a missing member is absent.
+    #[test]
+    fn a_body_member_read_through_a_non_object_is_refused() {
+        let r = ServiceRegistry::load();
+        let gmail = r.get("gmail").expect("gmail service");
+        let send = |body: &str| {
+            gmail
+                .extract_request_scope(
+                    "POST",
+                    "/gmail/v1/users/me/messages/send",
+                    None,
+                    Some(body.as_bytes()),
+                )
+                .expect("the send shape matches")
+        };
+        let refused = |rs: RequestScope| rs.unreadable.map(|u| u.status);
+        for body in ["[]", r#"[null,"cmF3"]"#, r#""raw""#, "5", "true"] {
+            assert_eq!(refused(send(body)), Some(422), "{body}");
+        }
+        let ok = send(r#"{"raw":"cmF3"}"#);
+        assert!(ok.unreadable.is_none());
+        assert_eq!(ok.bound, vec![("raw".to_string(), "cmF3".to_string())]);
+        for absent in ["{}", r#"{"raw":null}"#] {
+            let rs = send(absent);
+            assert!(rs.unreadable.is_none() && rs.bound.is_empty(), "{absent}");
+        }
+
+        let snaplii = r.get("snaplii").expect("snaplii service");
+        let buy = |body: &str| {
+            snaplii
+                .extract_request_scope("POST", "/v2/purchase", None, Some(body.as_bytes()))
+                .expect("the purchase shape matches")
+        };
+        assert_eq!(refused(buy(r#"{"orderInfo":"CB_1"}"#)), Some(422));
+        assert_eq!(refused(buy(r#"{"orderInfo":{"item":[1]}}"#)), Some(422));
+        assert_eq!(refused(buy(r#"{"orderInfo":null}"#)), None);
     }
 
     /// Snaplii's purchase and transfer gates read the fields its OpenAPI spec
