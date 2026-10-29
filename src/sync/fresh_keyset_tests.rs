@@ -733,47 +733,54 @@ fn fresh_keyset_matches_a_fresh_daemon_adopt() {
         ("unsigned", "triple_delegated", false, native(None, true, false), dropped.clone()),
         ("legacy in-body admin signature", "triple_delegated", false, legacy(false, None), honored(wrapper_data.clone())),
         ("legacy tombstone", "triple_delegated", false, legacy(true, Some(&p.c)), dropped.clone()),
+        ("legacy tombstone with a live signature", "triple_delegated", false, legacy(true, Some(&p.c)), dropped.clone()),
         ("unsigned without a UIK layer", "triple_no_anchor", false, native(None, true, false), honored(policy.clone())),
         ("unsigned without a UIK layer, signatures required", "triple_no_anchor", true, native(None, true, false), dropped.clone()),
         ("admin signed on an untrusted fold", "triple_short_anchor", false, native(Some(&p.c), true, false), dropped.clone()),
         ("admin signed after a failed adopt", "triple_bad_own_cid", false, native(Some(&p.c), true, false), dropped.clone()),
     ];
-    for (label, scenario, rs, row, expected) in owner_config_cases {
-        // The daemon's rule on its adopt (a legacy row reads only live).
+    for (label, scenario, rs, mut row, expected) in owner_config_cases {
+        if label == "legacy tombstone with a live signature" {
+            row["sig"] = json!(sidecar(&p.c, "policy", &item, 4, &ct, true));
+        }
+        // The daemon's row rule on its adopt (`honored_owner_config`); the fold
+        // reads a legacy row only live.
         let daemon = &adopted[scenario].1;
-        let got = match daemon {
+        let (legacy, tomb) = (row["is_legacy_aux"] == true, row["tombstone"] == true);
+        let by_row = match daemon {
             Err(_) => None,
-            Ok(pv) => {
-                let sig = row.get("sig").and_then(|v| v.as_str());
-                let signer = row.get("signer").and_then(|v| v.as_str());
-                let (legacy, tomb) = (row["is_legacy_aux"] == true, row["tombstone"] == true);
-                if legacy && tomb {
-                    None
-                } else {
-                    rules::honored_owner_config(
-                        sig,
-                        signer,
-                        &ct,
-                        row["version"].as_u64().unwrap(),
-                        pv.keyset.uik.as_ref(),
-                        VAULT,
-                        &item,
-                        legacy,
-                        "policy",
-                        tomb,
-                        row["body"].clone(),
-                        &console_trust(daemon, rs),
-                    )
-                }
-            }
+            Ok(pv) => rules::honored_owner_config(
+                row.get("sig").and_then(|v| v.as_str()),
+                row.get("signer").and_then(|v| v.as_str()),
+                &ct,
+                row["version"].as_u64().unwrap(),
+                pv.keyset.uik.as_ref(),
+                VAULT,
+                &item,
+                legacy,
+                "policy",
+                tomb,
+                row["body"].clone(),
+                &console_trust(daemon, rs),
+            ),
         };
+        let by_fold = if legacy && tomb { None } else { by_row.clone() };
+        let row_expected = json!({ "honored": by_row.is_some(), "data": by_row.flatten() });
         assert_eq!(
-            json!({ "honored": got.is_some(), "data": got.flatten() }),
+            json!({ "honored": by_fold.is_some(), "data": by_fold.flatten() }),
             expected,
             "owner_config {}",
             label
         );
-        cases.push(case(&format!("owner_config {}", label), "owner_config", with(&base(scenario, rs), row), expected));
+        if label == "legacy tombstone" {
+            assert_eq!(row_expected, honored(Value::Null), "the row rule honors an admin-signed legacy tombstone");
+        } else if label != "legacy tombstone with a live signature" {
+            assert_eq!(row_expected, expected, "owner_config_row {}", label);
+        } else {
+            assert_eq!(row_expected, dropped, "a tombstone signed as live is not honored");
+        }
+        cases.push(case(&format!("owner_config {}", label), "owner_config", with(&base(scenario, rs), row.clone()), expected));
+        cases.push(case(&format!("owner_config_row {}", label), "owner_config_row", with(&base(scenario, rs), row), row_expected));
     }
 
     let agent = |signer: Option<&UikRoot>, owner: &str, tombstone: bool| {

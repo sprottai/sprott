@@ -8,6 +8,7 @@ fn run(call: &str, input: &str) -> String {
     match call {
         "fold" => api::fold(input),
         "owner_config" => api::owner_config(input),
+        "owner_config_row" => api::owner_config_row(input),
         "agent_record" => api::agent_record(input),
         "sidecar_signer" => api::sidecar_signer(input),
         "approval_authority" => api::approval_authority(input),
@@ -35,6 +36,7 @@ fn bad_input_is_an_error() {
     let calls = [
         "fold",
         "owner_config",
+        "owner_config_row",
         "agent_record",
         "sidecar_signer",
         "approval_authority",

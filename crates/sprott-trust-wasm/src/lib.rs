@@ -21,6 +21,13 @@ pub fn owner_config(input: &str) -> String {
     api::owner_config(input)
 }
 
+/// Whether the daemon's row rule honors an owner-config row, a tombstone
+/// included, and its data ([`api::owner_config_row`]).
+#[wasm_bindgen]
+pub fn owner_config_row(input: &str) -> String {
+    api::owner_config_row(input)
+}
+
 /// Whether the daemon's fold honors an authorized-agent row, and its data
 /// ([`api::agent_record`]).
 #[wasm_bindgen]

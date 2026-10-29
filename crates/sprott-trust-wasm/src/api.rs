@@ -93,12 +93,15 @@ fn opt_bytes(v: &Value, k: &str) -> Result<Option<Vec<u8>>, String> {
     opt_str(v, k)?.map(|s| b64(k, s)).transpose()
 }
 
-/// The fold input, adopted.
+/// The fold input, adopted and folded once.
 struct Fold {
     vault_id: String,
     /// The fresh daemon's UIK layer, or its adopt error.
     adopted: Result<Option<KeysetUik>, String>,
-    require_signed: bool,
+    /// The trust the console acts on: the daemon's, except that a failed
+    /// adopt, and no UIK layer on a vault that requires signatures, are
+    /// untrusted.
+    trust: MembershipTrust,
 }
 
 impl Fold {
@@ -113,28 +116,22 @@ impl Fold {
             },
             (None, None) => Ok(None),
         };
+        let trust = match &adopted {
+            Err(_) => MembershipTrust::Untrusted,
+            Ok(uik) => match resolve_membership_trust(uik.as_ref(), &vault_id) {
+                MembershipTrust::NoUik if require_signed => MembershipTrust::Untrusted,
+                t => t,
+            },
+        };
         Ok(Fold {
             vault_id,
             adopted,
-            require_signed,
+            trust,
         })
     }
 
     fn uik(&self) -> Option<&KeysetUik> {
         self.adopted.as_ref().ok().and_then(|u| u.as_ref())
-    }
-
-    /// The trust the console acts on: the daemon's, except that a failed
-    /// adopt, and no UIK layer on a vault that requires signatures, are
-    /// untrusted.
-    fn trust(&self) -> MembershipTrust {
-        match &self.adopted {
-            Err(_) => MembershipTrust::Untrusted,
-            Ok(uik) => match resolve_membership_trust(uik.as_ref(), &self.vault_id) {
-                MembershipTrust::NoUik if self.require_signed => MembershipTrust::Untrusted,
-                t => t,
-            },
-        }
     }
 }
 
@@ -163,8 +160,7 @@ pub fn fold(input: &str) -> String {
 fn fold_value(v: &Value) -> Out {
     let f = Fold::parse(v)?;
     let content_key = opt_bytes(v, "content_key_b64")?;
-    let trust = f.trust();
-    let (state, admins, members): (&str, Vec<&String>, Vec<&String>) = match &trust {
+    let (state, admins, members): (&str, Vec<&String>, Vec<&String>) = match &f.trust {
         MembershipTrust::NoUik => ("no_uik", Vec::new(), Vec::new()),
         MembershipTrust::Untrusted => ("untrusted", Vec::new(), Vec::new()),
         MembershipTrust::Verified(roles) => (
@@ -201,7 +197,7 @@ fn fold_value(v: &Value) -> Out {
     if let Some(k) = content_key {
         let ok = match &f.adopted {
             Err(_) => false,
-            Ok(uik) => rules::verify_rekey_proof(uik.as_ref(), &trust, &f.vault_id, &k),
+            Ok(uik) => rules::verify_rekey_proof(uik.as_ref(), &f.trust, &f.vault_id, &k),
         };
         out.insert("rekey_ok".into(), json!(ok));
     }
@@ -243,16 +239,31 @@ impl<'a> Row<'a> {
 /// row by `honored_owner_config`; a legacy `aux` row only live, by
 /// `fold_owner_config_record`.
 pub fn owner_config(input: &str) -> String {
-    call(input, owner_config_value)
+    call(input, |v| owner_config_of(&Fold::parse(v)?, v, Reading::Fold))
 }
 
-fn owner_config_value(v: &Value) -> Out {
-    let f = Fold::parse(v)?;
+/// `owner_config_row(input)`: the input of [`owner_config`]. The daemon's row
+/// rule (`honored_owner_config`, as its sync judges a row): a tombstone,
+/// legacy `aux` or not, by `owner_config_tombstone_honored`; a live body as
+/// [`owner_config`] reads it.
+pub fn owner_config_row(input: &str) -> String {
+    call(input, |v| owner_config_of(&Fold::parse(v)?, v, Reading::Row))
+}
+
+/// How an owner-config row is read: by the fold (a legacy row only live) or by
+/// the daemon's row rule.
+#[derive(Clone, Copy)]
+enum Reading {
+    Fold,
+    Row,
+}
+
+fn owner_config_of(f: &Fold, v: &Value, reading: Reading) -> Out {
     let row = Row::parse(v)?;
     let record_type = req_str(v, "record_type")?;
     let is_legacy_aux = req_bool(v, "is_legacy_aux")?;
     let tombstone = req_bool(v, "tombstone")?;
-    let honored = if is_legacy_aux && tombstone {
+    let honored = if matches!(reading, Reading::Fold) && is_legacy_aux && tombstone {
         None
     } else {
         rules::honored_owner_config(
@@ -267,7 +278,7 @@ fn owner_config_value(v: &Value) -> Out {
             record_type,
             tombstone,
             row.body,
-            &f.trust(),
+            &f.trust,
         )
     };
     Ok(json!({ "honored": honored.is_some(), "data": honored.flatten() }))
@@ -279,11 +290,10 @@ fn owner_config_value(v: &Value) -> Out {
 /// `{"honored": bool, "data": ...}` by `fold_agent_record`; a tombstone is not
 /// honored (the fold reads agent rows only live).
 pub fn agent_record(input: &str) -> String {
-    call(input, agent_record_value)
+    call(input, |v| agent_record_of(&Fold::parse(v)?, v))
 }
 
-fn agent_record_value(v: &Value) -> Out {
-    let f = Fold::parse(v)?;
+fn agent_record_of(f: &Fold, v: &Value) -> Out {
     let row = Row::parse(v)?;
     let honored = if opt_bool(v, "tombstone")?.unwrap_or(false) {
         None
@@ -297,7 +307,7 @@ fn agent_record_value(v: &Value) -> Out {
             &row.item_id,
             row.version,
             row.body,
-            &f.trust(),
+            &f.trust,
         )
     };
     Ok(json!({ "honored": honored.is_some(), "data": honored }))
@@ -308,11 +318,10 @@ fn agent_record_value(v: &Value) -> Out {
 /// sidecar signature verifies under a member key of the keyset, else `null`
 /// (`verify_record_sidecar_sig`). Who the signer is, not whether they may sign.
 pub fn sidecar_signer(input: &str) -> String {
-    call(input, sidecar_signer_value)
+    call(input, |v| sidecar_signer_of(&Fold::parse(v)?, v))
 }
 
-fn sidecar_signer_value(v: &Value) -> Out {
-    let f = Fold::parse(v)?;
+fn sidecar_signer_of(f: &Fold, v: &Value) -> Out {
     let record_type = req_str(v, "record_type")?;
     let item_id = req_bytes(v, "item_id_b64")?;
     let version = req_u64(v, "version")?;

@@ -18,7 +18,7 @@ for (const c of cases) {
     console.error(`FAIL ${c.name}\n  expected ${JSON.stringify(c.expected)}\n  got      ${JSON.stringify(got)}`);
   }
 }
-const calls = ['fold', 'owner_config', 'agent_record', 'sidecar_signer', 'approval_authority', 'resolve_current_root'];
+const calls = ['fold', 'owner_config', 'owner_config_row', 'agent_record', 'sidecar_signer', 'approval_authority', 'resolve_current_root'];
 for (const call of calls) {
   for (const input of ['', 'not json', '{}', '{"vault_id": 7}']) {
     const got = JSON.parse(core[call](input));
