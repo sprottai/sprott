@@ -612,3 +612,174 @@ pub fn adopt_rekey_meta(
     uik.rekey_proof = Some(candidate);
     Ok(())
 }
+
+/// What a daemon pulls for a vault's membership: the served triple (`GET
+/// /membership`, a format-2 vault) or the rows of a format-1 `GET /keys`.
+#[derive(Debug, Clone, Copy)]
+pub enum Served<'a> {
+    /// The `GET /membership` body (`anchor`, `members`, `identities`,
+    /// `credentials`, `proof`).
+    Membership(&'a serde_json::Value),
+    /// The `keys` array of a `GET /keys` body.
+    KeyRows(&'a [KeyRow]),
+}
+
+/// The daemon's decode of a WebAuthn credential id (strict base64url, no
+/// padding): the check its registry write fails on.
+pub fn decode_credential_id(s: &str) -> Result<Vec<u8>, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|_| "Bad request: credential_id: not valid base64url-no-pad".to_string())
+}
+
+/// The UIK layer a daemon with NO prior state holds after it adopts `served`:
+/// the steps of `sync`'s `adopt_membership_triple` and `adopt_key_rows` in
+/// their order, on an empty keyset, with the registry and credential writes
+/// reduced to the decodes that fail them. This is what the console folds.
+///
+/// `Ok(None)`: no UIK layer (format-1 rows without UIK fields, or a membership
+/// with an empty or missing anchor, which adopts nothing). `Err`: the daemon's
+/// adopt fails and stores nothing; a caller reads that as untrusted.
+pub fn fresh_keyset(vault_id: &str, served: Served<'_>) -> Result<Option<KeysetUik>, String> {
+    let mut uik: Option<KeysetUik> = None;
+    match served {
+        Served::Membership(body) => {
+            match body.get("anchor").and_then(|v| v.as_str()) {
+                Some(anchor) if !anchor.is_empty() => {
+                    fresh_membership(&mut uik, vault_id, anchor, body)?
+                }
+                _ => {}
+            }
+        }
+        Served::KeyRows(rows) => fresh_key_rows(&mut uik, vault_id, rows)?,
+    }
+    Ok(uik)
+}
+
+/// `adopt_membership_triple` on an empty keyset.
+fn fresh_membership(
+    uik: &mut Option<KeysetUik>,
+    vault_id: &str,
+    anchor_b64: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    adopt_creator_pin(uik, &Some(anchor_b64.to_string()))
+        .map_err(|e| format!("adopt creator pin: {}", e))?;
+
+    // The caller's own credentials with a WebAuthn pubkey go into the registry,
+    // whose write fails on a cid that is not strict base64url. Approver entries
+    // are set aside for after the members.
+    let mut approvers: Vec<&serde_json::Value> = Vec::new();
+    if let Some(creds) = body.get("credentials").and_then(|v| v.as_array()) {
+        for c in creds {
+            if c.get("approver").and_then(|v| v.as_bool()) == Some(true) {
+                approvers.push(c);
+                continue;
+            }
+            if let (Some(cid), Some(_), Some(_)) = (
+                c.get("cid").and_then(|v| v.as_str()),
+                c.get("x").and_then(|v| v.as_str()),
+                c.get("y").and_then(|v| v.as_str()),
+            ) {
+                decode_credential_id(cid)
+                    .map_err(|e| format!("adopt registry pubkey {}: {}", cid, e))?;
+            }
+        }
+    }
+
+    if adopt_into(uik, body)?.is_none() {
+        return Ok(());
+    }
+
+    // An approver entry is labeled only when its registry write succeeds; a
+    // malformed one is skipped, never failing the adopt.
+    for c in approvers {
+        let field = |k: &str| c.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let (Some(cid), Some(idid), Some(_), Some(_)) =
+            (field("cid"), field("identity_id"), field("x"), field("y"))
+        else {
+            continue;
+        };
+        if decode_credential_id(cid).is_ok() {
+            set_approver_label(uik, cid, idid);
+        }
+    }
+
+    let proof = body.get("proof");
+    let delegation_log = proof.and_then(|p| p.get("delegation_log")).cloned();
+    let root_succession = proof.and_then(|p| p.get("succession")).cloned();
+    adopt_delegation_meta(uik, vault_id, &delegation_log, &root_succession)
+        .map_err(|e| format!("adopt delegation meta: {}", e))?;
+    let generation = proof
+        .and_then(|p| p.get("generation"))
+        .and_then(|v| v.as_u64());
+    let rekey_proof = proof.and_then(|p| p.get("rekey_proof")).cloned();
+    adopt_rekey_meta(uik, vault_id, generation, &rekey_proof)
+        .map_err(|e| format!("adopt rekey meta: {}", e))?;
+    Ok(())
+}
+
+/// `adopt_key_rows` on an empty keyset: rows by version, a repeat of a cid at
+/// a version not above the one taken skipped; each row's credential decodes,
+/// UIK half and creator pin; then the delegation union and the re-key
+/// ratchet over every row.
+fn fresh_key_rows(
+    uik: &mut Option<KeysetUik>,
+    vault_id: &str,
+    rows: &[KeyRow],
+) -> Result<(), String> {
+    let mut seen: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    let mut ordered: Vec<&KeyRow> = rows.iter().collect();
+    ordered.sort_by_key(|r| r.version);
+    for row in &ordered {
+        if let Some(&v) = seen.get(row.cid.as_str()) {
+            if row.version <= v {
+                continue;
+            }
+        }
+        key_row_decodes(row).map_err(|e| format!("adopt key row {}: {}", row.cid, e))?;
+        adopt_key_row_uik(uik, row)?;
+        adopt_creator_pin(uik, &row.data.uik_creator_sig_pub)
+            .map_err(|e| format!("adopt creator pin {}: {}", row.cid, e))?;
+        seen.insert(row.cid.as_str(), row.version);
+    }
+    for row in &ordered {
+        adopt_delegation_meta(
+            uik,
+            vault_id,
+            &row.data.uik_delegation_log,
+            &row.data.uik_root_succession,
+        )
+        .map_err(|e| format!("adopt delegation meta {}: {}", row.cid, e))?;
+    }
+    for row in &ordered {
+        adopt_rekey_meta(
+            uik,
+            vault_id,
+            row.data.uik_generation,
+            &row.data.uik_rekey_proof,
+        )
+        .map_err(|e| format!("adopt rekey meta {}: {}", row.cid, e))?;
+    }
+    Ok(())
+}
+
+/// The decodes the daemon's credential write of a `/keys` row fails on
+/// (`PerItemVault::upsert_key_row`): the cid (strict base64url), `prf_salt`,
+/// `wrapped_key` and a non-empty `wc_check` (lenient base64).
+fn key_row_decodes(row: &KeyRow) -> Result<(), String> {
+    decode_credential_id(&row.cid)?;
+    for field in [
+        Some(row.data.prf_salt.as_str()),
+        Some(row.data.wrapped_key.as_str()),
+        row.data.wc_check.as_deref().filter(|s| !s.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        decode_keys_data_field(field).map_err(bad_request)?;
+    }
+    Ok(())
+}
