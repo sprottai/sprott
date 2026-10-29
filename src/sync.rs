@@ -6097,13 +6097,15 @@ fn adopt_rekey_meta(
         membership_len,
         membership_hash,
     };
-    // The signer must be an OWNER in the CURRENT folded owner-set. A K-rotation
-    // (`generation` bump) is ORTHOGONAL to the role checkpoint (`role_epoch`) under
-    // the two-counter model, so the owner-set is folded at the current role_epoch
-    // (checkpoint ∘ delegation_log), NOT re-derived at the proposed `generation`. A
-    // member's self-signed proof fails here (a member is not an owner).
+    // The signer must have been an OWNER when it signed: in the owner-set folded over
+    // the log prefix the proof commits (`membership_len` events at the current
+    // role_epoch), so an admin demoted after re-keying still signed with authority. A
+    // K-rotation (`generation` bump) is ORTHOGONAL to the role checkpoint
+    // (`role_epoch`) under the two-counter model, so the set is folded at the current
+    // role_epoch, NOT re-derived at the proposed `generation`. A member's self-signed
+    // proof fails here (a member is not an owner).
     if !pv
-        .fold_roles(vault_id)
+        .fold_roles_at(vault_id, candidate.membership_len as usize)
         .get(&candidate.signer_id)
         .is_some_and(|r| r.is_admin())
     {
