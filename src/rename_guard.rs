@@ -30,6 +30,7 @@ const FROZEN: &[(&str, &str)] = &[
     ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/uik-succession"),
     ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/vault-tombstone"),
     ("crates/sprott-trust/src/identity.rs", "sudp/v1/item-sig"),
+    ("crates/sprott-trust/src/keyset.rs", "safeclaw/v1/rekey-kc"),
     ("src/approval/store.rs", "safeclaw/v1/intent"),
     ("src/approval/store.rs", "safeclaw/v1/intent"),
     ("src/cli/webauthn.rs", "safeclaw-prf-v1"),
@@ -53,7 +54,6 @@ const FROZEN: &[(&str, &str)] = &[
     ("src/pairing.rs", "safeclaw/v1/pair/owner"),
     ("src/state.rs", "safeclaw/v1/op-payload"),
     ("src/storage/item.rs", "safeclaw/item-id/v1"),
-    ("src/storage/sealed_vault.rs", "safeclaw/v1/rekey-kc"),
 ];
 
 /// The OAuth loopback redirect registered at providers and stored inside

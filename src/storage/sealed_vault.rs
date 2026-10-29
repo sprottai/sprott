@@ -268,81 +268,12 @@ mod b64url_bytes {
     }
 }
 
-/// Serde helper: encode bytes as STANDARD base64 (matching the frontend `toBase64`)
-/// and decode LENIENTLY (accept standard OR url-safe, padded or not) — the same
-/// mixed-encoding tolerance as [`decode_keys_data_field`]. Used for the delegation
-/// log / root-succession signature + pubkey byte fields so a keyset's `/keys` wire
-/// shape (what the browser writes) round-trips byte-for-byte through the daemon AND
-/// equals the on-disk `vault.dat` representation — ONE SSOT encoding for both, so
-/// `serde_json::to_value(&uik.delegation_log)` yields exactly the wire the frontend
-/// and backend agree on (no separate hand-rolled converter).
-mod b64_std {
-    use base64::engine::general_purpose::STANDARD;
-    use base64::Engine;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<u8>, D::Error> {
-        let s = String::deserialize(d)?;
-        let norm: String = s
-            .chars()
-            .map(|c| match c {
-                '-' => '+',
-                '_' => '/',
-                other => other,
-            })
-            .collect();
-        let norm = norm.trim_end_matches('=');
-        let pad = norm.len() % 4;
-        let padded = if pad == 0 {
-            norm.to_string()
-        } else {
-            let mut t = norm.to_string();
-            t.push_str(&"=".repeat(4 - pad));
-            t
-        };
-        STANDARD
-            .decode(padded.as_bytes())
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-/// LENIENT base64 decode for a `/keys` row `data` field, mirroring the
-/// frontend's `fromBase64` (lib/safeclaw-crypto.ts): the frontend writes these
-/// fields with MIXED encodings — `x`/`y`/`prf_salt`/`wrapped_key` are STANDARD
-/// base64 (`toBase64`, has `+`/`/`/`=`) while `x25519_pub` is base64url — and its
-/// reader accepts BOTH. So the daemon must NOT use a strict base64url decoder
-/// (it would reject `+`/`/`/`=` and fail to unwrap `K`). Normalize url→std
-/// (`-`→`+`, `_`→`/`), re-pad to a multiple of 4, then STANDARD-decode.
-/// This is EXCLUSIVELY for `/keys` data fields; the `cid` row PK stays strict
-/// base64url-nopad (`decode_credential_id`), and content item `ct`/id bytes stay
-/// strict base64url-nopad (the per-item stack, `b64url_bytes`).
+/// LENIENT base64 decode for a `/keys` row `data` field: the frontend's
+/// `fromBase64` rule ([`sprott_trust::decode_keys_data_field`] has the details).
+/// EXCLUSIVELY for `/keys` data fields; the `cid` row PK stays strict
+/// base64url-nopad (`decode_credential_id`).
 pub fn decode_keys_data_field(s: &str) -> Result<Vec<u8>> {
-    use base64::engine::general_purpose::STANDARD;
-    use base64::Engine;
-    let std: String = s
-        .chars()
-        .map(|c| match c {
-            '-' => '+',
-            '_' => '/',
-            other => other,
-        })
-        .collect();
-    let std = std.trim_end_matches('=');
-    let pad = std.len() % 4;
-    let padded = if pad == 0 {
-        std.to_string()
-    } else {
-        let mut t = std.to_string();
-        t.push_str(&"=".repeat(4 - pad));
-        t
-    };
-    STANDARD
-        .decode(padded.as_bytes())
-        .map_err(|e| AppError::BadRequest(format!("keys data field not base64: {}", e)))
+    sprott_trust::decode_keys_data_field(s).map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
 /// One sealed content item at rest: the writer-assigned CAS `version` (plaintext,
@@ -447,331 +378,23 @@ pub enum RowKind {
     Guarded,
 }
 
-/// The v2 (UIK) material carried alongside one credential (device) row — the
-/// per-row half of `custody → UIK → K`. `K` is HPKE-sealed to the member's UIK
-/// X25519 **encryption public key** (team-shared-vault-security-model.md §1/§2:
-/// "K 用该成员的 UIK 公钥封装成一份"). Logically the seal is per-MEMBER (one
-/// `enc_pub` per person), but it is stored per-credential-ROW so the keyset sync
-/// carries it losslessly: `/keys` rows are cid-keyed, and a daemon re-pushes an
-/// adopted row verbatim without needing to map the credential back to its member
-/// (it cannot — that needs the member's root). The copies across one member's
-/// devices are identical and tiny; the "no duplication" rule (§2) targets ITEM
-/// storage explosion, not these keyset seals. Cloud-visible by design.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UikCred {
-    /// The account primary key `us_…` of the member this credential belongs to.
-    /// Carried so offboarding can drop every credential of a departed member.
-    pub user_id: String,
-    /// The member's UIK Ed25519 **signing** public key (raw 32 bytes). Published
-    /// so any reader can verify this member's config / role signatures (§9):
-    /// `user_id = derive_id(sig_pub)` is one-way, so the pubkey itself must be
-    /// carried. The creator's `sig_pub` is the vault's config-integrity trust
-    /// anchor (only owner-signed config is honored; a malicious server can't
-    /// forge it). Same across a member's devices (per-person, like `enc_pub`).
-    #[serde(default)]
-    pub sig_pub: Vec<u8>,
-    /// The member's UIK X25519 encryption public key (raw 32 bytes). The owner
-    /// seals `K` here on join / re-key (needs only this PUBLIC key); the member
-    /// derives the same key from its unwrapped root and opens the seal.
-    pub enc_pub: Vec<u8>,
-    /// HPKE encapsulated key for the K-seal.
-    pub k_encapped: Vec<u8>,
-    /// HPKE ciphertext = `Seal(K)` to `enc_pub`, `info = uik-kseal ‖ vault_id`
-    /// ([`crate::crypto::vault_key::seal_k_to_uik`]).
-    pub k_ct: Vec<u8>,
-    /// This member's role in the vault — an owner-signed attribute riding on the
-    /// SAME record as membership (SSOT: the keyset cred is SM §1's single home
-    /// for "who is a member"; role rides it, so there is one representation, no
-    /// in-vault membership to drift). Verified via `role_sig`. `#[serde(default)]` =
-    /// `Member` (least privilege) for legacy rows that predate this field, so a
-    /// missing role never confers owner powers.
-    #[serde(default)]
-    pub role: crate::storage::plaintext::MemberRole,
-    /// The vault CREATOR's Ed25519 signature over
-    /// [`crate::identity::role_grant_input`]`(vault_id, user_id, role, generation)`
-    /// (raw 64 bytes), signed at the keyset's `generation`. The daemon derives the
-    /// owner-set by verifying this against the TOFU-pinned `creator_sig_pub`
-    /// ([`KeysetUik::creator_sig_pub`]) at the CURRENT `generation`: a cred is
-    /// honored at its `role` iff its `role_sig` verifies under the pinned creator AT
-    /// that generation. This roots role in genesis (closing finding #1 — a member
-    /// can no longer self-sign `{me: owner}`) and binds the grant to the role epoch
-    /// (F3-b — a re-key generation bump invalidates a stale grant, so a
-    /// demoted/offboarded person's replayed grant fails verification). May be empty
-    /// for a legacy cred (then the cred is NOT an owner: an empty/invalid `role_sig`
-    /// fails verification).
-    #[serde(default)]
-    pub role_sig: Vec<u8>,
-    /// The vault's previous content keys, sealed under the current one (the
-    /// row's `uik_prev_content_ct`; an owner sets it on every member's row at
-    /// a re-key and on an invite): open rows a re-key has not moved yet
-    /// ([`crate::storage::item::material_with_prev`]). Empty when there is
-    /// none. Carried as sealed: every write of this entry keeps it, and this
-    /// process never makes a new one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prev_content_ct: Vec<u8>,
-}
-
-/// The v2 (UIK) layer of a keyset — the `custody → UIK → K` layering
-/// (team-shared-vault-security-model.md §5, sudp-identity-signing-revision.md
-/// §B3). Present (`Some`) iff the keyset is v2. In v2, each
-/// `SealedCredential.wrapped_key` holds `Wrap_{W_c}(UIK root)` (the classic
-/// custody slot, re-purposed from wrapping `K` to wrapping the identity root),
-/// and `K` is recovered from that credential's per-row seal in `creds`. A v1
-/// keyset has `uik = None` and its `wrapped_key` is the classic `Wrap_{W_c}(K)`.
-/// An owner-signed DP-S1 re-key event (team-shared-vault-security-model.md §3.2 /
-/// sudp-identity-signing-revision.md A1.7). Proves a `generation` bump + content-
-/// key rotation was authorized by an owner — so a malicious backend can neither
-/// storm fake generations (unlock DoS) nor swap in a content key it chose (the
-/// commitment binds the signature to the actual new content key).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RekeyProof {
-    /// The generation this event authorizes (must equal `KeysetUik::generation`).
-    pub generation: u64,
-    /// A one-way commitment to the new content key ([`rekey_commitment`]), so the
-    /// signature is bound to the specific rotated key (anti content-swap).
-    pub k_commitment: Vec<u8>,
-    /// The owner's Ed25519 signature over [`crate::identity::rekey_sig_input`].
-    pub sig: Vec<u8>,
-    /// The signing owner's `us_…` (must be an owner in the verified membership).
-    pub signer_id: String,
-    /// Membership anti-rollback (owner-signed): the number of delegation events at the
-    /// current role-epoch captured at re-key time. `0` = empty prefix.
-    #[serde(default)]
-    pub membership_len: u64,
-    /// [`crate::identity::membership_commitment`] over that prefix's event signatures, in
-    /// `(seq, sig)` order. The fold refuses a keyset whose delegation-log prefix does
-    /// not hash to this (a server serving the current generation with a rolled-back
-    /// log — e.g. an omitted `remove` — fails the check).
-    #[serde(default, with = "b64_std")]
-    pub membership_hash: Vec<u8>,
-}
-
-impl RekeyProof {
-    /// Whether `sig` is a valid signature over [`crate::identity::rekey_sig_input`]
-    /// by the published cred key of `signer_id` ([`KeysetUik::signer_key`]).
-    /// Whether that signer may re-key is the caller's check.
-    pub(crate) fn signature_valid(&self, uik: &KeysetUik, vault_id: &str) -> bool {
-        let Ok(sig) = <[u8; 64]>::try_from(self.sig.as_slice()) else {
-            return false;
-        };
-        let Some(signer_pub) = uik.signer_key(&self.signer_id) else {
-            return false;
-        };
-        let input = crate::identity::rekey_sig_input(
-            vault_id,
-            self.generation,
-            &self.k_commitment,
-            &self.signer_id,
-            self.membership_len,
-            &self.membership_hash,
-        );
-        crate::identity::verify(&signer_pub, &input, &sig)
-    }
-}
-
-/// An owner-signed delegation event — the any-owner, issuance-time-authority half
-/// of the owner-set fold (design/identity-uik-aik.md §4.3,
-/// delegation-log-impl-spec.md §1.2). Appended to [`KeysetUik::delegation_log`]
-/// between root-signed checkpoints so ANY current owner (not just the root/creator)
-/// can add / promote / demote / remove without a re-key. The fold honors an event
-/// iff its `granter_id` is an Owner in the owner-set folded up to this event's `seq`
-/// — so a member can't grant, and the fact "granter WAS an owner when they signed"
-/// survives the granter's own later removal (NON-CASCADE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DelegationEvent {
-    /// `"set"` (insert `subject_id → role`: add / promote / demote) or `"remove"`
-    /// (drop `subject_id`; touches ONLY the subject — non-cascade).
-    pub op: String,
-    /// The `us_…` whose role this event changes.
-    pub subject_id: String,
-    /// The role for a `"set"` (ignored for `"remove"`). `#[serde(default)]` = Member.
-    #[serde(default)]
-    pub role: crate::storage::plaintext::MemberRole,
-    /// The signing owner's `us_…`. Must be an Owner in the fold up to `seq`.
-    pub granter_id: String,
-    /// The granter's Ed25519 signing pubkey (raw 32 bytes), carried INLINE and
-    /// SELF-CERTIFYING: the fold requires `derive_id(granter_sig_pub) == granter_id`,
-    /// then verifies `sig` under it. Carrying it in the event (rather than resolving it
-    /// from the granter's cred row) is load-bearing: it makes verification immune to a
-    /// spoofed cred row that lies about `(user_id, sig_pub)`, AND keeps the event
-    /// verifiable AFTER the granter's own cred row is deleted at offboard — so removing
-    /// a granter never drops whom they added (NON-CASCADE survives eviction).
-    #[serde(default, with = "b64_std")]
-    pub granter_sig_pub: Vec<u8>,
-    /// Monotone ordering within `role_epoch` (rollback / reorder guard).
-    pub seq: u64,
-    /// The checkpoint epoch this event rides on. An event whose `role_epoch` differs
-    /// from the keyset's current (succession-derived) `role_epoch` is a pre-compaction
-    /// replay → ignored by the fold.
-    pub role_epoch: u64,
-    /// `granter`'s Ed25519 over [`crate::identity::delegation_event_input`] (64 bytes).
-    #[serde(with = "b64_std")]
-    pub sig: Vec<u8>,
-}
-
-impl DelegationEvent {
-    /// Does `sig` verify under `granter_pub` over this event's signing input
-    /// ([`crate::identity::delegation_event_input`])? A `remove` signs an empty
-    /// role; a `set` signs its role token, which a legacy admin event spells
-    /// `"owner"` and a new one `"admin"` (either verifies the admin role, never
-    /// another role). The one check both the adopt filter and the fold run.
-    pub(crate) fn signature_verifies(&self, vault_id: &str, granter_pub: &[u8; 32]) -> bool {
-        let Ok(sig) = <[u8; 64]>::try_from(self.sig.as_slice()) else {
-            return false;
-        };
-        let role_toks: &[&str] = if self.op == "remove" {
-            &[""]
-        } else {
-            role_sig_tokens(self.role)
-        };
-        role_toks.iter().any(|tok| {
-            let input = crate::identity::delegation_event_input(
-                vault_id,
-                &self.op,
-                &self.subject_id,
-                tok,
-                &self.granter_id,
-                self.seq,
-                self.role_epoch,
-            );
-            crate::identity::verify(granter_pub, &input, &sig)
-        })
-    }
-}
-
-/// A root-succession certificate — the CURRENT root signs the NEXT root's id +
-/// signing pubkey, letting the daemon follow a short chain from the TOFU-pinned
-/// GENESIS root to the current root (creator transfer / offboard;
-/// design/identity-uik-aik.md §4.3). A succession is always paired with a
-/// checkpoint re-cut at `role_epoch` by the NEW root (the new root re-signs every
-/// surviving grant, so the fold verifies checkpoint grants under the new root).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootSuccession {
-    /// The retiring root's `us_…` (must equal `derive_id(current root)` when applied).
-    pub old_root_id: String,
-    /// The incoming root's `us_…` (must equal `derive_id(new_root_sig_pub)`).
-    pub new_root_id: String,
-    /// The incoming root's UIK Ed25519 signing pubkey (raw 32 bytes), bound in the
-    /// signature so a colluding server can't swap in a root key of its choosing. For a
-    /// pure COMPACTION (no ownership change) this equals the current root's pubkey and
-    /// `old_root_id == new_root_id` — a self-succession that only advances `role_epoch`.
-    #[serde(with = "b64_std")]
-    pub new_root_sig_pub: Vec<u8>,
-    /// The checkpoint epoch at which the transfer / compaction takes effect (strictly
-    /// increasing along the chain — rollback guard, and the SOLE source of the current
-    /// `role_epoch`, which is DERIVED from this chain rather than stored as a
-    /// separately-forgeable scalar).
-    pub role_epoch: u64,
-    /// `old_root`'s Ed25519 over [`crate::identity::root_succession_input`] (64 bytes).
-    #[serde(with = "b64_std")]
-    pub sig: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct KeysetUik {
-    /// `cid_b64 → per-credential UIK material` (same cid key as the credential /
-    /// `/keys` row). Membership = holding one of these seals (SM §1).
-    #[serde(default)]
-    pub creds: BTreeMap<String, UikCred>,
-    /// DP-S1 re-key epoch (team-shared-vault-security-model.md §3.2). `0` = never
-    /// re-keyed (the K-seals carry a bundle whose content half is the original
-    /// content key). An offboard/compromise re-key rotates the content key and
-    /// bumps this, gated by an owner-signed re-key event
-    /// ([`crate::identity::rekey_sig_input`]). A daemon that sees a higher, signed
-    /// generation drops its old content key and re-unlocks under the new one.
-    #[serde(default)]
-    pub generation: u64,
-    /// The owner-signed proof for the CURRENT `generation` (present iff
-    /// `generation > 0`). A daemon refuses to fold a re-keyed vault whose proof is
-    /// missing/invalid — so a backend can't forge a re-key.
-    #[serde(default)]
-    pub rekey_proof: Option<RekeyProof>,
-    /// The vault's ROOT owner — the CREATOR's UIK Ed25519 signing pubkey (raw
-    /// 32 bytes). This is the genesis anchor for role authority (design/
-    /// identity-uik-aik.md §4.3 RESOLVED): the owner-set is derived by verifying
-    /// each cred's `role_sig` against THIS key ([`Self`]'s creds →
-    /// `resolve_membership_trust`). TOFU-pinned SET-ONCE by the daemon (first-seen
-    /// wins; a non-empty pin is NEVER overwritten), so a colluding backend can't
-    /// swap the anchor to forge an owner-set. On a v2 keyset that carries creds,
-    /// empty here (serde default) means the anchor was never pinned — a colluding
-    /// backend can STRIP it, so that state FAILS CLOSED ([`MembershipTrust::Untrusted`]:
-    /// ALL owner-config is dropped, NOT downgraded to integrity-only). Only a
-    /// legacy v1 keyset (`uik == None`) reads config integrity-only.
-    #[serde(default)]
-    pub creator_sig_pub: Vec<u8>,
-    /// Append-only owner-signed delegation events since the last checkpoint — the
-    /// any-owner half of the owner-set fold ([`DelegationEvent`]). Empty right after
-    /// a compaction. A fresh daemon folds `checkpoint(role_epoch) ∘ delegation_log`.
-    #[serde(default)]
-    pub delegation_log: Vec<DelegationEvent>,
-    /// Root-succession + compaction chain from the GENESIS `creator_sig_pub` to the
-    /// current root ([`RootSuccession`]). Empty = creator is still root at genesis
-    /// epoch 0. The daemon walks it to resolve BOTH the current root AND the current
-    /// `role_epoch` (the role-checkpoint epoch, ORTHOGONAL to the K-rotation
-    /// `generation` — memory "generation ⊥ chain 正交"). `role_epoch` is DERIVED from
-    /// this root-signed chain, not stored as a separate scalar: a pure compaction is a
-    /// SELF-succession (`old_root == new_root`) that only advances the epoch, so the
-    /// epoch can never be forged upward without a valid root signature (closing the
-    /// generation-brick class of DoS by construction — [`resolve_current_root`]).
-    #[serde(default)]
-    pub root_succession: Vec<RootSuccession>,
-    /// `cid_b64 → us_…` for OTHER members' passkeys the membership serves as
-    /// approval-verification material only (`approver: true` credentials: a
-    /// vault admin's passkeys, so this daemon can verify an admin approving its
-    /// op). Their WebAuthn pubkeys go into the registry; they seat nobody and
-    /// unlock nothing here, are never this device's own passkeys, and never
-    /// count toward who the requester is. Who is an admin is still the verified
-    /// role fold alone. Local only (never pushed).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub approver_cids: BTreeMap<String, String>,
-}
-
-impl KeysetUik {
-    /// The signing pubkey of the published cred whose self-certifying id is
-    /// `signer_id`, or `None` when no cred carries one.
-    pub(crate) fn signer_key(&self, signer_id: &str) -> Option<[u8; 32]> {
-        self.creds.values().find_map(|c| {
-            let k = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
-            (crate::identity::derive_id(crate::identity::IdKind::User, &k) == signer_id)
-                .then_some(k)
-        })
-    }
-}
-
-/// A one-way commitment to a content key for a re-key event: `SHA-256(domain ‖
-/// content_key)`. Byte-identical to the browser's `rekeyCommitment`
-/// (lib/uik-crypto.ts). Binds a signed `generation` to the specific content key.
-pub fn rekey_commitment(content_key: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"safeclaw/v1/rekey-kc");
-    h.update(content_key);
-    h.finalize().into()
-}
+// The keyset's v2 (UIK) layer and the rules over it live in the `sprott-trust`
+// crate (pure, no I/O), so the console runs the same code; re-exported here at
+// their old paths.
+pub(crate) use sprott_trust::ApprovalAuthority;
+use sprott_trust::MembershipTrust;
+pub use sprott_trust::{
+    rekey_commitment, DelegationEvent, KeysetUik, RekeyProof, RootSuccession, UikCred,
+};
+use sprott_trust::trust::{fold_roles_of, resolve_current_root};
 
 /// The token a record of `role` is signed with: its own lowercase serde
 /// spelling (`"admin"` / `"member"`, or the legacy `"owner"` a pre-rename record
-/// carries), the first of [`role_sig_tokens`]. The daemon signs no roles; test
-/// signers use this.
+/// carries), the first of [`sprott_trust::role_sig_tokens`]. The daemon signs no
+/// roles; test signers use this.
 #[cfg(test)]
 pub(crate) fn role_str(role: crate::storage::plaintext::MemberRole) -> &'static str {
-    role_sig_tokens(role)[0]
-}
-
-/// Every token a signature over `role` may have been made with, the record's own
-/// spelling (its serde token, the EXACT bytes signed in
-/// [`crate::identity::role_grant_input`] / [`crate::identity::delegation_event_input`])
-/// first. An admin was signed as `"owner"` before the rename and as
-/// `"admin"` after; both mean the same role, so a signature over either verifies
-/// it (this also tolerates another implementation that re-spells a legacy record).
-/// No token ever verifies a DIFFERENT role: `"member"` is never tried for an admin.
-fn role_sig_tokens(role: crate::storage::plaintext::MemberRole) -> &'static [&'static str] {
-    use crate::storage::plaintext::MemberRole;
-    match role {
-        MemberRole::Admin => &["admin", "owner"],
-        MemberRole::LegacyOwner => &["owner", "admin"],
-        MemberRole::Member => &["member"],
-    }
+    sprott_trust::role_sig_tokens(role)[0]
 }
 
 /// The passkey-wrap layer — §7's small CAS blob, unchanged in substance from
@@ -794,95 +417,9 @@ pub struct Keyset {
     pub uik: Option<KeysetUik>,
 }
 
-/// C.3 — verify + unwrap a signed **owner-config** item body (team-shared-vault-
-/// security-model.md §9: owner-authored config is integrity-protected by a UIK
-/// signature; the reader/daemon verifying it is "the real wall" against a
-/// malicious/compromised server rewriting policy).
-///
-/// A signed body is `{ data, uik_sig, uik_sign_pub }`; the signature covers
-/// [`crate::identity::config_sig_input`]`(vault, config_name, version,
-/// JCS(data), derive_id(sign_pub))`. Returns:
-///   - `Some(data)` — a valid signed wrapper, OR a legacy/v1 raw body (no
-///     `uik_sig`). Whether a raw body is HONORED is the caller's trust decision:
-///     only a [`MembershipTrust::NoUik`] (legacy v1) keyset honors it.
-///   - `None` — DROP it: a signed wrapper that FAILED (bad sig, malformed, or a
-///     signer whose pubkey is NOT a published member key — the anti-forgery
-///     anchor from C.1). Dropping falls the field to its safe default (A1.6:
-///     isolate the bad record, never crash, safe-default security-relevant config).
-///
-/// `config_name` is the addressing-independent logical name (`policy`, `stores`,
-/// …) so the same signature verifies whether the item rode legacy `aux:<name>`
-/// or the unified ns. The browser signer is `lib/uik-crypto.ts` (JCS parity via
-/// `crate::crypto::canonical`, byte-identical to the browser `canonicalize`).
-/// Integrity-verify an owner-config body (the C.3 half — no role authorization).
-/// Returns:
-///   - `None` — a signed wrapper that FAILED (bad/malformed sig, or a signer
-///     whose pubkey is NOT a published member key = the C.1 anti-forgery anchor).
-///   - `Some((data, None))` — a legacy/v1 raw body (no `uik_sig`), no signer.
-///     Integrity says nothing about authorization: callers honor it ONLY on a
-///     [`MembershipTrust::NoUik`] keyset (a v2 keyset drops it).
-///   - `Some((data, Some(signer_id)))` — a valid signature; `signer_id` = the
-///     signing member's `us_…` (for D's role authorization by the caller).
-fn verify_config_sig(
-    body: serde_json::Value,
-    keyset: &Keyset,
-    vault_id: &str,
-    config_name: &str,
-    version: u64,
-) -> Option<(serde_json::Value, Option<String>)> {
-    // Not a signed wrapper → legacy raw body, no signer (the caller decides; only
-    // a NoUik keyset honors it).
-    let obj = match &body {
-        serde_json::Value::Object(o) if o.contains_key("uik_sig") => o,
-        _ => return Some((body, None)),
-    };
-    // A malformed signed wrapper is a DROP (fail-closed), not a legacy pass —
-    // a present-but-broken `uik_sig` must never silently fall through unsigned.
-    let sig_b64 = obj.get("uik_sig").and_then(|v| v.as_str())?;
-    let sign_pub_b64 = obj.get("uik_sign_pub").and_then(|v| v.as_str())?;
-    let data = obj.get("data")?.clone();
-    let sig_vec = decode_keys_data_field(sig_b64).ok()?;
-    let sign_pub_vec = decode_keys_data_field(sign_pub_b64).ok()?;
-    let sig: [u8; 64] = sig_vec.as_slice().try_into().ok()?;
-    let sign_pub: [u8; 32] = sign_pub_vec.as_slice().try_into().ok()?;
-    // Anti-server-forgery: the signer's pubkey MUST be a published member key
-    // (the C.1 keyset anchor). A wrapper self-signed with a server-minted key is
-    // rejected — the server can't add its key to the keyset with a valid K-seal.
-    let known = keyset
-        .uik
-        .as_ref()
-        .is_some_and(|u| u.creds.values().any(|c| c.sig_pub == sign_pub_vec));
-    if !known {
-        return None;
-    }
-    let signer_id = crate::identity::derive_id(crate::identity::IdKind::User, &sign_pub);
-    let canonical = crate::crypto::canonical::canonicalize(&data);
-    let input = crate::identity::config_sig_input(
-        vault_id,
-        config_name,
-        version,
-        Some(&canonical),
-        &signer_id,
-    );
-    if crate::identity::verify(&sign_pub, &input, &sig) {
-        Some((data, Some(signer_id)))
-    } else {
-        None
-    }
-}
-
-/// A1.2/A1.5 — verify a per-record **sidecar** signature (`StoredItem.sig`/`signer`)
-/// over the record's CIPHERTEXT, by a keyset MEMBER (a UIK — `us_…`). This is the
-/// daemon-side (trust wall) verification of the new signed-record scheme: unlike
-/// [`verify_config_sig`] (the sig lives INSIDE the sealed body and covers the
-/// plaintext), here the sig is a plaintext sidecar covering `record_signature_input`
-/// over the ciphertext — so the same signature a blind server verified at write is
-/// re-verified here. Returns the signer's `us_…` iff the signature verifies AND the
-/// signer's pubkey is a published keyset cred (the anti-server-forgery anchor); else
-/// `None` (drop). `item_id_raw` = the 32-byte blinded id; `status_live` = live vs
-/// tombstone. DIK (`dev_…`) signers are NOT resolved here (device pubkeys aren't in
-/// the keyset) — that path is served separately; this covers the UIK-signed
-/// owner-config + authorized-agents records.
+/// [`sprott_trust::trust::verify_record_sidecar_sig`] against `keyset`'s UIK layer.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn verify_record_sidecar_sig(
     ct: &[u8],
     keyset: &Keyset,
@@ -894,43 +431,20 @@ fn verify_record_sidecar_sig(
     sig_b64: &str,
     signer_id: &str,
 ) -> Option<String> {
-    let sig_vec = decode_keys_data_field(sig_b64).ok()?;
-    let sig: [u8; 64] = sig_vec.as_slice().try_into().ok()?;
-    // Resolve the signer's pubkey from the published keyset creds and bind it to the
-    // claimed `signer_id` (self-certifying: id = fold of pubkey). A server-minted
-    // key isn't in the keyset (it can't add one with a valid K-seal) → rejected.
-    let sign_pub = keyset.uik.as_ref()?.signer_key(signer_id)?;
-    let input = crate::identity::record_signature_input(
-        record_type,
-        item_id_raw,
-        version,
-        vault_id,
+    sprott_trust::trust::verify_record_sidecar_sig(
         ct,
+        keyset.uik.as_ref(),
+        vault_id,
+        item_id_raw,
+        record_type,
+        version,
         status_live,
+        sig_b64,
         signer_id,
-    );
-    if crate::identity::verify(&sign_pub, &input, &sig) {
-        Some(signer_id.to_string())
-    } else {
-        None
-    }
+    )
 }
 
-/// Fold one NATIVE authorized-agents row (`ItemNs::Agent`, wire id == ag_id; the
-/// caller enforces the id) — design/agent-device-identity-mtls.md §11.1, design/
-/// agent-authz-cleartext-cutover.md. Returns the row body to honor, or `None` to
-/// drop it (that `ag_id` is then simply not authorized). Per trust state:
-///   - [`MembershipTrust::Verified`] (v2): honored ONLY with a valid sidecar item-sig
-///     (A1.2: `record_signature_input`, type `"agent"`, over the ciphertext, by a
-///     published keyset member) whose signer is a vault OWNER or the row's own
-///     `owner` (a member authorizing their OWN agent). An unsigned row, or one that
-///     carries only a legacy in-body `{data,uik_sig}` wrapper, is DROPPED: without
-///     the sidecar any K-holding member could write an authorization row.
-///   - [`MembershipTrust::NoUik`] (legacy v1): integrity-only. There are no member
-///     keys (single-person vault), so nothing can be signed and the K-seal (AEAD) is
-///     the only gate: a plain unsigned row is honored; anything claiming a signature
-///     is dropped (it can't verify against an empty keyset).
-///   - [`MembershipTrust::Untrusted`]: everything is dropped (fail closed).
+/// [`sprott_trust::trust::fold_agent_record`] against `keyset`'s UIK layer.
 #[allow(clippy::too_many_arguments)]
 fn fold_agent_record(
     stored_sig: Option<&str>,
@@ -943,51 +457,21 @@ fn fold_agent_record(
     body: serde_json::Value,
     trust: &MembershipTrust,
 ) -> Option<serde_json::Value> {
-    match trust {
-        MembershipTrust::Untrusted => None,
-        MembershipTrust::NoUik => {
-            if stored_sig.is_some() || body.get("uik_sig").is_some() {
-                return None;
-            }
-            Some(body)
-        }
-        MembershipTrust::Verified(membership) => {
-            let sig = stored_sig?;
-            let signer = stored_signer?;
-            let sid = verify_record_sidecar_sig(
-                ct,
-                keyset,
-                vault_id,
-                item_id_raw,
-                "agent",
-                version,
-                true,
-                sig,
-                signer,
-            )?;
-            let owner = body
-                .get("owner")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let is_owner = membership.get(&sid).is_some_and(|r| r.is_admin());
-            if is_owner || sid == owner {
-                Some(body)
-            } else {
-                None
-            }
-        }
-    }
+    sprott_trust::trust::fold_agent_record(
+        stored_sig,
+        stored_signer,
+        ct,
+        keyset.uik.as_ref(),
+        vault_id,
+        item_id_raw,
+        version,
+        body,
+        trust,
+    )
 }
 
-/// Fold one owner-config record (`ns`: a native kind, or a legacy `aux` row).
-/// `config_name` is the sidecar record type ([`crate::storage::item::ItemRule::signature_type`]).
-/// With a keyset only an owner's sidecar signature counts (A1.2). A native
-/// record is sidecar-only: the old in-body wrapper (`{data, uik_sig, ..}`),
-/// whose signature is not bound to the record's name, counts only on a legacy
-/// `aux:<field>` row ([`unwrap_verified_config`]). Without a keyset an
-/// unsigned body is honored; a native body claiming a signature is not.
-/// Returns the raw `data` to honor (the daemon then parses it) or `None` to
-/// drop.
+/// [`sprott_trust::trust::fold_owner_config_record`] against `keyset`'s UIK
+/// layer; `ns` is the record's.
 #[allow(clippy::too_many_arguments)]
 fn fold_owner_config_record(
     stored_sig: Option<&str>,
@@ -1002,84 +486,23 @@ fn fold_owner_config_record(
     body: serde_json::Value,
     trust: &MembershipTrust,
 ) -> Option<serde_json::Value> {
-    let Some(sig) = stored_sig else {
-        if ns != ItemNs::Aux {
-            return match trust {
-                MembershipTrust::NoUik if body.get("uik_sig").is_none() => Some(body),
-                _ => None,
-            };
-        }
-        return unwrap_verified_config(body, keyset, vault_id, config_name, version, trust);
-    };
-    let signer = stored_signer?;
-    let sid = verify_record_sidecar_sig(
-        ct, keyset, vault_id, item_id_raw, config_name, version, true, sig, signer,
-    )?;
-    match trust {
-        MembershipTrust::Untrusted => None,
-        MembershipTrust::NoUik => Some(body),
-        MembershipTrust::Verified(membership) => {
-            if membership.get(&sid).is_some_and(|r| r.is_admin()) {
-                Some(body)
-            } else {
-                None
-            }
-        }
-    }
+    sprott_trust::trust::fold_owner_config_record(
+        stored_sig,
+        stored_signer,
+        ct,
+        keyset.uik.as_ref(),
+        vault_id,
+        item_id_raw,
+        ns == ItemNs::Aux,
+        config_name,
+        version,
+        body,
+        trust,
+    )
 }
 
-/// The three-state trust an owner-config reader derives from the KEYSET's UIK
-/// anchor (design/identity-uik-aik.md §4.3, team-shared-vault-security-model.md
-/// §9). This REPLACES the old `Option<BTreeMap<..>>` membership signal, which
-/// conflated two very different "no owner-set" cases into `None` and so
-/// FAIL-OPENED: a v2 keyset whose `creator_sig_pub` a colluding server had
-/// STRIPPED looked identical to a legacy v1 vault and silently downgraded to
-/// integrity-only, letting a colluding member's signed owner-config be honored.
-/// The three states keep those cases distinct:
-/// Whether a grant's signer may approve an op ([`PerItemVault::approval_authority`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ApprovalAuthority {
-    /// The signer is the requester.
-    Requester,
-    /// The signer is an admin of the vault.
-    Admin,
-    /// Anyone else; carries the reason.
-    Refused(String),
-}
-
-enum MembershipTrust {
-    /// Legacy v1 keyset (`keyset.uik == None`) — no UIK layer, never re-keyable.
-    /// Owner-config is honored on integrity alone (additive; pre-signing vaults).
-    NoUik,
-    /// A v2 keyset with a valid 32-byte pinned creator anchor. Owner-config is
-    /// gated by this derived owner-set (`user_id → role`); an empty map is fine
-    /// (it just means every SIGNED owner-config item drops).
-    Verified(BTreeMap<String, crate::storage::plaintext::MemberRole>),
-    /// A v2 keyset that carries credentials but has NO valid creator anchor
-    /// (`creator_sig_pub` empty / not 32 bytes). This is the server-strippable
-    /// state (`adopt_creator_pin` only pins a non-empty value), so it FAILS
-    /// CLOSED: ALL owner-config (signed OR legacy-raw) and ALL agent rows are
-    /// dropped → the fields fall to their safe defaults. Never downgrade this to
-    /// integrity-only.
-    Untrusted,
-}
-
-/// C.3 + D — verify AND authorize an owner-config item body (team-shared-vault-
-/// security-model.md §9 + §附 role×type: owner-authored config is honored only
-/// when signed by an **owner**; the reader/daemon verifying it is "the real
-/// wall"). Composes [`verify_config_sig`] (integrity) with role authorization,
-/// keyed on the [`MembershipTrust`] state:
-///   - [`MembershipTrust::NoUik`] (legacy v1) ⇒ integrity-only: a valid or unsigned
-///     body is honored (additive — pre-signing vaults);
-///   - [`MembershipTrust::Verified`] (v2, anchor pinned) ⇒ owner-gated: a valid
-///     signature is honored only if the signer is an **owner** in the derived
-///     owner-set; everything else is DROPPED (an unsigned legacy-raw body, which
-///     any K-holding member could have written; a non-owner member; an unknown
-///     signer; a bad/forged signature);
-///   - [`MembershipTrust::Untrusted`] (v2, anchor stripped) ⇒ FAIL CLOSED: EVERYTHING
-///     the owner-config path would otherwise honor is dropped, signed or not, so
-///     a colluding member's config is never honored via integrity-only.
-/// Dropping falls the field to its safe default (A1.6).
+/// [`sprott_trust::trust::unwrap_verified_config`] against `keyset`'s UIK layer.
+#[cfg(test)]
 fn unwrap_verified_config(
     body: serde_json::Value,
     keyset: &Keyset,
@@ -1088,317 +511,24 @@ fn unwrap_verified_config(
     version: u64,
     trust: &MembershipTrust,
 ) -> Option<serde_json::Value> {
-    match verify_config_sig(body, keyset, vault_id, config_name, version) {
-        None => None,
-        Some((data, signer)) => match trust {
-            // Anchor stripped: drop everything the owner-config path would honor.
-            MembershipTrust::Untrusted => None,
-            // Legacy v1: integrity-only (additive) — signed or unsigned honored.
-            MembershipTrust::NoUik => Some(data),
-            // Verified v2: honored ONLY when signed by an OWNER in the derived
-            // owner-set. An unsigned legacy-raw body is dropped (a K-holding
-            // member could have written it).
-            MembershipTrust::Verified(membership) => match signer {
-                Some(signer_id) if membership.get(&signer_id).is_some_and(|r| r.is_admin()) => {
-                    Some(data)
-                }
-                _ => None,
-            },
-        },
-    }
+    sprott_trust::trust::unwrap_verified_config(
+        body,
+        keyset.uik.as_ref(),
+        vault_id,
+        config_name,
+        version,
+        trust,
+    )
 }
 
-/// Resolve the CURRENT root's Ed25519 signing pubkey AND the current `role_epoch` by
-/// walking the [`KeysetUik::root_succession`] chain from the TOFU-pinned GENESIS root
-/// (`creator_sig_pub`) (design/identity-uik-aik.md §4.3, delegation-log-impl-spec.md
-/// §1.2). The `role_epoch` is DERIVED here (not stored): a pure COMPACTION is a
-/// SELF-succession (`old_root == new_root`, same pubkey) that only advances the
-/// epoch, so the epoch can never be forged upward without a valid root signature.
-///
-/// A hop from the current `(root, epoch)` is VALID iff: `old_root_id ==
-/// derive_id(current root)` (chains from the current root, so the server can't fork
-/// it onto a key it controls), `role_epoch` STRICTLY increases (rollback guard),
-/// `new_root_id == derive_id(new_root_sig_pub)` (id/pubkey bound), and the `sig`
-/// verifies under the CURRENT root over [`crate::identity::root_succession_input`].
-///
-/// The walk is ORDER-ROBUST: at each step it SEARCHES the whole chain for a valid
-/// extending hop (rather than reading in slice order), so a colluding server cannot
-/// block a legitimate successor by reordering / prepending a bogus cert. Among
-/// multiple valid extensions of the same root (a root that equivocated), the
-/// lowest-`role_epoch` (ties broken by `new_root_id`) is taken for determinism; the
-/// loop terminates because each step strictly increases the epoch. An unverifiable
-/// succession never advances the root (fail-closed forward), so a forged succession
-/// can't install a server-chosen root. Returns `None` iff the genesis anchor itself
-/// is absent / not 32 bytes (the server-strippable state → callers fail closed).
-fn resolve_current_root(uik: &KeysetUik, vault_id: &str) -> Option<([u8; 32], u64)> {
-    let mut cur = <[u8; 32]>::try_from(uik.creator_sig_pub.as_slice()).ok()?;
-    let mut cur_epoch: u64 = 0;
-    loop {
-        let cur_id = crate::identity::derive_id(crate::identity::IdKind::User, &cur);
-        // Find the lowest-epoch valid hop extending the current root (order-robust +
-        // deterministic under equivocation).
-        let mut best: Option<(&RootSuccession, [u8; 32])> = None;
-        for s in &uik.root_succession {
-            if s.old_root_id != cur_id || s.role_epoch <= cur_epoch {
-                continue;
-            }
-            let Ok(new_pub) = <[u8; 32]>::try_from(s.new_root_sig_pub.as_slice()) else {
-                continue;
-            };
-            if s.new_root_id != crate::identity::derive_id(crate::identity::IdKind::User, &new_pub)
-            {
-                continue; // id/pubkey mismatch
-            }
-            let Ok(sig) = <[u8; 64]>::try_from(s.sig.as_slice()) else {
-                continue;
-            };
-            let input = crate::identity::root_succession_input(
-                vault_id,
-                &s.old_root_id,
-                &s.new_root_id,
-                &new_pub,
-                s.role_epoch,
-            );
-            if !crate::identity::verify(&cur, &input, &sig) {
-                continue; // signature by anyone but the current root
-            }
-            // Prefer the lowest epoch; break ties on new_root_id for determinism.
-            let better = match &best {
-                None => true,
-                Some((b, _)) => {
-                    s.role_epoch < b.role_epoch
-                        || (s.role_epoch == b.role_epoch && s.new_root_id < b.new_root_id)
-                }
-            };
-            if better {
-                best = Some((s, new_pub));
-            }
-        }
-        match best {
-            Some((s, new_pub)) => {
-                cur = new_pub;
-                cur_epoch = s.role_epoch;
-            }
-            None => return Some((cur, cur_epoch)),
-        }
-    }
-}
-
-/// Verify a keyset's DP-S1 re-key state (team-shared-vault-security-model.md
-/// §3.2). A gen-0 keyset (or a v1 vault) is trivially valid. A re-keyed keyset
-/// (`generation > 0`) is trusted only if it carries an owner-signed
-/// [`RekeyProof`] that: matches the generation; commits to the ACTUAL content
-/// key in use (anti content-swap by a backend); is signed by a key that is a
-/// published keyset member (C.1 anchor) AND an OWNER in the verified owner-set
-/// (D); with a valid signature over [`crate::identity::rekey_sig_input`]. A
-/// missing or invalid proof on a re-keyed vault ⇒ `false` (the daemon refuses to
-/// fold it), which is what stops a backend forging a generation bump (unlock
-/// DoS). An [`MembershipTrust::Untrusted`] keyset (v2 anchor stripped) has no
-/// confirmable owner, so a re-keyed (`generation > 0`) keyset is likewise refused
-/// — a DoS a colluding server can already cause by stripping the anchor, NOT a
-/// privilege escalation.
+/// [`sprott_trust::trust::verify_rekey_proof`] against `keyset`'s UIK layer.
 fn verify_rekey_proof(
     keyset: &Keyset,
     trust: &MembershipTrust,
     vault_id: &str,
     content_key: &[u8],
 ) -> bool {
-    let Some(uik) = keyset.uik.as_ref() else {
-        return true; // v1 / no UIK layer — not re-keyable
-    };
-    if uik.generation == 0 {
-        return true; // never re-keyed
-    }
-    // A re-key must be authorized by an OWNER, so a confirmed owner-set is
-    // required. `uik` is present here, so `trust` is Verified or Untrusted;
-    // Untrusted (anchor stripped) ⇒ no confirmable owner ⇒ refuse the bump.
-    let MembershipTrust::Verified(_) = trust else {
-        return false;
-    };
-    let Some(proof) = uik.rekey_proof.as_ref() else {
-        return false; // gen > 0 with no proof = a forged bump
-    };
-    if proof.generation != uik.generation {
-        return false;
-    }
-    // The signature must commit to the content key actually delivered (a backend
-    // can't pair a valid signed generation with a content key it chose).
-    if proof.k_commitment.as_slice() != rekey_commitment(content_key).as_slice() {
-        return false;
-    }
-    // The signer must have been an ADMIN when it signed (D): in the fold of the log
-    // prefix the proof commits, which `trust` being Verified has just checked against
-    // the served log. Not today's roles: an admin who re-keyed and was later demoted
-    // still signed with authority, and the vault must stay readable. (`is_admin`, not
-    // a pattern: a legacy `"owner"` grant reads as `LegacyOwner`, also an admin.)
-    let admin = fold_roles_of(uik, vault_id, Some(proof.membership_len as usize))
-        .get(&proof.signer_id)
-        .is_some_and(|r| r.is_admin());
-    if !admin {
-        return false;
-    }
-    // Signed under a PUBLISHED member key whose id matches the claimed signer
-    // (C.1 anchor) — a backend-minted key isn't in the keyset.
-    proof.signature_valid(uik, vault_id)
-}
-
-/// The role fold of `uik` ([`PerItemVault::fold_roles`]): the checkpoint under the
-/// current root, then the delegation log in `(seq, sig)` order. `limit`: fold only the
-/// first `limit` events of that order, which is the prefix a re-key proof commits
-/// (`membership_len`, [`membership_prefix_ok`]), so a proof's signer is judged by the
-/// roles at the time it signed (issuance-time authority, as for log events).
-fn fold_roles_of(
-    uik: &KeysetUik,
-    vault_id: &str,
-    limit: Option<usize>,
-) -> BTreeMap<String, crate::storage::plaintext::MemberRole> {
-    use crate::storage::plaintext::MemberRole;
-    let mut map: BTreeMap<String, MemberRole> = BTreeMap::new();
-    let Some((root_pub, role_epoch)) = resolve_current_root(uik, vault_id) else {
-        return map; // no resolvable root → no confirmable owner
-    };
-    let root_id = crate::identity::derive_id(crate::identity::IdKind::User, &root_pub);
-    // Genesis: the current root is an owner (TOFU-pinned anchor + succession).
-    map.insert(root_id.clone(), MemberRole::Admin);
-    // Checkpoint: root-signed grants @ the current (succession-derived) role_epoch
-    // (depth-1 → a fresh daemon verifies with no history).
-    for cred in uik.creds.values() {
-        // The root's ownership is the genesis pin — a checkpoint grant must NEVER
-        // overwrite/demote it (defense in depth for "the owner-set always contains
-        // the root as Owner").
-        if cred.user_id == root_id {
-            continue;
-        }
-        // Self-certifying: the cred's `user_id` label MUST derive from its
-        // `sig_pub`, so a spoofed `(user_id, sig_pub)` pair can't seat a phantom
-        // owner keyed on a label the server chose.
-        let Ok(cred_pub) = <[u8; 32]>::try_from(cred.sig_pub.as_slice()) else {
-            continue;
-        };
-        if crate::identity::derive_id(crate::identity::IdKind::User, &cred_pub) != cred.user_id {
-            continue;
-        }
-        let Ok(sig) = <[u8; 64]>::try_from(cred.role_sig.as_slice()) else {
-            continue; // no / malformed grant → not in the checkpoint
-        };
-        // A legacy admin grant was signed over `"owner"`, a new one over
-        // `"admin"`: either spelling of the cred's OWN role verifies it.
-        let granted = role_sig_tokens(cred.role).iter().any(|tok| {
-            let input = crate::identity::role_grant_input(vault_id, &cred.user_id, tok, role_epoch);
-            crate::identity::verify(&root_pub, &input, &sig)
-        });
-        if granted {
-            map.insert(cred.user_id.clone(), cred.role);
-        }
-    }
-    // Delegation log: apply in a DETERMINISTIC total order; only events on the
-    // current role_epoch (a pre-compaction replay carries an older epoch → ignored).
-    let mut events: Vec<&DelegationEvent> = uik
-        .delegation_log
-        .iter()
-        .filter(|e| e.role_epoch == role_epoch)
-        .collect();
-    // Sort by (seq, sig) — NOT seq alone: a stable sort by seq leaves same-seq
-    // order at the mercy of storage/Vec order, which the server controls, so the
-    // three implementations (daemon / backend / browser) could pick different
-    // same-seq winners. Breaking the tie on the signature bytes makes the winner
-    // deterministic and server-independent.
-    events.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.sig.cmp(&b.sig)));
-    if let Some(n) = limit {
-        events.truncate(n);
-    }
-    let mut last_seq: Option<u64> = None;
-    for e in events {
-        if matches!(last_seq, Some(ls) if e.seq <= ls) {
-            continue; // a seq already CONSUMED by a validated event
-        }
-        // Issuance-time authority: the granter must be an Owner in the fold SO FAR.
-        // A junk / non-owner event must NOT consume the seq slot (else it could
-        // suppress a legitimate same-seq event — the dup guard would then drop the
-        // real one), so `last_seq` advances ONLY AFTER full validation below.
-        if !map.get(&e.granter_id).is_some_and(|r| r.is_admin()) {
-            continue;
-        }
-        // The granter's verifying key rides INLINE and is SELF-CERTIFYING: it must
-        // derive to `granter_id`. This makes the event immune to a poisoned cred row
-        // (which lies about `sig_pub`) AND keeps it verifiable after the granter's
-        // own cred row is deleted at offboard (so NON-CASCADE survives eviction).
-        let Ok(granter_pub) = <[u8; 32]>::try_from(e.granter_sig_pub.as_slice()) else {
-            continue;
-        };
-        if crate::identity::derive_id(crate::identity::IdKind::User, &granter_pub) != e.granter_id {
-            continue;
-        }
-        if !e.signature_verifies(vault_id, &granter_pub) {
-            continue;
-        }
-        // VALIDATED (owner + self-certifying key + signature): now consume the seq
-        // slot, so a later same-seq event is a dup (equivocation) and is dropped.
-        last_seq = Some(e.seq);
-        // The creator (root) is seated at the base for ISSUANCE-TIME authority (so
-        // grants they signed verify), but is a NORMAL owner in the FINAL set: any
-        // owner (incl. the creator themselves) can be removed/demoted via the log
-        // (creator-offboard is just a `remove`). The ONLY invariant is the
-        // owner-set is never EMPTIED — a remove/demote that would drop the LAST
-        // owner is ignored (last-owner guard; also enforced at write time in the
-        // console). This replaces the old "root is permanently immune" rule.
-        let admin_count =
-            |m: &BTreeMap<String, MemberRole>| m.values().filter(|r| r.is_admin()).count();
-        match e.op.as_str() {
-            "remove" => {
-                if map.get(&e.subject_id).is_some_and(|r| r.is_admin()) && admin_count(&map) <= 1 {
-                    continue; // last-admin guard: never empty the admin set
-                }
-                map.remove(&e.subject_id); // NON-CASCADE: only the subject
-            }
-            "set" => {
-                // A demote (admin → member) of the last admin would empty it → skip.
-                if !e.role.is_admin()
-                    && map.get(&e.subject_id).is_some_and(|r| r.is_admin())
-                    && admin_count(&map) <= 1
-                {
-                    continue;
-                }
-                map.insert(e.subject_id.clone(), e.role);
-            }
-            _ => {} // unknown op → ignore
-        }
-    }
-    map
-}
-
-/// Membership anti-rollback check (delegation-log-review-findings.md C2): the current
-/// re-key proof committed a delegation-log PREFIX (`membership_len` events at the current
-/// role-epoch, in `(seq, sig)` order, hashed to `membership_hash`). Recompute that
-/// commitment over the SERVED log's prefix and compare — a mismatch means the server
-/// rolled the log back (e.g. omitted a `remove`) or altered it, so the owner-set
-/// can't be trusted. A proof with `membership_len == 0` (empty prefix) commits nothing
-/// beyond "the log was empty at re-key". Returns `true` (no rollback detected) when
-/// there is no proof. Because the daemon ratchets `generation` (won't adopt a lower
-/// one) and this binds the log to that generation, a server can't serve the CURRENT
-/// generation with a rolled-back log.
-fn membership_prefix_ok(uik: &KeysetUik, vault_id: &str) -> bool {
-    let Some(proof) = uik.rekey_proof.as_ref() else {
-        return true; // no re-key → nothing committed to roll back
-    };
-    if proof.generation == 0 {
-        return true;
-    }
-    let role_epoch = resolve_current_root(uik, vault_id)
-        .map(|(_, e)| e)
-        .unwrap_or(0);
-    let mut events: Vec<&DelegationEvent> = uik
-        .delegation_log
-        .iter()
-        .filter(|e| e.role_epoch == role_epoch)
-        .collect();
-    events.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.sig.cmp(&b.sig)));
-    let n = proof.membership_len as usize;
-    if events.len() < n {
-        return false; // the server dropped committed events
-    }
-    let prefix_sigs: Vec<&[u8]> = events.iter().take(n).map(|e| e.sig.as_slice()).collect();
-    crate::identity::membership_commitment(&prefix_sigs).as_slice() == proof.membership_hash.as_slice()
+    sprott_trust::trust::verify_rekey_proof(keyset.uik.as_ref(), trust, vault_id, content_key)
 }
 
 /// What [`PerItemVault::reconcile_from_view`] treats as the CALLER's change.
@@ -1763,50 +893,9 @@ impl OwnerConfigFold {
     }
 }
 
-/// Whether an owner-config TOMBSTONE counts as honored, by the same trust
-/// rules as a live record ([`fold_owner_config_record`]): without a keyset an
-/// unsigned one; with one, only an owner's sidecar signature over the
-/// tombstone (`status_live = false`).
-#[allow(clippy::too_many_arguments)]
-fn owner_config_tombstone_honored(
-    stored_sig: Option<&str>,
-    stored_signer: Option<&str>,
-    ct: &[u8],
-    keyset: &Keyset,
-    vault_id: &str,
-    item_id_raw: &[u8],
-    record_type: &str,
-    version: u64,
-    trust: &MembershipTrust,
-) -> bool {
-    match trust {
-        MembershipTrust::Untrusted => false,
-        MembershipTrust::NoUik => stored_sig.is_none(),
-        MembershipTrust::Verified(membership) => {
-            let (Some(sig), Some(signer)) = (stored_sig, stored_signer) else {
-                return false;
-            };
-            verify_record_sidecar_sig(
-                ct,
-                keyset,
-                vault_id,
-                item_id_raw,
-                record_type,
-                version,
-                false,
-                sig,
-                signer,
-            )
-            .is_some_and(|sid| membership.get(&sid).is_some_and(|r| r.is_admin()))
-        }
-    }
-}
-
-/// How an owner-config row reads under `trust`: a tombstone by
-/// [`owner_config_tombstone_honored`], a live body by
-/// [`fold_owner_config_record`]. `None` = not honored; `Some(None)` = an
-/// honored tombstone; `Some(Some(data))` = honored live data. `ns` and
-/// `record_type` are those of the opened record.
+/// [`sprott_trust::trust::honored_owner_config`] for the stored row `stored`,
+/// against `keyset`'s UIK layer. `ns` and `record_type` are those of the opened
+/// record.
 #[allow(clippy::too_many_arguments)]
 fn honored_owner_config(
     stored: &StoredItem,
@@ -1819,34 +908,20 @@ fn honored_owner_config(
     body: serde_json::Value,
     trust: &MembershipTrust,
 ) -> Option<Option<serde_json::Value>> {
-    if tombstone {
-        return owner_config_tombstone_honored(
-            stored.sig.as_deref(),
-            stored.signer.as_deref(),
-            &stored.ct,
-            keyset,
-            vault_id,
-            item_id_raw,
-            record_type,
-            stored.version,
-            trust,
-        )
-        .then_some(None);
-    }
-    fold_owner_config_record(
+    sprott_trust::trust::honored_owner_config(
         stored.sig.as_deref(),
         stored.signer.as_deref(),
         &stored.ct,
-        keyset,
+        stored.version,
+        keyset.uik.as_ref(),
         vault_id,
         item_id_raw,
-        ns,
+        ns == ItemNs::Aux,
         record_type,
-        stored.version,
+        tombstone,
         body,
         trust,
     )
-    .map(Some)
 }
 
 /// LEGACY: how the native record at one key reads, for the migration.
@@ -2837,62 +1912,11 @@ impl PerItemVault {
         Ok(out)
     }
 
-    /// Resolve the KEYSET's [`MembershipTrust`] — the owner-authority anchor state
-    /// (design/identity-uik-aik.md §4.3 RESOLVED). This REPLACES the old in-vault
-    /// `resolve_verified_membership`, which trusted a membership by single-version
-    /// self-consistency and so let any member self-sign `{me: owner}` and
-    /// self-promote (finding #1). Role is now rooted at genesis, and the return
-    /// distinguishes the three trust states so a missing anchor can NEVER
-    /// fail-open to integrity-only on a v2 keyset:
-    ///
-    /// - `keyset.uik == None` ⇒ [`MembershipTrust::NoUik`] (legacy v1 — integrity-only,
-    ///   single-person vaults with no member keys to sign anything).
-    /// - `uik` present but `creator_sig_pub` is NOT a valid 32-byte key AND the
-    ///   keyset already carries credentials ⇒ [`MembershipTrust::Untrusted`]. This is
-    ///   the server-strippable state (`adopt_creator_pin` only pins non-empty), so
-    ///   it FAILS CLOSED — callers drop ALL owner-config, not just unsigned.
-    /// - `uik` present with a valid 32-byte `creator_pub` ⇒ [`MembershipTrust::Verified`]:
-    ///   for each keyset cred, verify its `role_sig` over
-    ///   [`crate::identity::role_grant_input`]`(vault_id, user_id, role, generation)`
-    ///   under `creator_pub` at the CURRENT `uik.generation` (F3-b generation-
-    ///   binding: the grant is bound to the owner-signed DP-S1 role epoch, so a
-    ///   stale grant signed at an OLD generation fails here after a re-key bump and
-    ///   the cred drops from the owner-set — a colluding server can't replay a
-    ///   demoted/offboarded person's grant). A cred that verifies is inserted at its
-    ///   `role`; one that fails (empty/forged sig, a role the creator never signed,
-    ///   or a grant signed at a different generation) is dropped — it is NOT an
-    ///   owner. The creator's OWN cred is included by the SAME rule
-    ///   (its role=Owner, self-signed under `creator_pub`); no special case. An
-    ///   empty owner-set is a valid `Verified` result (all signed owner-config
-    ///   drops). A `uik` with no anchor AND no creds yet is a fresh bootstrap with
-    ///   nothing to authorize — `Verified(∅)` (every owner-config and agent row drops).
+    /// Resolve the KEYSET's [`MembershipTrust`]: NoUik, Untrusted (fails closed)
+    /// or Verified with the role fold
+    /// ([`sprott_trust::trust::resolve_membership_trust`] has the rules).
     fn resolve_membership_trust(&self, vault_id: &str) -> MembershipTrust {
-        let Some(uik) = self.keyset.uik.as_ref() else {
-            return MembershipTrust::NoUik; // legacy v1 — integrity-only (additive)
-        };
-        // Resolve the CURRENT root by walking the succession chain from the pinned
-        // GENESIS anchor. `None` = the genesis anchor is absent / not 32 bytes: a v2
-        // keyset that already carries creds but has NO resolvable root is the
-        // server-strippable state → FAIL CLOSED (`Untrusted`); an anchor-less keyset
-        // with NO creds is a fresh bootstrap: nothing to authorize → empty Verified
-        // set (every owner-config / agent row drops, signed or not).
-        if resolve_current_root(uik, vault_id).is_none() {
-            return if uik.creds.is_empty() {
-                MembershipTrust::Verified(BTreeMap::new())
-            } else {
-                MembershipTrust::Untrusted
-            };
-        }
-        // Membership anti-rollback (C2): the current re-key proof committed the
-        // delegation-log prefix — if the SERVED log doesn't match it, the server
-        // rolled the membership back (e.g. omitted a `remove`); the owner-set can't be
-        // trusted → FAIL CLOSED. (Owner-signed + generation-ratcheted, so the server
-        // can't forge a fresh commitment or serve the current generation with a
-        // tampered log.)
-        if !membership_prefix_ok(uik, vault_id) {
-            return MembershipTrust::Untrusted;
-        }
-        MembershipTrust::Verified(self.fold_roles(vault_id))
+        sprott_trust::trust::resolve_membership_trust(self.keyset.uik.as_ref(), vault_id)
     }
 
     /// §15 leg-B: is `us_id` a VERIFIED member of this vault right now? Answers the
@@ -3020,21 +2044,12 @@ impl PerItemVault {
         requester: &std::collections::BTreeSet<String>,
         signer: &str,
     ) -> ApprovalAuthority {
-        if requester.contains(signer) {
-            return ApprovalAuthority::Requester;
-        }
-        match self.resolve_membership_trust(vault_id) {
-            MembershipTrust::Verified(roles)
-                if roles.get(signer).is_some_and(|r| r.is_admin()) =>
-            {
-                ApprovalAuthority::Admin
-            }
-            _ => ApprovalAuthority::Refused(format!(
-                "{} is neither the requester nor an admin of this vault; \
-                 only the requester or a vault admin can approve this request",
-                signer
-            )),
-        }
+        sprott_trust::trust::approval_authority(
+            self.keyset.uik.as_ref(),
+            vault_id,
+            requester,
+            signer,
+        )
     }
 
     /// Compute the current derived ROLE SET (`user_id → role`; its admins are the

@@ -8,3 +8,11 @@
 //! wasm) calls it with the keyset adopted from the served membership alone.
 
 pub mod identity;
+pub mod keyset;
+pub mod trust;
+
+pub use keyset::{
+    decode_keys_data_field, rekey_commitment, role_sig_tokens, DelegationEvent, KeysFieldError,
+    KeysetUik, MemberRole, RekeyProof, RootSuccession, UikCred,
+};
+pub use trust::{ApprovalAuthority, MembershipTrust};
