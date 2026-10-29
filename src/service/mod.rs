@@ -2394,6 +2394,148 @@ secrets = ["GITHUB_TOKEN"]
         }
     }
 
+    /// A gated operation can't be reached another way: through a Google batch
+    /// endpoint, the Cloud Storage XML API, GitHub's REST twins of its gated
+    /// GraphQL mutations and its org, user and environment variants, or
+    /// Vercel's member invite and role change. Paths from the vendors' own
+    /// API descriptions (GitHub rest-api-description, Vercel OpenAPI).
+    #[test]
+    fn compiled_policies_gate_every_spelling_of_a_gated_operation() {
+        use crate::core::policy::AccessLevel;
+        for (service, method, path) in [
+            ("gcp", "DELETE", "/storage/v1/b/bkt"),
+            ("gcp", "DELETE", "/bkt"),
+            ("gcp", "DELETE", "/bkt/"),
+            ("gcp", "POST", "/batch/storage/v1"),
+            ("gcp", "POST", "/batch/compute/v1"),
+            ("gcalendar", "POST", "/batch/calendar/v3"),
+            ("github", "POST", "/repos/o/r/rulesets"),
+            ("github", "PUT", "/repos/o/r/rulesets/7"),
+            ("github", "DELETE", "/repos/o/r/rulesets/7"),
+            ("github", "DELETE", "/repositories/42/rulesets/7"),
+            ("github", "PUT", "/orgs/acme/rulesets/7"),
+            ("github", "DELETE", "/organizations/9/rulesets/7"),
+            ("github", "PUT", "/orgs/acme/actions/secrets/TOKEN/repositories/99"),
+            ("github", "PUT", "/orgs/acme/actions/secrets/TOKEN/repositories"),
+            ("github", "PUT", "/orgs/acme/dependabot/secrets/TOKEN"),
+            ("github", "PUT", "/user/codespaces/secrets/TOKEN/repositories/99"),
+            ("github", "PUT", "/repos/o/r/environments/prod/secrets/TOKEN"),
+            ("github", "PUT", "/repos/o/r/dependabot/secrets/TOKEN"),
+            ("github", "PUT", "/orgs/acme/teams/devs/repos/acme/app"),
+            ("github", "PUT", "/teams/5/repos/acme/app"),
+            ("github", "PUT", "/orgs/acme/memberships/mallory"),
+            ("github", "POST", "/orgs/acme/invitations"),
+            ("github", "DELETE", "/orgs/acme/outside_collaborators/bob"),
+            ("github", "POST", "/orgs/acme/actions/runners/registration-token"),
+            ("github", "POST", "/repos/o/r/actions/runners/generate-jitconfig"),
+            ("github", "POST", "/orgs/acme/hooks"),
+            ("github", "PATCH", "/orgs/acme/hooks/3/config"),
+            ("github", "PATCH", "/repos/o/r/hooks/3/config"),
+            ("github", "PATCH", "/repos/o/r/branches/main/protection/required_pull_request_reviews"),
+            ("github", "POST", "/repos/o/r/branches/main/protection/restrictions/users"),
+            ("vercel", "POST", "/v2/teams/t1/members"),
+            ("vercel", "PATCH", "/v1/teams/t1/members/u1"),
+            ("vercel", "DELETE", "/v9/projects/web"),
+            ("vercel", "DELETE", "/v6/domains/example.com"),
+            ("vercel", "DELETE", "/v1/teams/t1/members/u1"),
+            ("vercel", "POST", "/v1/webhooks"),
+            ("neon", "POST", "/api/v2/organizations/org-1/api_keys"),
+            ("gcp", "DELETE", "/compute/beta/projects/p/zones/z/instances/vm"),
+            ("gcp", "DELETE", "/compute/alpha/projects/p/zones/z/instances/vm"),
+            ("gcalendar", "DELETE", "/calendar/v3/calendars/cal1"),
+            ("gcalendar", "POST", "/calendar/v3/calendars/primary/clear"),
+            ("supabase", "GET", "/v1/projects/ref/config/database/pgbouncer"),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::AskAlways, "{service} {method} {path}");
+        }
+        for (service, method, path, body) in [
+            ("openai", "POST", "/v1/threads/runs", r#"{"assistant_id": "a", "model": "o3"}"#),
+            ("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a", "model": "o4-mini"}"#),
+            ("openai", "POST", "/v1/assistants", r#"{"model": "o3"}"#),
+            ("openai", "POST", "/v1/assistants/a1", r#"{"model": "gpt-4.5-preview"}"#),
+            ("openai", "POST", "/v1/batches", r#"{"input_file_id": "f", "endpoint": "/v1/chat/completions", "completion_window": "24h"}"#),
+            ("circleci", "DELETE", "/api/v2/org/o1/oidc-custom-claims", ""),
+            ("circleci", "DELETE", "/api/v2/org/o1/project/p1/oidc-custom-claims", ""),
+            ("googletasks", "POST", "/tasks/v1/lists/l1/clear", ""),
+            // CircleCI routes a POST with a form `_method` field to that method's handler.
+            ("circleci", "POST", "/api/v2/schedule/s1", "_method=PATCH"),
+            ("circleci", "POST", "/api/v2/org/o1/oidc-custom-claims", "_method=DELETE"),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, body), AccessLevel::Ask, "{service} {method} {path}");
+        }
+        for field in ["updateRefs", "addEnterpriseOrganizationMember"] {
+            let body = format!(r#"{{"query":"mutation {{ {field}(input: {{}}) {{ clientMutationId }} }}"}}"#);
+            assert_eq!(eval_compiled("github", "POST", "/graphql", &body), AccessLevel::AskAlways, "{field}");
+        }
+        for field in ["workspacePolicyItemUpdate", "workspacePolicyDeploySourceAllowlistAdd", "workspacePolicyDeploySourceAllowlistRemove"] {
+            let body = format!(r#"{{"query":"mutation {{ {field}(id: \"x\") }}"}}"#);
+            assert_eq!(eval_compiled("railway", "POST", "/graphql/v2", &body), AccessLevel::AskAlways, "{field}");
+        }
+        // An assistant on a routine model, and a run without an override, ride the floor.
+        assert_eq!(eval_compiled("openai", "POST", "/v1/assistants", r#"{"model": "gpt-4o-mini"}"#), AccessLevel::Allow);
+        assert_eq!(eval_compiled("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a"}"#), AccessLevel::Allow);
+        // Object deletes stay routine; reading rulesets is a read.
+        for (service, method, path) in [
+            ("gcp", "DELETE", "/storage/v1/b/bkt/o/obj"),
+            ("gcp", "DELETE", "/bkt/obj"),
+            ("github", "GET", "/repos/o/r/rulesets"),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, ""), AccessLevel::Allow, "{service} {method} {path}");
+        }
+    }
+
+    /// Snaplii's purchase and transfer gates read the fields its OpenAPI spec
+    /// sends (`orderInfo.item.price` as a decimal string; `to_phone`, `amount`),
+    /// and an approval binds what moves money.
+    #[test]
+    fn compiled_snaplii_policy_reads_the_fields_its_api_sends() {
+        use crate::core::policy::AccessLevel;
+        let purchase = |price: &str| {
+            format!(r#"{{"orderInfo": {{"orderType": "GIFT_CARD", "item": {{"itemId": "CB_1", "price": {price}}}}}}}"#)
+        };
+        let eval = |body: &str| eval_compiled("snaplii", "POST", "/v2/purchase", body);
+        assert_eq!(eval(&purchase(r#""40.00""#)), AccessLevel::Ask);
+        for large in [r#""100.01""#, r#""5000""#, "40", r#"" 40""#, r#""4e1""#, "null"] {
+            assert_eq!(eval(&purchase(large)), AccessLevel::AskAlways, "{large}");
+        }
+        assert_eq!(eval(r#"{"orderInfo": {"orderType": "BILL_PAY"}}"#), AccessLevel::AskAlways);
+        assert_eq!(
+            eval_compiled("snaplii", "POST", "/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
+            AccessLevel::AskAlways
+        );
+        assert_eq!(eval_compiled("snaplii", "POST", "/v2/quote", &purchase(r#""40.00""#)), AccessLevel::Allow);
+
+        let r = ServiceRegistry::load();
+        let def = r.get("snaplii").expect("snaplii service");
+        let bound = |path: &str, body: &str| {
+            def.extract_request_scope("POST", path, None, Some(body.as_bytes())).unwrap().bound
+        };
+        assert_eq!(
+            bound("/v2/purchase", &purchase(r#""40.00""#)),
+            vec![
+                ("item".to_string(), "CB_1".to_string()),
+                (
+                    "order".to_string(),
+                    r#"{"item":{"itemId":"CB_1","price":"40.00"},"orderType":"GIFT_CARD"}"#.to_string()
+                ),
+                ("price".to_string(), "40.00".to_string()),
+                ("type".to_string(), "GIFT_CARD".to_string()),
+            ]
+        );
+        // A gift to someone else, or another payment method, is another approval.
+        let mine = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
+        let gift = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}, "orderContext": {{"giftOrder": "true"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
+        let scope = |body: &str| def.extract_request_scope("POST", "/v2/purchase", None, Some(body.as_bytes())).unwrap();
+        assert_ne!(scope(&mine).digest(), scope(&gift).digest());
+        assert_eq!(
+            bound("/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
+            vec![
+                ("amount".to_string(), "12.50".to_string()),
+                ("to_phone".to_string(), "4165550006".to_string()),
+            ]
+        );
+    }
+
     /// Every Cloudflare change that can remove or re-point traffic is gated,
     /// in each spelling the API accepts (a trailing slash too); an approval
     /// binds the fields a record write sets.

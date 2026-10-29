@@ -6,11 +6,9 @@
 # whatever this file misses; the two layers are complementary (their cap
 # bounds the total, our gate approves each spend).
 #
-# Paths below are ground truth from Snaplii's agent-to-merchant-payments repo
-# (github.com/Snaplii-Inc, 2026-07-09). Bill-pay endpoints exist but their
-# REST paths are not documented there yet — pin them down at e2e and add the
-# pay-step gate then; until anchored+documented they cannot be reached through
-# this connection's floor rules any differently than purchase's siblings.
+# Paths and fields below are Snaplii's OpenAPI spec (github.com/Snaplii-Inc/
+# agent-to-merchant-payments, openapi.yaml v0.20.2). A bill is paid through
+# POST /v2/purchase with orderType BILL_PAY, so the purchase gates cover it.
 
 [default]
 read = "allow"
@@ -23,26 +21,33 @@ write = "allow"
 # Small-value convenience, big-value confirmation — the contactless-payment
 # social norm (no-verification ceilings: US ~$100, EU €50, UK £100). A purchase
 # at or under the threshold is `ask` (approve once, then a reuse window), and
-# it is BOUND to its exact amount + merchant (service.toml `[requests.purchase]`)
-# — so approving "$40 to Acme" cannot be ridden by "$75 to EvilCorp" (a
-# different value re-prompts). Over the threshold escalates to `ask-always`
-# (every spend confirmed, single-use). To make even small purchases frictionless
-# (no tap at all), set this base to `allow`.
+# it is BOUND to its exact order, payment and delivery (service.toml
+# `[requests.purchase]`), so approving a $40 gift card can't be ridden by a
+# $75 bill payment or a gift to someone else (a different value re-prompts). Over the threshold
+# escalates to `ask-always` (every spend confirmed, single-use). To make even
+# small purchases frictionless (no tap at all), set this base to `allow`.
 [[rule]]
 id = "purchase"
-label = "Buy a gift card (spends wallet balance)"
+label = "Buy a gift card or pay a bill (spends wallet balance)"
 match = "POST /v2/purchase"
 level = "ask"
 
-# Over the small-value ceiling, confirm every spend, bound to amount + merchant.
-# Composes by most-restrictive-wins (a purchase over the threshold matches both
-# rules → ask-always beats ask). `vars.amount` is the bound field. An amount
-# that isn't a JSON number is confirmed every time too: a server may read
-# " 500", "1_500" or [500] as a number this rule can't. An undefined amount → this rule doesn't fire and
-# the base `ask` still gates (never a bypass).
+# Over the small-value ceiling, confirm every spend. Composes by most-
+# restrictive-wins (a purchase over the threshold matches both rules →
+# ask-always beats ask). The price is a decimal string in Snaplii's API; a
+# price that is missing, not a string, or not plain decimal digits is
+# confirmed every time too, since this rule can't tell how a server reads it.
 [[rule]]
 id = "purchase-large"
-label = "Confirm a purchase over $100 (bound to amount + merchant)"
+label = "Confirm a purchase over $100"
 match = "POST /v2/purchase"
-when = "!(type(vars.amount) in [int, uint, double]) || vars.amount > 100"
+when = "!has(vars.price) || type(vars.price) != string || !vars.price.matches('^[0-9]{1,8}([.][0-9]{1,2})?$') || double(vars.price) > 100.0"
+level = "ask-always"
+
+# A P2P transfer sends wallet balance to a phone number: confirm every one,
+# bound to the recipient, amount and note.
+[[rule]]
+id = "transfer"
+label = "Send money to a phone number"
+match = "POST /v2/transfers"
 level = "ask-always"

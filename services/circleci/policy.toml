@@ -17,6 +17,10 @@
 # counterparts; their `:vcs-type/:username/:project` is matched in the same
 # three forms.
 
+# CircleCI's API reads a `_method` field from a form or multipart POST body and
+# routes the request to that method's handler (probed 2026-10-29), so every
+# gate on PATCH, PUT or DELETE also lists the POST spelling of its path.
+
 [default]
 read = "allow"
 write = "allow"
@@ -71,8 +75,10 @@ match = [
   "POST /api/v2/project/*/*/schedule",
   "POST /api/v2/project/*/*/*/schedule",
   "PATCH /api/v2/schedule/*",
+  "POST /api/v2/schedule/*",
   "POST /api/v2/projects/*/pipeline-definitions/*/triggers",
   "PATCH /api/v2/projects/*/triggers/*",
+  "POST /api/v2/projects/*/triggers/*",
 ]
 level = "ask"
 
@@ -82,6 +88,7 @@ label = "Create or change a pipeline definition (which config a project runs)"
 match = [
   "POST /api/v2/projects/*/pipeline-definitions",
   "PATCH /api/v2/projects/*/pipeline-definitions/*",
+  "POST /api/v2/projects/*/pipeline-definitions/*",
 ]
 level = "ask"
 
@@ -107,6 +114,7 @@ match = [
   "POST /api/v2/project/*/*/envvar",
   "POST /api/v2/project/*/*/*/envvar",
   "PUT /api/v2/context/*/environment-variable/*",
+  "POST /api/v2/context/*/environment-variable/*",
   "POST /api/v1.1/project/*/envvar",
   "POST /api/v1.1/project/*/*/envvar",
   "POST /api/v1.1/project/*/*/*/envvar",
@@ -135,8 +143,11 @@ id = "project-settings"
 label = "Change a project's advanced settings"
 match = [
   "PATCH /api/v2/project/*/settings",
+  "POST /api/v2/project/*/settings",
   "PATCH /api/v2/project/*/*/settings",
+  "POST /api/v2/project/*/*/settings",
   "PATCH /api/v2/project/*/*/*/settings",
+  "POST /api/v2/project/*/*/*/settings",
 ]
 level = "ask"
 
@@ -145,7 +156,11 @@ id = "oidc-claims"
 label = "Change the custom claims in CircleCI's OIDC tokens for an organization or project"
 match = [
   "PATCH /api/v2/org/*/oidc-custom-claims",
+  "POST /api/v2/org/*/oidc-custom-claims",
   "PATCH /api/v2/org/*/project/*/oidc-custom-claims",
+  "POST /api/v2/org/*/project/*/oidc-custom-claims",
+  "DELETE /api/v2/org/*/oidc-custom-claims",
+  "DELETE /api/v2/org/*/project/*/oidc-custom-claims",
 ]
 level = "ask"
 
@@ -154,5 +169,5 @@ level = "ask"
 [[rule]]
 id = "remove-context-restriction"
 label = "Remove a restriction on who can use a context"
-match = ["DELETE /api/v2/context/*/restrictions/*"]
+match = ["DELETE /api/v2/context/*/restrictions/*", "POST /api/v2/context/*/restrictions/*"]
 level = "ask"

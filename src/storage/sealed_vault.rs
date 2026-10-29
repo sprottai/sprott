@@ -546,6 +546,29 @@ pub struct RekeyProof {
     pub membership_hash: Vec<u8>,
 }
 
+impl RekeyProof {
+    /// Whether `sig` is a valid signature over [`crate::identity::rekey_sig_input`]
+    /// by the published cred key of `signer_id` ([`KeysetUik::signer_key`]).
+    /// Whether that signer may re-key is the caller's check.
+    pub(crate) fn signature_valid(&self, uik: &KeysetUik, vault_id: &str) -> bool {
+        let Ok(sig) = <[u8; 64]>::try_from(self.sig.as_slice()) else {
+            return false;
+        };
+        let Some(signer_pub) = uik.signer_key(&self.signer_id) else {
+            return false;
+        };
+        let input = crate::identity::rekey_sig_input(
+            vault_id,
+            self.generation,
+            &self.k_commitment,
+            &self.signer_id,
+            self.membership_len,
+            &self.membership_hash,
+        );
+        crate::identity::verify(&signer_pub, &input, &sig)
+    }
+}
+
 /// An owner-signed delegation event — the any-owner, issuance-time-authority half
 /// of the owner-set fold (design/identity-uik-aik.md §4.3,
 /// delegation-log-impl-spec.md §1.2). Appended to [`KeysetUik::delegation_log`]
@@ -701,6 +724,18 @@ pub struct KeysetUik {
     /// role fold alone. Local only (never pushed).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub approver_cids: BTreeMap<String, String>,
+}
+
+impl KeysetUik {
+    /// The signing pubkey of the published cred whose self-certifying id is
+    /// `signer_id`, or `None` when no cred carries one.
+    pub(crate) fn signer_key(&self, signer_id: &str) -> Option<[u8; 32]> {
+        self.creds.values().find_map(|c| {
+            let k = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
+            (crate::identity::derive_id(crate::identity::IdKind::User, &k) == signer_id)
+                .then_some(k)
+        })
+    }
 }
 
 /// A one-way commitment to a content key for a re-key event: `SHA-256(domain ‖
@@ -864,13 +899,7 @@ fn verify_record_sidecar_sig(
     // Resolve the signer's pubkey from the published keyset creds and bind it to the
     // claimed `signer_id` (self-certifying: id = fold of pubkey). A server-minted
     // key isn't in the keyset (it can't add one with a valid K-seal) → rejected.
-    let uik = keyset.uik.as_ref()?;
-    let sign_pub_vec = uik.creds.values().map(|c| &c.sig_pub).find(|pk| {
-        <[u8; 32]>::try_from(pk.as_slice())
-            .map(|k| crate::identity::derive_id(crate::identity::IdKind::User, &k) == signer_id)
-            .unwrap_or(false)
-    })?;
-    let sign_pub: [u8; 32] = sign_pub_vec.as_slice().try_into().ok()?;
+    let sign_pub = keyset.uik.as_ref()?.signer_key(signer_id)?;
     let input = crate::identity::record_signature_input(
         record_type,
         item_id_raw,
@@ -940,8 +969,7 @@ fn fold_agent_record(
                 .get("owner")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let is_owner =
-                membership.get(&sid) == Some(&crate::storage::plaintext::MemberRole::Admin);
+            let is_owner = membership.get(&sid).is_some_and(|r| r.is_admin());
             if is_owner || sid == owner {
                 Some(body)
             } else {
@@ -991,7 +1019,7 @@ fn fold_owner_config_record(
         MembershipTrust::Untrusted => None,
         MembershipTrust::NoUik => Some(body),
         MembershipTrust::Verified(membership) => {
-            if membership.get(&sid) == Some(&crate::storage::plaintext::MemberRole::Admin) {
+            if membership.get(&sid).is_some_and(|r| r.is_admin()) {
                 Some(body)
             } else {
                 None
@@ -1071,10 +1099,7 @@ fn unwrap_verified_config(
             // owner-set. An unsigned legacy-raw body is dropped (a K-holding
             // member could have written it).
             MembershipTrust::Verified(membership) => match signer {
-                Some(signer_id)
-                    if membership.get(&signer_id)
-                        == Some(&crate::storage::plaintext::MemberRole::Admin) =>
-                {
+                Some(signer_id) if membership.get(&signer_id).is_some_and(|r| r.is_admin()) => {
                     Some(data)
                 }
                 _ => None,
@@ -1201,19 +1226,6 @@ fn verify_rekey_proof(
     if proof.k_commitment.as_slice() != rekey_commitment(content_key).as_slice() {
         return false;
     }
-    let Ok(sig) = <[u8; 64]>::try_from(proof.sig.as_slice()) else {
-        return false;
-    };
-    // The signer must be a PUBLISHED member key whose id matches the claimed
-    // signer (C.1 anchor) — a backend-minted key isn't in the keyset.
-    let signer_pub: Option<[u8; 32]> = uik.creds.values().find_map(|c| {
-        let a = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
-        (crate::identity::derive_id(crate::identity::IdKind::User, &a) == proof.signer_id)
-            .then_some(a)
-    });
-    let Some(signer_pub) = signer_pub else {
-        return false;
-    };
     // The signer must be an ADMIN in the verified role set (D). (`is_admin`, not a
     // pattern: a legacy `"owner"` grant reads as `LegacyOwner`, also an admin.)
     let admin = membership
@@ -1222,15 +1234,9 @@ fn verify_rekey_proof(
     if !admin {
         return false;
     }
-    let input = crate::identity::rekey_sig_input(
-        vault_id,
-        proof.generation,
-        &proof.k_commitment,
-        &proof.signer_id,
-        proof.membership_len,
-        &proof.membership_hash,
-    );
-    crate::identity::verify(&signer_pub, &input, &sig)
+    // Signed under a PUBLISHED member key whose id matches the claimed signer
+    // (C.1 anchor) — a backend-minted key isn't in the keyset.
+    proof.signature_valid(uik, vault_id)
 }
 
 /// Membership anti-rollback check (delegation-log-review-findings.md C2): the current
@@ -1663,11 +1669,56 @@ fn owner_config_tombstone_honored(
                 sig,
                 signer,
             )
-            .is_some_and(|sid| {
-                membership.get(&sid) == Some(&crate::storage::plaintext::MemberRole::Admin)
-            })
+            .is_some_and(|sid| membership.get(&sid).is_some_and(|r| r.is_admin()))
         }
     }
+}
+
+/// How an owner-config row reads under `trust`: a tombstone by
+/// [`owner_config_tombstone_honored`], a live body by
+/// [`fold_owner_config_record`]. `None` = not honored; `Some(None)` = an
+/// honored tombstone; `Some(Some(data))` = honored live data. `ns` and
+/// `record_type` are those of the opened record.
+#[allow(clippy::too_many_arguments)]
+fn honored_owner_config(
+    stored: &StoredItem,
+    keyset: &Keyset,
+    vault_id: &str,
+    item_id_raw: &[u8],
+    ns: ItemNs,
+    record_type: &str,
+    tombstone: bool,
+    body: serde_json::Value,
+    trust: &MembershipTrust,
+) -> Option<Option<serde_json::Value>> {
+    if tombstone {
+        return owner_config_tombstone_honored(
+            stored.sig.as_deref(),
+            stored.signer.as_deref(),
+            &stored.ct,
+            keyset,
+            vault_id,
+            item_id_raw,
+            record_type,
+            stored.version,
+            trust,
+        )
+        .then_some(None);
+    }
+    fold_owner_config_record(
+        stored.sig.as_deref(),
+        stored.signer.as_deref(),
+        &stored.ct,
+        keyset,
+        vault_id,
+        item_id_raw,
+        ns,
+        record_type,
+        stored.version,
+        body,
+        trust,
+    )
+    .map(Some)
 }
 
 /// LEGACY: how the native record at one key reads, for the migration.
@@ -2011,34 +2062,6 @@ impl PerItemVault {
             .insert::<WebAuthn>(&cid_bytes, &pk)
             .map_err(|e| AppError::Internal(format!("registry insert: {}", e)))?;
         Ok(())
-    }
-
-    /// Drop every credential seal belonging to member `user_id` (offboarding /
-    /// re-key removes the departed member's access; SM §3.2). No-op on a v1
-    /// keyset. Returns the number of credential seals removed.
-    pub fn remove_uik_member(&mut self, user_id: &str) -> usize {
-        let Some(uik) = self.keyset.uik.as_mut() else {
-            return 0;
-        };
-        let before = uik.creds.len();
-        uik.creds.retain(|_, c| c.user_id != user_id);
-        before - uik.creds.len()
-    }
-
-    /// The current keyset row version for `cid_b64` — the analogue of
-    /// [`item_version`] for the keyset (there is no per-row version stored today,
-    /// so this is a placeholder used only by tests / future CAS). The keyset row
-    /// version lives cloud-side (`vault_keys.version`); the daemon adopts a row
-    /// whenever its pulled version exceeds what it last saw for that cid, tracked
-    /// by the caller (see `sync::pull_keys`), not on-disk.
-    pub fn has_credential(&self, cid_b64: &str) -> bool {
-        let Ok(cid_bytes) = decode_credential_id(cid_b64) else {
-            return false;
-        };
-        self.keyset
-            .credentials
-            .iter()
-            .any(|c| c.credential_id == cid_bytes)
     }
 
     /// The current CAS version of item `(ns, name)`, or `0` if absent — i.e.
@@ -2967,7 +2990,7 @@ impl PerItemVault {
             // A junk / non-owner event must NOT consume the seq slot (else it could
             // suppress a legitimate same-seq event — the dup guard would then drop the
             // real one), so `last_seq` advances ONLY AFTER full validation below.
-            if map.get(&e.granter_id) != Some(&MemberRole::Admin) {
+            if !map.get(&e.granter_id).is_some_and(|r| r.is_admin()) {
                 continue;
             }
             // The granter's verifying key rides INLINE and is SELF-CERTIFYING: it must
@@ -3000,7 +3023,8 @@ impl PerItemVault {
             };
             match e.op.as_str() {
                 "remove" => {
-                    if map.get(&e.subject_id) == Some(&MemberRole::Admin) && admin_count(&map) <= 1
+                    if map.get(&e.subject_id).is_some_and(|r| r.is_admin())
+                        && admin_count(&map) <= 1
                     {
                         continue; // last-admin guard: never empty the admin set
                     }
@@ -3009,7 +3033,7 @@ impl PerItemVault {
                 "set" => {
                     // A demote (admin → member) of the last admin would empty it → skip.
                     if !e.role.is_admin()
-                        && map.get(&e.subject_id) == Some(&MemberRole::Admin)
+                        && map.get(&e.subject_id).is_some_and(|r| r.is_admin())
                         && admin_count(&map) <= 1
                     {
                         continue;
@@ -3169,28 +3193,22 @@ impl PerItemVault {
                     // (sidecar type = the namespace). A tombstone counts too:
                     // it removes its key, over the legacy row.
                     Read::OwnerSignedWithKeysetNativeWins => {
-                        let ty = sig_type.as_deref().unwrap_or("");
-                        if !live {
-                            if owner_config_tombstone_honored(
-                                stored.sig.as_deref(),
-                                stored.signer.as_deref(),
-                                &stored.ct,
-                                &self.keyset,
-                                vault_id,
-                                &raw,
-                                ty,
-                                stored.version,
-                                &trust,
-                            ) {
-                                config.native(payload.ns, name, None);
-                            }
-                            return Ok(());
-                        }
-                        match owner_config(payload.body) {
-                            Some(data) => config.native(payload.ns, name, Some(data)),
-                            None => {
+                        match honored_owner_config(
+                            stored,
+                            &self.keyset,
+                            vault_id,
+                            &raw,
+                            payload.ns,
+                            sig_type.as_deref().unwrap_or(""),
+                            !live,
+                            payload.body,
+                            &trust,
+                        ) {
+                            Some(data) => config.native(payload.ns, name, data),
+                            None if live => {
                                 tracing::warn!(vault = %vault_id, ns = %payload.ns.as_str(), "fold: dropping owner-config — unauthorized/invalid owner signature")
                             }
+                            None => {}
                         }
                     }
                     _ if !live => {}
@@ -3437,34 +3455,18 @@ impl PerItemVault {
                 let ty = crate::storage::item::rule(ns, name)
                     .and_then(|r| r.signature_type(name))
                     .unwrap_or("");
-                if payload.is_tombstone() {
-                    owner_config_tombstone_honored(
-                        stored.sig.as_deref(),
-                        stored.signer.as_deref(),
-                        &stored.ct,
-                        &self.keyset,
-                        vault_id,
-                        &raw,
-                        ty,
-                        stored.version,
-                        trust,
-                    )
-                } else {
-                    fold_owner_config_record(
-                        stored.sig.as_deref(),
-                        stored.signer.as_deref(),
-                        &stored.ct,
-                        &self.keyset,
-                        vault_id,
-                        &raw,
-                        ns,
-                        ty,
-                        stored.version,
-                        payload.body,
-                        trust,
-                    )
-                    .is_some()
-                }
+                honored_owner_config(
+                    stored,
+                    &self.keyset,
+                    vault_id,
+                    &raw,
+                    ns,
+                    ty,
+                    payload.is_tombstone(),
+                    payload.body,
+                    trust,
+                )
+                .is_some()
             };
         if honored {
             NativeKey::Decided {
@@ -3603,34 +3605,20 @@ impl PerItemVault {
                 return Some(false);
             }
             let ty = r.signature_type(&payload.name).unwrap_or("");
-            Some(if payload.is_tombstone() {
-                owner_config_tombstone_honored(
-                    stored.sig.as_deref(),
-                    stored.signer.as_deref(),
-                    &stored.ct,
-                    &self.keyset,
-                    vault_id,
-                    &raw,
-                    ty,
-                    stored.version,
-                    &trust,
-                )
-            } else {
-                fold_owner_config_record(
-                    stored.sig.as_deref(),
-                    stored.signer.as_deref(),
-                    &stored.ct,
+            Some(
+                honored_owner_config(
+                    stored,
                     &self.keyset,
                     vault_id,
                     &raw,
                     payload.ns,
                     ty,
-                    stored.version,
+                    payload.is_tombstone(),
                     payload.body,
                     &trust,
                 )
-                .is_some()
-            })
+                .is_some(),
+            )
         };
         if read(local) != Some(true) {
             return None;
@@ -4743,11 +4731,8 @@ pub(crate) mod tests {
         let opened = ruik.open_k(vid, &entry.k_encapped, &entry.k_ct).unwrap();
         assert_eq!(&opened[..], &k[..]);
 
-        // An unknown credential has no seal; offboarding drops the member's rows.
+        // An unknown credential has no seal.
         assert!(loaded.uik_cred("unknown-cid").is_none());
-        let mut pv2 = loaded;
-        assert_eq!(pv2.remove_uik_member(&uik.user_id()), 1);
-        assert!(pv2.uik_cred(&cid_b64).is_none());
     }
 
     #[test]

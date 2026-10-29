@@ -42,6 +42,9 @@ match = [
   "GET /v1/projects/*/postgrest",
   "GET /v1/projects/*/pgsodium",
   "GET /v1/branches/*",
+  # The pgbouncer config's connection_string isn't documented as carrying the
+  # placeholder the pooler's does: gated until shown masked.
+  "GET /v1/projects/*/config/database/pgbouncer",
 ]
 level = "ask-always"
 

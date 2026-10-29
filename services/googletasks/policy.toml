@@ -13,3 +13,9 @@ id = "delete-tasklist"
 label = "Delete a task list (drops all its tasks)"
 match = "DELETE /tasks/v1/users/@me/lists/*"
 level = "ask"
+
+[[rule]]
+id = "clear-tasks"
+label = "Clear all completed tasks from a list"
+match = "POST /tasks/v1/lists/*/clear"
+level = "ask"

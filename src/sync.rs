@@ -460,7 +460,6 @@ pub async fn sync_vault_now(state: &Arc<AppState>, vault_id: &str) -> Result<Syn
     // already-synced rows 409-skip without blocking the rest.
     push_keys_best_effort(state, vault_id).await;
     push_items_best_effort(state, vault_id).await;
-    deliver_team_marks(state, vault_id).await;
     Ok(SyncOutcome { pulled, connects })
 }
 
@@ -505,95 +504,6 @@ pub async fn resync_membership_now(state: &Arc<AppState>, vault_id: &str) -> Res
         tracing::info!(vault = %vault_id, adopted = n, "membership resync (self-heal): backfilled keyset");
     }
     Ok(n)
-}
-
-/// Drain the post-migration cloud marks for one vault (team §8.3/§5.15):
-/// the owner lock-list registration (config-ids) and the one-way `format=2`
-/// ratchet. Both idempotent server-side; delivered only after the push above
-/// so the format gate never fronts rows that aren't up yet. Best-effort —
-/// stays queued for the next round on any failure.
-async fn deliver_team_marks(state: &Arc<AppState>, vault_id: &str) {
-    let cfg = match crate::cli::active::load() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let Some(cloud) = cfg.cloud_backend.as_deref().filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let Some(dk) = device_key() else { return };
-    let Some(runtime) = state.runtime_if_present(vault_id) else {
-        return;
-    };
-    let has_ids = {
-        let ids = runtime.pending_config_ids.lock().unwrap();
-        (!ids.is_empty()).then(|| ids.clone())
-    };
-    let has_format = runtime
-        .pending_format_mark
-        .load(std::sync::atomic::Ordering::Acquire);
-    if has_ids.is_none() && !has_format {
-        return;
-    }
-    let Ok(client) = crate::cli::egress_proxy::client(Duration::from_secs(10)) else {
-        return;
-    };
-    let cloud = cloud.trim_end_matches('/');
-    if let Some(ids) = has_ids {
-        let url = format!("{}/v/{}/config-ids", cloud, vault_id);
-        let body = serde_json::json!({ "ids": ids });
-        match client
-            .post(&url)
-            .bearer_auth(&dk)
-            .dik_pop("POST", &url, &serde_json::to_vec(&body).unwrap_or_default())
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => {
-                runtime.pending_config_ids.lock().unwrap().clear();
-                tracing::info!(vault = %vault_id, "owner lock-list registered");
-            }
-            Ok(r) => {
-                let status = r.status();
-                if handle_refusal_response(state, vault_id, r).await {
-                    return;
-                }
-                tracing::debug!(vault = %vault_id, status = %status, "config-ids register deferred")
-            }
-            Err(e) => tracing::debug!(vault = %vault_id, "config-ids register failed: {}", e),
-        }
-    }
-    if has_format {
-        let url = format!("{}/v/{}/format", cloud, vault_id);
-        let body = serde_json::json!({ "format": 2 });
-        match client
-            .patch(&url)
-            .bearer_auth(&dk)
-            .dik_pop(
-                "PATCH",
-                &url,
-                &serde_json::to_vec(&body).unwrap_or_default(),
-            )
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => {
-                runtime
-                    .pending_format_mark
-                    .store(false, std::sync::atomic::Ordering::Release);
-                tracing::info!(vault = %vault_id, "vault marked format=2 (unified addressing)");
-            }
-            Ok(r) => {
-                let status = r.status();
-                if handle_refusal_response(state, vault_id, r).await {
-                    return;
-                }
-                tracing::debug!(vault = %vault_id, status = %status, "format mark deferred")
-            }
-            Err(e) => tracing::debug!(vault = %vault_id, "format mark failed: {}", e),
-        }
-    }
 }
 
 /// True when this daemon syncs its vaults with a cloud (a backend is
@@ -3131,7 +3041,6 @@ async fn confirm_unreadable_after_refresh(state: &Arc<AppState>, vault_id: &str)
 //   PUT  /v/{vid}/items/{item_id}   { base_version?, version, ct } → CAS
 //                                   → 200 {version,seq} | 409 {currentVersion}
 //   GET  /v/{vid}/items/wait?since=<seq> (daemon long-poll)
-//   DELETE /v/{vid}/items/{item_id}?gc_version=<v> (tombstone GC)
 //
 // PULL adopts server truth (§5): a newer version replaces the local row, a
 // tombstone is stored (fold_view drops it), the cursor advances to max(seq).
@@ -3703,39 +3612,6 @@ pub async fn push_item(
             })
         }
         other => Err(format!("item PUT HTTP {}", other)),
-    }
-}
-
-/// Hard-delete a tombstone row that has fully propagated (GC, §6): DELETE
-/// `/items/{id}?gc_version=<v>`. Idempotent; only removes the exact version the
-/// caller saw so it never drops a newer row that replaced the tombstone.
-pub async fn gc_item(
-    cloud: &str,
-    vault: &str,
-    device_key: &str,
-    item_id: &str,
-    gc_version: u64,
-) -> Result<(), String> {
-    let url = format!(
-        "{}/v/{}/items/{}?gc_version={}",
-        cloud.trim_end_matches('/'),
-        vault,
-        item_id,
-        gc_version
-    );
-    let client = crate::cli::egress_proxy::client(Duration::from_secs(15))
-        .map_err(|e| format!("http client init: {}", e))?;
-    let resp = client
-        .delete(&url)
-        .bearer_auth(device_key)
-        .dik_pop("DELETE", &url, &[])
-        .send()
-        .await
-        .map_err(|e| format!("reach {}: {}", cloud, e))?;
-    if resp.status().is_success() || resp.status().as_u16() == 404 {
-        Ok(())
-    } else {
-        Err(format!("item GC DELETE HTTP {}", resp.status()))
     }
 }
 
@@ -6213,41 +6089,36 @@ fn adopt_rekey_meta(
         .transpose()
         .map_err(|e| format!("membership_hash: {}", e))?
         .unwrap_or_default();
-    let Ok(sig) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
-        return Ok(()); // malformed signature → ignore (don't ratchet)
+    let candidate = pv_store::RekeyProof {
+        generation,
+        k_commitment,
+        sig: sig_bytes,
+        signer_id,
+        membership_len,
+        membership_hash,
     };
     // The signer must be an OWNER in the CURRENT folded owner-set. A K-rotation
     // (`generation` bump) is ORTHOGONAL to the role checkpoint (`role_epoch`) under
     // the two-counter model, so the owner-set is folded at the current role_epoch
     // (checkpoint ∘ delegation_log), NOT re-derived at the proposed `generation`. A
     // member's self-signed proof fails here (a member is not an owner).
-    if pv.fold_roles(vault_id).get(&signer_id)
-        != Some(&crate::storage::plaintext::MemberRole::Admin)
+    if !pv
+        .fold_roles(vault_id)
+        .get(&candidate.signer_id)
+        .is_some_and(|r| r.is_admin())
     {
         return Ok(());
     }
-    // The signer's published sig pubkey (C.1 anchor): a keyset cred whose derived
-    // id matches `signer_id` — a backend-minted key isn't in the keyset.
-    let signer_pub: Option<[u8; 32]> = pv.keyset.uik.as_ref().and_then(|uik| {
-        uik.creds.values().find_map(|c| {
-            let a = <[u8; 32]>::try_from(c.sig_pub.as_slice()).ok()?;
-            (crate::identity::derive_id(crate::identity::IdKind::User, &a) == signer_id)
-                .then_some(a)
-        })
-    });
-    let Some(signer_pub) = signer_pub else {
+    // Signed under the signer's published sig pubkey (C.1 anchor): a keyset cred
+    // whose derived id matches `signer_id` — a backend-minted key isn't in the
+    // keyset. A malformed or non-verifying signature → ignore (don't ratchet).
+    if !pv
+        .keyset
+        .uik
+        .as_ref()
+        .is_some_and(|uik| candidate.signature_valid(uik, vault_id))
+    {
         return Ok(());
-    };
-    let input = crate::identity::rekey_sig_input(
-        vault_id,
-        generation,
-        &k_commitment,
-        &signer_id,
-        membership_len,
-        &membership_hash,
-    );
-    if !crate::identity::verify(&signer_pub, &input, &sig) {
-        return Ok(()); // signature does not verify → forged bump → ignore
     }
     // Verified owner-signed proof at `G`: NOW ratchet forward + store the proof.
     let uik = pv
@@ -6255,14 +6126,7 @@ fn adopt_rekey_meta(
         .uik
         .get_or_insert_with(pv_store::KeysetUik::default);
     uik.generation = generation;
-    uik.rekey_proof = Some(pv_store::RekeyProof {
-        generation,
-        k_commitment,
-        sig: sig_bytes,
-        signer_id,
-        membership_len,
-        membership_hash,
-    });
+    uik.rekey_proof = Some(candidate);
     Ok(())
 }
 
@@ -6709,10 +6573,6 @@ mod peritem_tests {
         state.note_catch_up(vault, "x");
         state.note_rotation_pending(vault, "conn", "role", b"old", "token", "x");
         let runtime = state.runtime(vault).unwrap();
-        runtime
-            .pending_format_mark
-            .store(true, std::sync::atomic::Ordering::Release);
-        runtime.pending_config_ids.lock().unwrap().push("id".into());
         state.note_loopback_pending("oauth-state", vault, "conn", 8765);
         state.oauth_mark_reauth(vault, "conn");
         runtime

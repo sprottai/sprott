@@ -5,6 +5,18 @@ write = "allow"
 [[rule]]
 id = "expensive-model"
 label = "Use expensive model"
-match = ["POST /v1/chat/completions", "POST /v1/responses", "POST /v1/completions"]
+match = [
+  "POST /v1/chat/completions", "POST /v1/responses", "POST /v1/completions",
+  "POST /v1/threads/runs", "POST /v1/threads/*/runs",
+  "POST /v1/assistants", "POST /v1/assistants/*",
+]
 when = "['o3', 'o4-mini', 'gpt-4.5'].exists(p, vars.model.startsWith(p) || vars.model.startsWith('ft:' + p))"
+level = "ask"
+
+# A batch job names its model per line inside the uploaded file, which this
+# request doesn't carry, so the run itself asks.
+[[rule]]
+id = "batch-run"
+label = "Run a batch job (its model is chosen in the uploaded file)"
+match = "POST /v1/batches"
 level = "ask"

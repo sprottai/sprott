@@ -53,14 +53,50 @@ level = "ask-always"
 
 [[rule]]
 id = "set-branch-protection"
-label = "Change branch protection"
-match = ["PUT /repos/*/*/branches/**", "PUT /repositories/*/branches/**"]
+label = "Change branch protection (or rename a branch)"
+# Protection settings take PUT, PATCH and POST on sub-resources
+# (required_pull_request_reviews, restrictions/users, enforce_admins, …);
+# POST also renames a branch (…/rename), which this gates too.
+match = [
+  "PUT /repos/*/*/branches/**", "PUT /repositories/*/branches/**",
+  "PATCH /repos/*/*/branches/**", "PATCH /repositories/*/branches/**",
+  "POST /repos/*/*/branches/**", "POST /repositories/*/branches/**",
+]
 level = "ask-always"
 
 [[rule]]
 id = "remove-branch-protection"
 label = "Remove branch protection"
 match = ["DELETE /repos/*/*/branches/**", "DELETE /repositories/*/branches/**"]
+level = "ask-always"
+
+[[rule]]
+id = "change-ruleset"
+label = "Create, change or delete a ruleset"
+match = [
+  "POST /repos/*/*/rulesets", "PUT /repos/*/*/rulesets/*", "DELETE /repos/*/*/rulesets/*",
+  "POST /repositories/*/rulesets", "PUT /repositories/*/rulesets/*", "DELETE /repositories/*/rulesets/*",
+  "POST /orgs/*/rulesets", "PUT /orgs/*/rulesets/*", "DELETE /orgs/*/rulesets/*",
+  "POST /organizations/*/rulesets", "PUT /organizations/*/rulesets/*", "DELETE /organizations/*/rulesets/*",
+]
+level = "ask-always"
+
+[[rule]]
+id = "change-org-access"
+label = "Change who is in an organization or a team, or a team's access to a repository"
+match = [
+  "PUT /orgs/*/memberships/*", "DELETE /orgs/*/memberships/*", "DELETE /orgs/*/members/*",
+  "POST /orgs/*/invitations",
+  "PUT /orgs/*/outside_collaborators/*", "DELETE /orgs/*/outside_collaborators/*",
+  "PUT /orgs/*/teams/*/memberships/*", "DELETE /orgs/*/teams/*/memberships/*",
+  "PUT /orgs/*/teams/*/repos/*/*", "DELETE /orgs/*/teams/*/repos/*/*",
+  "PUT /teams/*/repos/*/*", "DELETE /teams/*/repos/*/*",
+  "PUT /organizations/*/memberships/*", "DELETE /organizations/*/memberships/*", "DELETE /organizations/*/members/*",
+  "POST /organizations/*/invitations",
+  "PUT /organizations/*/outside_collaborators/*", "DELETE /organizations/*/outside_collaborators/*",
+  "PUT /organizations/*/teams/*/memberships/*", "DELETE /organizations/*/teams/*/memberships/*",
+  "PUT /organizations/*/teams/*/repos/*/*", "DELETE /organizations/*/teams/*/repos/*/*",
+]
 level = "ask-always"
 
 [[rule]]
@@ -73,25 +109,40 @@ level = "ask-always"
 [[rule]]
 id = "add-webhook"
 label = "Add a webhook"
-match = ["POST /repos/*/*/hooks", "POST /repositories/*/hooks"]
+match = ["POST /repos/*/*/hooks", "POST /repositories/*/hooks", "POST /orgs/*/hooks", "POST /organizations/*/hooks"]
 level = "ask-always"
 
 [[rule]]
 id = "edit-webhook"
 label = "Edit a webhook"
-match = ["PATCH /repos/*/*/hooks/*", "PATCH /repositories/*/hooks/*", "POST /repos/*/*/hooks/*", "POST /repositories/*/hooks/*"]
+match = [
+  "PATCH /repos/*/*/hooks/*", "PATCH /repositories/*/hooks/*", "POST /repos/*/*/hooks/*", "POST /repositories/*/hooks/*",
+  "PATCH /repos/*/*/hooks/*/config", "PATCH /repositories/*/hooks/*/config",
+  "PATCH /orgs/*/hooks/*", "PATCH /orgs/*/hooks/*/config", "PATCH /organizations/*/hooks/*", "PATCH /organizations/*/hooks/*/config",
+]
 level = "ask-always"
 
 [[rule]]
 id = "set-actions-secret"
-label = "Set an Actions secret"
-match = ["PUT /repos/*/*/actions/secrets/*", "PUT /repositories/*/actions/secrets/*"]
+label = "Set a repository secret (Actions, Dependabot, Codespaces, agents, environments)"
+# `/repos/*/*/*/secrets/*`: the third segment is actions, dependabot,
+# codespaces or agents; each kind is read by code that runs for the repo.
+match = [
+  "PUT /repos/*/*/*/secrets/*", "PUT /repositories/*/*/secrets/*",
+  "PUT /repos/*/*/environments/*/secrets/*", "PUT /repositories/*/environments/*/secrets/*",
+]
 level = "ask-always"
 
 [[rule]]
 id = "set-org-actions-secret"
-label = "Set an org Actions secret"
-match = ["PUT /orgs/*/actions/secrets/*", "PUT /organizations/*/actions/secrets/*"]
+label = "Set an org or user secret, or which repositories can read it"
+# `/orgs/*/*/secrets/*`: actions, dependabot, codespaces or agents. The
+# `repositories` sub-paths decide which repositories can read the secret.
+match = [
+  "PUT /orgs/*/*/secrets/*", "PUT /orgs/*/*/secrets/*/repositories", "PUT /orgs/*/*/secrets/*/repositories/*",
+  "PUT /organizations/*/*/secrets/*", "PUT /organizations/*/*/secrets/*/repositories", "PUT /organizations/*/*/secrets/*/repositories/*",
+  "PUT /user/codespaces/secrets/*", "PUT /user/codespaces/secrets/*/repositories", "PUT /user/codespaces/secrets/*/repositories/*",
+]
 level = "ask-always"
 
 [[rule]]
@@ -109,7 +160,12 @@ level = "ask-always"
 [[rule]]
 id = "register-runner"
 label = "Register a self-hosted runner"
-match = ["POST /repos/*/*/actions/runners/registration-token", "POST /repositories/*/actions/runners/registration-token"]
+match = [
+  "POST /repos/*/*/actions/runners/registration-token", "POST /repositories/*/actions/runners/registration-token",
+  "POST /repos/*/*/actions/runners/generate-jitconfig", "POST /repositories/*/actions/runners/generate-jitconfig",
+  "POST /orgs/*/actions/runners/registration-token", "POST /organizations/*/actions/runners/registration-token",
+  "POST /orgs/*/actions/runners/generate-jitconfig", "POST /organizations/*/actions/runners/generate-jitconfig",
+]
 level = "ask-always"
 
 # ── Deletions that are recoverable → ask once, cached for the window ──────────
@@ -128,10 +184,12 @@ level = "ask"
 # ── The same gates over GraphQL ──────────────────────────────────────────────
 # Mutation names from GitHub's public schema (docs.github.com/public/fpt/
 # schema.docs.graphql, 2026-10-27). Each is the GraphQL spelling of a REST
-# gate above: branch protection and rulesets, who can access, deleting a ref.
+# gate above: branch protection and rulesets, who can access, deleting a ref
+# (`updateRefs` deletes a ref when its `afterOid` is all zeros, and moves refs
+# in bulk otherwise).
 [[rule]]
 id = "graphql-gated-mutations"
 label = "Change branch protection or rulesets, change who can access, or delete a branch (GraphQL)"
 match = "POST /graphql"
-when = "vars.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef'])"
+when = "vars.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef', 'updateRefs', 'addEnterpriseOrganizationMember'])"
 level = "ask-always"

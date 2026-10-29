@@ -1,6 +1,6 @@
 [package]
 name = "sprott"
-version = "2.0.3"
+version = "2.0.4"
 edition = "2021"
 description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
 # Functional Source License 1.1 (Apache-2.0 future). FSL is not an SPDX id,
@@ -104,7 +104,7 @@ percent-encoding = "2"
 # Policy `when` conditions are CEL (Common Expression Language, the rule
 # language of Kubernetes admission policies, Envoy RBAC and Google IAM), via
 # cel-rust.
-cel = { version = "0.15", default-features = false }
+cel = { version = "0.15", default-features = false, features = ["regex"] }
 urlencoding = "2"
 
 # Misc

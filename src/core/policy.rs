@@ -569,6 +569,17 @@ pub(crate) fn match_pattern_problem(pattern: &str) -> Option<String> {
         ));
     }
     let segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    // `*` and `**` are whole segments: `v*` would be the literal text "v*"
+    // and never match `v9`.
+    if let Some(seg) = segments
+        .iter()
+        .find(|s| s.contains('*') && **s != "*" && **s != "**")
+    {
+        return Some(format!(
+            "match '{}': '{}' puts '*' inside a segment; '*' matches only a whole segment",
+            pattern, seg
+        ));
+    }
     if let Some((_, init)) = segments.split_last() {
         if init.contains(&"**") {
             return Some(format!(
@@ -1515,7 +1526,8 @@ mod tests {
             assert_eq!(match_pattern_problem(good), None, "{good}");
         }
         for bad in [
-            "x", "GET x", "/a b", "/x?y=1", "/x#f", "/a/**/b", "GE T /x", "",
+            "x", "GET x", "/a b", "/x?y=1", "/x#f", "/a/**/b", "GE T /x", "", "DELETE /v*/projects/*",
+            "/a/b*", "/a/***",
         ] {
             assert!(match_pattern_problem(bad).is_some(), "{bad}");
         }
@@ -2110,8 +2122,10 @@ mod tests {
         assert!(Condition::parse("vars.amount == bare").is_none());
         assert!(Condition::parse("vars['amount'] > 1").is_none());
         // A function this build lacks is refused, not left to fail on every request.
-        assert!(Condition::compile("vars.model.matches('^o3')").is_err());
         assert!(Condition::compile("vars.model.startswith('o3')").is_err());
+        assert!(Condition::compile("vars.model.lowerAscii() == 'o3'").is_err());
+        // `matches` is CEL's standard RE2 function (cel's `regex` feature).
+        assert!(Condition::compile("vars.model.matches('^o3')").is_ok());
         assert!(Condition::compile("vars.model.startsWith('o3')").is_ok());
         assert!(Condition::compile("size(vars.fields) > 0 && vars.fields.exists(f, f == 'a')").is_ok());
         // A type test, and a number sent as text read either way.
