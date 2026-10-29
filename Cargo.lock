@@ -3051,6 +3051,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "spake2",
+ "sprott-trust",
  "subtle",
  "sudp",
  "tempfile",
@@ -3069,6 +3070,19 @@ dependencies = [
  "uuid",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "sprott-trust"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "data-encoding",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sudp",
 ]
 
 [[package]]

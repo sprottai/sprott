@@ -1,0 +1,22 @@
+[package]
+name = "sprott-trust"
+version = "0.0.0"
+edition = "2021"
+description = "Sprott membership and signature rules, shared by the daemon and the console"
+# Same terms as the daemon: see the repository's LICENSE.
+license-file = "../../LICENSE"
+repository = "https://github.com/sprottai/sprott"
+publish = false
+
+# Pure only: this crate also builds for wasm32-unknown-unknown (the console).
+# No tokio, no network, no file system, no randomness.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = "2"
+sha2 = "0.10"
+base64 = "0.22"
+data-encoding = "2"
+# Only `sudp::canonical` (the JCS bytes a config signature covers): no
+# primitives, no WebAuthn.
+sudp = { version = "0.3.0", default-features = false }

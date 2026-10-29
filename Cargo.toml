@@ -17,7 +17,16 @@ repository = "https://github.com/sprottai/sprott"
 name = "sprott"
 path = "src/main.rs"
 
+# The root package stays the daemon. `crates/sprott-trust` holds the membership
+# and signature rules, pure so the console can run them as wasm.
+[workspace]
+members = ["crates/sprott-trust"]
+
 [dependencies]
+# Membership and signature rules (keyset types, role fold, row honoring,
+# signing inputs). Pure; re-exported at their old paths in this crate.
+sprott-trust = { path = "crates/sprott-trust" }
+
 # HTTP
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
