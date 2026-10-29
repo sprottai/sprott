@@ -13,7 +13,6 @@ type = "oauth2"
 provider = "google"
 scopes = [
   "https://www.googleapis.com/auth/presentations",
-  "https://www.googleapis.com/auth/presentations.readonly",
 ]
 refresh_token = "GOOGLE_SLIDES_REFRESH_TOKEN"
 
