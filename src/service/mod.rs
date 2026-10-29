@@ -2457,6 +2457,9 @@ secrets = ["GITHUB_TOKEN"]
             ("circleci", "DELETE", "/api/v2/org/o1/oidc-custom-claims", ""),
             ("circleci", "DELETE", "/api/v2/org/o1/project/p1/oidc-custom-claims", ""),
             ("googletasks", "POST", "/tasks/v1/lists/l1/clear", ""),
+            // CircleCI routes a POST with a form `_method` field to that method's handler.
+            ("circleci", "POST", "/api/v2/schedule/s1", "_method=PATCH"),
+            ("circleci", "POST", "/api/v2/org/o1/oidc-custom-claims", "_method=DELETE"),
         ] {
             assert_eq!(eval_compiled(service, method, path, body), AccessLevel::Ask, "{service} {method} {path}");
         }
