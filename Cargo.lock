@@ -2973,6 +2973,7 @@ dependencies = [
  "hyper-rustls",
  "iri-string",
  "jsonwebtoken",
+ "mime",
  "once_cell",
  "p256",
  "percent-encoding",

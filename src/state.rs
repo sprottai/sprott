@@ -2008,50 +2008,20 @@ impl AppState {
 
     /// The policy decision for a request, from a snapshot's policy inputs and
     /// this daemon's compiled services ([`crate::snapshot::PolicyInputs::decide`]):
-    /// `(effective level, what decided it, ttl seconds)`. Pure policy.
-    #[allow(clippy::too_many_arguments)]
+    /// `(effective level, what decided it, ttl seconds)`, or why the request
+    /// can't be read. Pure policy.
     pub fn evaluate_request_decision(
         &self,
         inputs: &crate::snapshot::PolicyInputs,
         connection_id: &str,
         service_id: &str,
-        method: &str,
-        path: &str,
-        body: Option<&str>,
-        vars: &crate::core::policy::VarMap,
-    ) -> (
-        crate::core::policy::AccessLevel,
-        crate::core::policy::DecidedBy,
-        Option<u64>,
-    ) {
-        inputs.decide(
-            &self.services,
-            connection_id,
-            service_id,
-            method,
-            path,
-            body,
-            vars,
-        )
+        request: &crate::core::request::Request<'_>,
+    ) -> Result<crate::core::policy::Decision, crate::core::request::Unreadable> {
+        inputs.decide(&self.services, connection_id, service_id, request)
     }
 
-    /// For a scoped request (`rs`: its matched `[requests]` shape), the first
-    /// of this connection's own policy edits that cannot be enforced as
-    /// written there ([`crate::snapshot::PolicyInputs::rule_problem`]). The
-    /// policy is sealed and written by the console, so this is where the
-    /// daemon holds the line.
-    #[allow(clippy::too_many_arguments)]
-    pub fn connection_rule_problem(
-        &self,
-        inputs: &crate::snapshot::PolicyInputs,
-        connection_id: &str,
-        service_id: &str,
-        method: &str,
-        path: &str,
-        rs: &crate::service::RequestScope,
-    ) -> Option<String> {
-        inputs.rule_problem(&self.services, connection_id, service_id, method, path, rs)
-    }
+    // `connection_rule_problem` went with `when` and `body` (step 3 covers
+    // condition reads).
 
     /// Keep why a change of `item_id` was not applied (see
     /// the vault runtime's sync notes).
@@ -2882,7 +2852,7 @@ mod tests {
         rules.insert(
             "big".to_string(),
             RuleConfig {
-                when: Some("vars.amount > 100".into()),
+                condition: Some(crate::core::policy::Condition::lenient("request.body.amount > 100")),
                 level: Some(AccessLevel::AskAlways),
                 ..RuleConfig::selecting("POST /pay")
             },
@@ -2914,13 +2884,22 @@ mod tests {
         state.unlock_vault(vid.to_string(), snapshot, zeroize::Zeroizing::new(Vec::new()));
         let fp = state.snapshot(vid).unwrap().fingerprint;
         let key_of = |agent: &str, method: &str, path: &str, host: &str, amount: Option<&str>| {
-            let mut vars = crate::core::policy::VarMap::new();
-            if let Some(a) = amount {
-                vars.insert("amount".into(), serde_json::from_str(a).unwrap());
-            }
+            let body = amount.map(|a| format!("{{\"amount\": {a}}}")).unwrap_or_default();
+            let request = crate::core::request::Request::new(
+                crate::core::request::RequestInput {
+                    method,
+                    path,
+                    host,
+                    body: Some(body.as_bytes()),
+                    ..Default::default()
+                },
+                crate::core::request::BodyFormat::Json,
+                Default::default(),
+            );
             let inputs = state.snapshot(vid).unwrap().inputs.clone();
-            let (level, by, _) =
-                state.evaluate_request_decision(&inputs, "shop", "shop", method, path, None, &vars);
+            let (level, by, _) = state
+                .evaluate_request_decision(&inputs, "shop", "shop", &request)
+                .unwrap();
             PermitKey::of(level, &by, false, agent, "shop", method, host, path, "", creds(&["K"]))
                 .unwrap()
         };
@@ -3024,15 +3003,8 @@ level = "allow"
                 custom: custom.clone(),
             };
             state
-                .evaluate_request_decision(
-                    &inputs,
-                    "acme",
-                    "acme",
-                    m,
-                    p,
-                    None,
-                    &crate::core::policy::VarMap::new(),
-                )
+                .evaluate_request_decision(&inputs, "acme", "acme", &crate::core::request::Request::bare(m, p))
+                .unwrap()
                 .0
         };
         // Global floor allow: the deny rule and the write default tighten;
@@ -3068,71 +3040,6 @@ level = "allow"
         assert_eq!(decide(&owner, "DELETE", "/v1/things"), AccessLevel::Deny);
     }
 
-    /// A connection's own rule edit that decides a scoped request on a field
-    /// its approval does not bind (a declared but unscoped var, or the body)
-    /// is reported for that connection only; a rule on a bound field is not.
-    #[test]
-    fn connection_rule_problem_flags_unbound_deciding_fields() {
-        use crate::core::policy::{AccessLevel, ConnectionPolicy, Policy, RuleConfig};
-        let def: crate::service::ServiceDef = crate::service::gate::admit_toml(
-            r#"
-[service]
-id = "shop"
-name = "Shop"
-hosts = ["api.shop.com"]
-secrets = ["SHOP_KEY"]
-[requests.purchase]
-method = "POST"
-path = "/buy"
-vars.amount = "/amount"
-vars.force  = { in = "query", at = "force" }
-scope = ["amount"]
-"#,
-        )
-        .unwrap();
-        let rs = def
-            .extract_request_scope("POST", "/buy", Some("force=1"), Some(br#"{"amount":5}"#))
-            .expect("shape matches");
-        let rule = |when: Option<&str>, body: Option<&str>| RuleConfig {
-            when: when.map(str::to_string),
-            body: body.map(crate::core::policy::BodyPattern::lenient),
-            level: Some(AccessLevel::Ask),
-            ..RuleConfig::selecting("POST /buy")
-        };
-        let state = test_state();
-        let problem = |rules: Vec<(&str, RuleConfig)>, conn: &str| {
-            let mut p = Policy::default();
-            p.connections.insert(
-                "shop".to_string(),
-                ConnectionPolicy {
-                    default: None,
-                    rules: rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
-                },
-            );
-            let inputs = PolicyInputs {
-                policy: p,
-                custom: Default::default(),
-            };
-            state.connection_rule_problem(&inputs, conn, "shop", "POST", "/buy", &rs)
-        };
-        assert_eq!(
-            problem(vec![("small", rule(Some("vars.amount < 10"), None))], "shop"),
-            None
-        );
-        let forced = vec![("forced", rule(Some("vars.force == 1"), None))];
-        let e = problem(forced.clone(), "shop").expect("unbound deciding field");
-        assert!(e.contains("'forced'") && e.contains("vars.force"), "{e}");
-        // Another connection of the vault has no such edit.
-        assert_eq!(problem(forced, "shop_2"), None);
-        assert!(problem(vec![("bodyish", rule(None, Some("gift")))], "shop").is_some());
-        // A protective deny on the body mints no approval: not refused.
-        let no_gifts = RuleConfig {
-            level: Some(AccessLevel::Deny),
-            ..rule(None, Some("gift"))
-        };
-        assert_eq!(problem(vec![("no_gifts", no_gifts)], "shop"), None);
-    }
-
     /// The policy fingerprint changes with any policy input and with nothing
     /// else: a vault definition counts by its policy and its `[requests]`
     /// shapes only.
@@ -3143,7 +3050,7 @@ scope = ["amount"]
             let src = format!(
                 "[service]\nid = \"acme\"\nname = \"Acme\"\nhosts = [{hosts}]\nsecrets = [\"ACME_KEY\"]\n\
                  [policy.levels]\nwrite = \"{write}\"\n\
-                 [requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.amount = \"/amount\"\nvars.to = \"/to\"\nscope = [{scope}]\n"
+                 [requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nscope = [{scope}]\n"
             );
             crate::service::gate::admit_toml(&src).unwrap()
         };
@@ -3154,25 +3061,25 @@ scope = ["amount"]
             }
             .fingerprint()
         };
-        let base = with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\""));
-        assert_eq!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        let base = with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"request.body.amount\""));
+        assert_eq!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"request.body.amount\"")));
         assert_eq!(
             base,
-            with(Policy::default(), def("\"api.acme.dev\", \"x.acme.dev\"", "ask", "\"amount\"")),
+            with(Policy::default(), def("\"api.acme.dev\", \"x.acme.dev\"", "ask", "\"request.body.amount\"")),
             "a definition's hosts are not policy"
         );
-        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask-always", "\"amount\"")));
-        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\", \"to\"")));
+        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask-always", "\"request.body.amount\"")));
+        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"request.body.amount\", \"request.body.to\"")));
         let mut timeout = Policy::default();
         timeout.timeout = Some(60);
-        assert_ne!(base, with(timeout, def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        assert_ne!(base, with(timeout, def("\"api.acme.dev\"", "ask", "\"request.body.amount\"")));
         let mut floor = Policy::default();
         floor.default = Some(Levels {
             read: Some(AccessLevel::Ask),
             write: None,
             ttl: None,
         });
-        assert_ne!(base, with(floor, def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        assert_ne!(base, with(floor, def("\"api.acme.dev\"", "ask", "\"request.body.amount\"")));
     }
 }
 

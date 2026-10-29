@@ -311,13 +311,6 @@ impl BrokerHandler {
             Some(Ok(d)) => Some(d),
             _ => body_bytes.as_deref(),
         };
-        // One lossy view serves BOTH the phantom scan and policy below, so a
-        // binary(ish) body is not a blind spot: rules evaluate against what is
-        // actually there. Forwarding still uses the untouched raw bytes.
-        // The body view feeds POLICY only (`[requests]` var extraction below).
-        // It is deliberately NOT scanned for phantoms: the body is not an
-        // injection site, so a phantom there is left inert (see the forward path).
-        let body_text: Option<String> = readable.map(|b| String::from_utf8_lossy(b).into_owned());
 
         // No phantom anywhere → forward untouched (rebuild body if we buffered).
         if phantoms.is_empty() {
@@ -648,86 +641,75 @@ impl BrokerHandler {
             }
         }
 
-        // ── 3. request scope + policy (Phase 2, design/request-scope.md) ─────
-        // Resolve the matching `[requests]` shape and extract its vars from the
-        // SAME buffered body (unified boundary) + the URL query. Feeds three
-        // consumers: the policy `when` predicate (`vars`), the request-bound
-        // permit identity (`scope_digest`), and the approval consent (via
-        // `req_scope` → captive_portal). Absent shape ⇒ empty vars + `""`
-        // digest = the Phase-1 path-only key, unchanged. A request that can't
-        // be read the standard way is refused here, before policy.
-        //
-        // Policy `body` rules see the body text plus its decoded JSON form
-        // (policy_body_view). Pure policy, from the snapshot's inputs: no
-        // approval is consulted here (step 6 is).
-        let policy_view = body_text
-            .as_deref()
-            .map(crate::core::policy::policy_body_view);
+        // ── 3. the request object + policy (request-model design §1) ────────
+        // The request as its definition reads it: the `[requests]` shape whose
+        // method, path and condition select it gives the body format and what
+        // an approval binds (its scope and what its consent reads); every
+        // rule's condition reads the same object. A value something reads
+        // that can't be read refuses the request here, before any decision,
+        // with the status a server would give it. Pure policy, from the
+        // snapshot's inputs: no approval is consulted here (step 6 is).
         let agent_prefix = self.agent_attribution().unwrap_or_default();
+        // `request.host`: with the port when it isn't https's default.
+        let request_host = match parts.uri.port_u16() {
+            Some(port) if port != 443 => format!("{dest_host}:{port}"),
+            _ => dest_host.clone(),
+        };
+        // `request.headers`: the set the request is forwarded with.
+        let request_headers = forwarded_headers(&parts.headers);
+        // A body whose coding can't be undone can't be read: a condition that
+        // reads it refuses the request (one a shape selects is refused below
+        // whatever reads it).
+        let body_error = match &decoded {
+            Some(Err(e)) => Some(crate::core::request::Unreadable {
+                status: e.code().status(),
+                message: e.to_string(),
+            }),
+            _ => None,
+        };
         type Decided = (
             Option<crate::service::RequestScope>,
-            (
-                crate::core::policy::AccessLevel,
-                crate::core::policy::DecidedBy,
-                Option<u64>,
-            ),
+            crate::core::policy::Decision,
         );
+        let refuse = |u: crate::core::request::Unreadable| -> Response<Body> {
+            let code = match u.status {
+                422 => ScCode::RequestInvalid,
+                415 => ScCode::ContentEncodingUnsupported,
+                413 => ScCode::BrokerBodyLimit,
+                _ => ScCode::RequestUnreadable,
+            };
+            write_forward_audit(&state, &refused, 0, None, Some(code));
+            err_response(code, &u.message)
+        };
         let decide = |p: &str| -> Result<Decided, Response<Body>> {
-            // A shape reads the body only decoded: one that can't be is refused.
             // A body that isn't valid in its own coding is refused whatever
             // reads it: a decoder that stops early may run what this one can't
-            // see, and no client sends one by mistake.
+            // see, and no client sends one by mistake. One in a coding this
+            // proxy can't undo is refused where a shape selects the request.
             if let Some(Err(e)) = &decoded {
                 if !matches!(e, DecodeError::Unsupported(_))
-                    || shape_def.is_some_and(|d| d.request_shape(&method, p).is_some())
+                    || shape_def.is_some_and(|d| d.shape_selects(&method, p))
                 {
                     write_forward_audit(&state, &refused, 0, None, Some(e.code()));
                     return Err(err_response(e.code(), &e.to_string()));
                 }
             }
-            let req_scope = shape_def
-                .and_then(|d| d.extract_request_scope(&method, p, parts.uri.query(), readable));
-            if let Some(rs) = req_scope.as_ref() {
-                // A request its shape can't read the standard way is refused
-                // with the status a server would give it: the rules on that
-                // shape would otherwise decide on a guess.
-                if let Some(u) = &rs.unreadable {
-                    let code = if u.status == 422 {
-                        ScCode::RequestInvalid
-                    } else {
-                        ScCode::RequestUnreadable
-                    };
-                    write_forward_audit(&state, &refused, 0, None, Some(code));
-                    return Err(err_response(code, &u.message));
-                }
-                // A connection rule edit that decides on a field an approval on
-                // this path does not bind (an unbound `when` var, or the body)
-                // is refused here, by name, rather than asked under.
-                if let Some(problem) = state.connection_rule_problem(
-                    &snapshot.inputs,
-                    &conn,
-                    &service_id,
-                    &method,
-                    p,
-                    rs,
-                ) {
-                    write_forward_audit(&state, &refused, 0, None, Some(ScCode::PolicyDenied));
-                    return Err(err_response(ScCode::PolicyDenied, &problem));
-                }
-            }
-            let vars: crate::core::policy::VarMap = req_scope
-                .as_ref()
-                .map(|r| r.vars.clone())
-                .unwrap_or_default();
-            let decision = state.evaluate_request_decision(
-                &snapshot.inputs,
-                &conn,
-                &service_id,
-                &method,
-                p,
-                policy_view.as_deref(),
-                &vars,
-            );
+            let input = crate::core::request::RequestInput {
+                method: &method,
+                host: &request_host,
+                path: p,
+                query: parts.uri.query(),
+                headers: &request_headers,
+                body: readable,
+                body_error: body_error.as_ref(),
+            };
+            let (req_scope, request) =
+                crate::service::read_request(shape_def, input).map_err(&refuse)?;
+            // The check that a user rule decided only on bound fields went
+            // with `when` and `body`: step 3 covers what conditions read.
+            let decision = state
+                .evaluate_request_decision(&snapshot.inputs, &conn, &service_id, &request)
+                .map_err(&refuse)?;
             Ok((req_scope, decision))
         };
         // An encoded slash has two readings, and servers differ on which they
@@ -1676,18 +1658,78 @@ fn content_length(headers: &HeaderMap) -> Option<u64> {
         .ok()
 }
 
+/// The header names a request's `Connection` header lists (RFC 9110 §7.6.1):
+/// hop-by-hop for this connection, so never forwarded.
+fn connection_named(headers: &HeaderMap) -> std::collections::HashSet<String> {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Whether an `Authorization` value is forwarded ([`rewrite_headers`]): only
+/// one that carries a phantom (in Basic, inside the decoded pair); the
+/// agent's own is stripped.
+fn authorization_forwarded(value: &str) -> bool {
+    match value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))
+    {
+        Some(b64) => base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .ok()
+            .and_then(|d| String::from_utf8(d).ok())
+            .is_some_and(|text| resolver::contains_phantom(&text)),
+        None => resolver::contains_phantom(value),
+    }
+}
+
+/// The headers a brokered request is forwarded with, as `request.headers`
+/// reads them: lowercase names, in order, phantoms intact; without the
+/// hop-by-hop headers, those `Connection` names, `Proxy-Authorization`, and
+/// an `Authorization` that carries no phantom ([`rewrite_headers`] drops the
+/// same set).
+fn forwarded_headers(headers: &HeaderMap) -> Vec<(String, Vec<u8>)> {
+    let named = connection_named(headers);
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let lname = name.as_str().to_ascii_lowercase();
+            if lname == "proxy-authorization"
+                || crate::server::broker_flow::is_hop_by_hop(&lname)
+                || named.contains(&lname)
+            {
+                return None;
+            }
+            if lname == "authorization" && !value.to_str().is_ok_and(authorization_forwarded) {
+                return None;
+            }
+            Some((lname, value.as_bytes().to_vec()))
+        })
+        .collect()
+}
+
 /// Rebuild the header map: substitute phantom values, decode/re-encode Basic,
 /// strip Proxy-Authorization + any agent Authorization the injected cred
-/// replaces, drop hop-by-hop, and drop content-length when the body was rewritten.
+/// replaces, drop hop-by-hop and the headers `Connection` names, and drop
+/// content-length when the body was rewritten.
 fn rewrite_headers(
     headers: &HeaderMap,
     values: &PhantomValues,
     body_rewritten: bool,
 ) -> HeaderMap {
     let mut out = HeaderMap::new();
+    let named = connection_named(headers);
     for (name, value) in headers.iter() {
         let lname = name.as_str().to_ascii_lowercase();
-        if lname == "proxy-authorization" || crate::server::broker_flow::is_hop_by_hop(&lname) {
+        if lname == "proxy-authorization"
+            || crate::server::broker_flow::is_hop_by_hop(&lname)
+            || named.contains(&lname)
+        {
             continue;
         }
         if body_rewritten && lname == "content-length" {
@@ -1795,9 +1837,9 @@ fn plain(status: StatusCode, msg: &str) -> Response<Body> {
 /// The definition whose `[requests]` shapes read a request: the one whose
 /// rules decide it. Policy resolves built-in rules by `service_id`, which for
 /// a raw connection is the connection id, so a raw connection named like a
-/// service gets that service's rules; its shapes must come from the same
-/// place, or a rule's `when` never has the vars its shape declares and the
-/// rule silently never fires. Custom first, as everywhere.
+/// service gets that service's rules; its shapes (and so the body format its
+/// rules' conditions read) must come from the same place. Custom first, as
+/// everywhere.
 fn shape_definition<'a>(
     inputs: &'a crate::snapshot::PolicyInputs,
     services: &'a crate::service::ServiceRegistry,
@@ -2238,11 +2280,15 @@ mod tests {
             .expect("the registry's railway");
         let rules = state.services.default_policy_rules("railway").unwrap().to_vec();
         let decide = |body: &str| {
-            let rs = def
-                .extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
-                .expect("shape");
-            assert!(rs.unreadable.is_none());
-            evaluate("POST", "/graphql/v2", Some(body), &rs.vars, Some(&rules), None, &Policy::default(), &["dev".into()])
+            let input = crate::core::request::RequestInput {
+                method: "POST",
+                path: "/graphql/v2",
+                body: Some(body.as_bytes()),
+                ..Default::default()
+            };
+            let (rs, request) = crate::service::read_request(Some(def), input).expect("readable");
+            assert!(rs.is_some(), "shape");
+            evaluate(&request, Some(&rules), None, &Policy::default(), &["dev".into()]).unwrap()
         };
         assert_eq!(
             decide(r#"{"query":"mutation Del($id: String!) { x: serviceDelete(id: $id) }","variables":{"id":"svc"}}"#),
@@ -2263,6 +2309,33 @@ mod tests {
         h.insert("authorization", "Bearer __sprott__railway__".parse().unwrap());
         let out = rewrite_headers(&h, &PhantomValues::default(), false);
         assert!(!out.contains_key("upgrade") && !out.contains_key("connection"));
+    }
+
+    /// `request.headers` is the set the request is forwarded with: a header
+    /// `Connection` names is dropped from both (RFC 9110 §7.6.1), and so is
+    /// an `Authorization` that carries no phantom.
+    #[test]
+    fn request_headers_are_the_forwarded_set() {
+        let mut h = HeaderMap::new();
+        h.insert("connection", "x-trace".parse().unwrap());
+        h.insert("x-trace", "1".parse().unwrap());
+        h.insert("x-account", "prod".parse().unwrap());
+        h.append("x-account", "dev".parse().unwrap());
+        h.insert("authorization", "Bearer agent-own".parse().unwrap());
+        let names: Vec<String> = forwarded_headers(&h).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(names, ["x-account", "x-account"]);
+        let out = rewrite_headers(&h, &PhantomValues::default(), false);
+        assert!(!out.contains_key("x-trace") && !out.contains_key("authorization"));
+        assert_eq!(out.get_all("x-account").iter().count(), 2);
+        h.insert("authorization", "Bearer __sprott__railway__".parse().unwrap());
+        let kept = forwarded_headers(&h);
+        assert!(kept.contains(&("authorization".to_string(), b"Bearer __sprott__railway__".to_vec())));
+        let basic = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("x:__sprott__railway__")
+        );
+        assert!(authorization_forwarded(&basic));
+        assert!(!authorization_forwarded("Basic eDp5"));
     }
 
     #[test]

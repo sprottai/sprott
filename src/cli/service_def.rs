@@ -136,7 +136,8 @@ fn built_in_problems(loaded: &Loaded, reg: &ServiceRegistry) -> Vec<String> {
 }
 
 /// Print what a loaded source holds: each service, where its credentials may
-/// go, the rules it applies, and the parts of its policy a vault does not apply.
+/// go, the rules it applies, the parts of its policy a vault does not apply,
+/// and the gate's warnings.
 fn print_loaded(loaded: &Loaded) {
     println!("Source: {}", safe(&loaded.source.display()));
     for a in &loaded.admitted {
@@ -155,6 +156,9 @@ fn print_loaded(loaded: &Loaded) {
         let (_, notes) = a.def.clone().for_vault();
         for n in &notes {
             println!("    note: {}", safe(n));
+        }
+        for w in &a.def.warnings {
+            println!("    warning: {}", safe(w));
         }
     }
 }
@@ -716,6 +720,7 @@ pub async fn run_validate(args: ServiceValidateArgs, json: bool) -> Result<(), S
                     "id": a.id,
                     "summary": summarize(&a.def),
                     "notes": a.def.clone().for_vault().1,
+                    "warnings": a.def.warnings,
                 })).collect::<Vec<_>>(),
             }),
             Err(p) => json!({ "valid": false, "problems": p }),

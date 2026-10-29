@@ -43,7 +43,7 @@ id = "purchase-large"
 label = "Confirm a purchase over $100"
 method = "POST"
 path = "/v2/purchase"
-when = "!has(vars.price) || type(vars.price) != string || !vars.price.matches('^[0-9]{1,8}([.][0-9]{1,2})?$') || double(vars.price) > 100.0"
+condition = "!has(request.body.orderInfo) || !has(request.body.orderInfo.item) || !has(request.body.orderInfo.item.price) || type(request.body.orderInfo.item.price) != string || !request.body.orderInfo.item.price.matches('^[0-9]{1,8}([.][0-9]{1,2})?$') || double(request.body.orderInfo.item.price) > 100.0"
 level = "ask-always"
 
 # A P2P transfer sends wallet balance to a phone number: confirm every one,

@@ -30,38 +30,24 @@ secret_url = "https://dash.cloudflare.com/profile/api-tokens"
 [requests.dns_record]
 method = ["PUT", "PATCH"]
 path = "/client/v4/zones/:zone/dns_records/:record"
-vars.type            = "/type"
-vars.name            = "/name"
-vars.content         = "/content"
-vars.data            = "/data"
-vars.priority        = "/priority"
-vars.proxied         = "/proxied"
-vars.ttl             = "/ttl"
-vars.settings        = "/settings"
-vars.private_routing = "/private_routing"
-scope = ["type", "name", "content", "data", "priority", "proxied", "ttl", "settings", "private_routing"]
+scope = [
+  "request.body.type", "request.body.name", "request.body.content", "request.body.data",
+  "request.body.priority", "request.body.proxied", "request.body.ttl", "request.body.settings",
+  "request.body.private_routing",
+]
 
 [requests.dns_record_create]
 method = "POST"
 path = "/client/v4/zones/:zone/dns_records"
-vars.type            = "/type"
-vars.name            = "/name"
-vars.content         = "/content"
-vars.data            = "/data"
-vars.priority        = "/priority"
-vars.proxied         = "/proxied"
-vars.ttl             = "/ttl"
-vars.settings        = "/settings"
-vars.private_routing = "/private_routing"
-scope = ["type", "name", "content", "data", "priority", "proxied", "ttl", "settings", "private_routing"]
+scope = [
+  "request.body.type", "request.body.name", "request.body.content", "request.body.data",
+  "request.body.priority", "request.body.proxied", "request.body.ttl", "request.body.settings",
+  "request.body.private_routing",
+]
 
 # One batch request deletes, updates, overwrites and creates records, in that
 # order.
 [requests.dns_batch]
 method = "POST"
 path = "/client/v4/zones/:zone/dns_records/batch"
-vars.deletes = "/deletes"
-vars.patches = "/patches"
-vars.puts    = "/puts"
-vars.posts   = "/posts"
-scope = ["deletes", "patches", "puts", "posts"]
+scope = ["request.body.deletes", "request.body.patches", "request.body.puts", "request.body.posts"]

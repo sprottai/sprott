@@ -30,8 +30,6 @@ secret_url = "https://railway.com/account/tokens"
 [requests.graphql]
 method = "POST"
 path = "/graphql/*"
-vars.request = { in = "graphql", at = "request" }
-vars.calls   = { in = "graphql", at = "calls" }
-vars.fields  = { in = "graphql", at = "fields" }
-scope   = ["request", "calls", "fields"]
-consent = "{{ vars.calls | graphql }}"
+body = "graphql"
+scope   = ["request.graphql.request", "request.graphql.calls", "request.graphql.fields"]
+consent = "{{ request.graphql.calls | graphql }}"

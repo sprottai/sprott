@@ -53,6 +53,12 @@ const TOKENS: &[&str] = &[
     "}}",
     "|",
     "vars.",
+    "request.body.",
+    "request.headers['",
+    "has(",
+    " && ",
+    "condition",
+    "scope",
     "\u{1b}[31m",
     "\u{202e}",
     "\u{2066}",
@@ -222,13 +228,28 @@ fn structural() -> Vec<(String, Option<String>)> {
         ),
         (
             svc.to_string(),
-            // As many maximal regexes as fit, each over the compiled-size limit.
+            // As many maximal conditions as fit, each a long chain of reads.
             Some(
                 (0..MAX_FILE_BYTES / 1100)
                     .map(|i| {
                         format!(
-                            "[[rule]]\nid = \"r{i}\"\nlabel = \"R\"\npath = \"/x\"\nlevel = \"ask\"\nbody = '{}'\n",
-                            "(\\w{99}){99}".repeat(70)
+                            "[[rule]]\nid = \"r{i}\"\nlabel = \"R\"\npath = \"/x\"\nlevel = \"ask\"\ncondition = '{}true'\n",
+                            "request.body.a.b.c == 1 || ".repeat(36)
+                        )
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            svc.to_string(),
+            // Conditions nested past the parser's depth.
+            Some(
+                (0..MAX_FILE_BYTES / 1100)
+                    .map(|i| {
+                        format!(
+                            "[[rule]]\nid = \"n{i}\"\nlabel = \"N\"\npath = \"/x\"\nlevel = \"ask\"\ncondition = '{}request.body.a{}'\n",
+                            "(".repeat(500),
+                            ")".repeat(500)
                         )
                     })
                     .collect(),
@@ -268,8 +289,8 @@ fn structural() -> Vec<(String, Option<String>)> {
         ),
         (
             format!(
-                "{svc}[requests.r]\npath = \"/x\"\nscope = []\nvars = {{ {} }}\n",
-                (0..3000).map(|i| format!("v{i} = \"/a\"")).collect::<Vec<_>>().join(", ")
+                "{svc}[requests.r]\npath = \"/x\"\nscope = [{}]\n",
+                (0..3000).map(|i| format!("\"request.body.v{i}\"")).collect::<Vec<_>>().join(", ")
             ),
             None,
         ),
@@ -281,8 +302,8 @@ fn structural() -> Vec<(String, Option<String>)> {
         // Many consent tokens.
         (
             format!(
-                "{svc}[requests.r]\npath = \"/x\"\nvars.a = \"/a\"\nscope = [\"a\"]\nconsent = \"{}\"\n",
-                "{{ vars.a | email }}".repeat(40)
+                "{svc}[requests.r]\npath = \"/x\"\nscope = [\"request.body.a\"]\nconsent = \"{}\"\n",
+                "{{ request.body.a | email }}".repeat(30)
             ),
             None,
         ),
@@ -329,6 +350,18 @@ fn gate_never_panics_and_stays_bounded_on_a_hostile_corpus() {
         corpus.push((String::from_utf8_lossy(&bytes).into_owned(), None));
     }
 
+    // The CEL parser's frames are large in an unoptimized build (a condition
+    // nested past its depth limit needs ~14 MiB here; a release build refuses
+    // it on a 2 MiB stack), so the corpus runs on a thread with room for it.
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || run_corpus(corpus))
+        .expect("spawn")
+        .join()
+        .expect("the corpus run");
+}
+
+fn run_corpus(corpus: Vec<(String, Option<String>)>) {
     let started = Instant::now();
     let mut slowest = (Duration::ZERO, 0usize);
     let mut admitted = 0usize;

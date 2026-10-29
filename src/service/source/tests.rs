@@ -1033,8 +1033,8 @@ fn first_add_card_shows_match_patterns_and_stated_windows() {
         "{:?}",
         c.tightens
     );
-    // A rule deciding on the body alone shows that as what it matches.
-    let body_only = "[[rule]]\nid = \"refunds\"\nlabel = \"Refunds\"\nbody = \"refund\"\nlevel = \"deny\"\n";
+    // A rule deciding on a condition alone shows that as what it matches.
+    let body_only = "[[rule]]\nid = \"refunds\"\nlabel = \"Refunds\"\ncondition = \"request.body.kind == 'refund'\"\nlevel = \"deny\"\n";
     let snap: BTreeMap<_, _> =
         [("acme".to_string(), admitted("acme", ACME, Some(body_only)))].into();
     let c = add_card(
@@ -1045,7 +1045,7 @@ fn first_add_card_shows_match_patterns_and_stated_windows() {
         &reg,
     )
     .unwrap();
-    assert_eq!(c.tightens, ["acme: Refunds [body~refund]: deny"]);
+    assert_eq!(c.tightens, ["acme: Refunds [if request.body.kind == 'refund']: deny"]);
 }
 
 #[test]
@@ -1285,7 +1285,7 @@ fn card_lists_every_host_an_oauth_artifact_reaches_and_pkce_off() {
 fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
     let svc_req = |scope: &str, extra: &str| {
         format!(
-            "{OAUTH_BASE}{extra}\n[requests.buy]\nmethod = \"POST\"\npath = \"/v1/pay\"\nvars.amount = \"/amount\"\nvars.merchant = \"/merchant\"\nscope = [{scope}]\n"
+            "{OAUTH_BASE}{extra}\n[requests.buy]\nmethod = \"POST\"\npath = \"/v1/pay\"\nscope = [{scope}]\n"
         )
     };
     let pol = |rule_ttl: &str, default_ttl: &str| {
@@ -1295,12 +1295,12 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
     };
     let old = summarize(&admitted(
         "acme",
-        &svc_req("\"amount\", \"merchant\"", ""),
+        &svc_req("\"request.body.amount\", \"request.body.merchant\"", ""),
         Some(&pol("ttl = 60", "ttl = 300")),
     ));
     let new = summarize(&admitted(
         "acme",
-        &svc_req("\"amount\"", "pkce = false"),
+        &svc_req("\"request.body.amount\"", "pkce = false"),
         Some(&pol("ttl = 86400", "ttl = 3600")),
     ));
     let d = diff(
@@ -1312,7 +1312,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
         [
             "acme: Pay: ask, approval lasts 60s (now 86400s)",
             "acme: default approval lasts 300s (now 3600s)",
-            "acme: request buy no longer binds merchant to an approval",
+            "acme: request buy no longer binds request.body.merchant to an approval",
             "acme: PKCE: off (was on)",
         ]
     );
@@ -1320,12 +1320,12 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
     // setting it longer is.
     let unset = summarize(&admitted(
         "acme",
-        &svc_req("\"amount\", \"merchant\"", ""),
+        &svc_req("\"request.body.amount\", \"request.body.merchant\"", ""),
         Some(&pol("", "")),
     ));
     let shorter = summarize(&admitted(
         "acme",
-        &svc_req("\"amount\", \"merchant\"", ""),
+        &svc_req("\"request.body.amount\", \"request.body.merchant\"", ""),
         Some(&pol("ttl = 60", "ttl = 60")),
     ));
     let d = diff(
@@ -1335,7 +1335,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
     assert!(d.loosens.is_empty(), "{:?}", d.loosens);
     let longer = summarize(&admitted(
         "acme",
-        &svc_req("\"amount\", \"merchant\"", ""),
+        &svc_req("\"request.body.amount\", \"request.body.merchant\"", ""),
         Some(&pol("ttl = 7200", "")),
     ));
     let d = diff(
@@ -1354,7 +1354,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
     current.insert(
         "acme".to_string(),
         StoredService::new(
-            svc_req("\"amount\", \"merchant\"", ""),
+            svc_req("\"request.body.amount\", \"request.body.merchant\"", ""),
             Some(pol("ttl = 60", "")),
             Some(src.clone()),
         ),
@@ -1363,7 +1363,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
         "acme".to_string(),
         admitted(
             "acme",
-            &svc_req("\"amount\"", ""),
+            &svc_req("\"request.body.amount\"", ""),
             Some(&pol("ttl = 600", "")),
         ),
     )]
@@ -1380,7 +1380,7 @@ fn update_flags_longer_approval_windows_unbound_scope_vars_and_pkce_off() {
         c.loosens,
         [
             "acme: Pay: ask, approval lasts 60s (now 600s)",
-            "acme: request buy no longer binds merchant to an approval",
+            "acme: request buy no longer binds request.body.merchant to an approval",
         ]
     );
 }

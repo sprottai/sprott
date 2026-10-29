@@ -22,5 +22,4 @@ path = [
   "/v1/threads/runs", "/v1/threads/:thread/runs",
   "/v1/assistants", "/v1/assistants/:assistant",
 ]
-vars.model = "/model"
-scope = ["model"]
+scope = ["request.body.model"]

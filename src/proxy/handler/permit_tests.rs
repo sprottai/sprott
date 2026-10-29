@@ -97,13 +97,13 @@ impl Vault {
         self
     }
 
-    /// A rule the owner adds to a connection (`body`: a regex on the body).
-    fn rule(self, conn: &str, id: &str, pattern: &str, level: AccessLevel, body: Option<&str>) -> Vault {
+    /// A rule the owner adds to a connection, with an optional condition.
+    fn rule(self, conn: &str, id: &str, pattern: &str, level: AccessLevel, condition: Option<&str>) -> Vault {
         self.policy(|p| {
             p.connections.entry(conn.to_string()).or_default().rules.insert(
                 id.to_string(),
                 RuleConfig {
-                    body: body.map(crate::core::policy::BodyPattern::lenient),
+                    condition: condition.map(crate::core::policy::Condition::lenient),
                     level: Some(level),
                     ttl: Some(600),
                     ..RuleConfig::selecting(pattern)
@@ -375,7 +375,7 @@ async fn a_shaped_ask_carries_its_card_sealed_and_its_values_key_the_permit() {
     let json = crate::approval::card::open(wire["sealed"].as_str().unwrap(), &K, V, 0)
         .expect("opens under the content key");
     let card: serde_json::Value = serde_json::from_slice(&json).unwrap();
-    assert_eq!(card["vars"]["content"], "1.2.3.4");
+    assert_eq!(card["vars"]["request.body.content"], "1.2.3.4");
     assert_eq!(kept.mac, crate::approval::card::binding_mac(&K, &json));
     approve(&state, &op);
     let other = r#"{"content":"5.6.7.8"}"#;
@@ -417,8 +417,7 @@ secrets = ["ACME_TOKEN", "ACME_ID"]
 [requests.buy]
 method = "POST"
 path = "/buy"
-vars.amount = "/amount"
-scope = ["amount"]
+scope = ["request.body.amount"]
 [[policy.rules]]
 method = "POST"
 path_exact = "/once"

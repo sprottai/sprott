@@ -101,6 +101,9 @@ url = "2"
 # (core/path.rs). Already in the tree via tower-http.
 iri-string = "0.7"
 percent-encoding = "2"
+# The media type of a Content-Type source (request.body readings,
+# core/request.rs). Already in the tree via reqwest.
+mime = "0.3"
 # Rule and `[requests]` paths are WHATWG URL Pattern pathnames, matched by the
 # crate Deno's `URLPattern` is built on (the console uses the browser's).
 urlpattern = "0.6"

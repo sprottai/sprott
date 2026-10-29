@@ -40,22 +40,17 @@ type = "snaplii"
 [requests.purchase]
 method = "POST"
 path = "/v2/purchase"
-vars.type     = "/orderInfo/orderType"
-vars.item     = "/orderInfo/item/itemId"
-vars.price    = "/orderInfo/item/price"
-vars.order    = "/orderInfo"
-vars.payment  = "/paymentContext"
-vars.delivery = "/delivery"
-scope   = ["type", "item", "price", "order", "payment", "delivery"]
-consent = "Buy {{ vars.item }} ({{ vars.type }}) for {{ vars.price }}"
+scope = [
+  "request.body.orderInfo.orderType", "request.body.orderInfo.item.itemId",
+  "request.body.orderInfo.item.price", "request.body.orderInfo",
+  "request.body.paymentContext", "request.body.delivery",
+]
+consent = "Buy {{ request.body.orderInfo.item.itemId }} ({{ request.body.orderInfo.orderType }}) for {{ request.body.orderInfo.item.price }}"
 
 # A P2P transfer sends wallet balance to a phone number once its short undo
 # window ends.
 [requests.transfer]
 method = "POST"
 path = "/v2/transfers"
-vars.to_phone = "/to_phone"
-vars.amount   = "/amount"
-vars.remark   = "/remark"
-scope   = ["to_phone", "amount", "remark"]
-consent = "Send {{ vars.amount }} to {{ vars.to_phone }}"
+scope   = ["request.body.to_phone", "request.body.amount", "request.body.remark"]
+consent = "Send {{ request.body.amount }} to {{ request.body.to_phone }}"

@@ -47,7 +47,8 @@ pub const MAX_CARD_JSON: usize = 96 * 1024;
 /// template they fill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
-    /// Sorted `(name, value)` pairs, the exact input of the permit identity.
+    /// `(request path, value)` pairs sorted by path, the exact input of the
+    /// permit identity.
     pub vars: Vec<(String, String)>,
     pub consent: Option<String>,
 }
@@ -182,10 +183,10 @@ mod tests {
     fn card() -> Card {
         Card {
             vars: vec![
-                ("amount".into(), "50.00".into()),
-                ("to".into(), "+15550100".into()),
+                ("request.body.amount".into(), "50.00".into()),
+                ("request.body.to".into(), "+15550100".into()),
             ],
-            consent: Some("Send {{ vars.amount }} to {{ vars.to }}".into()),
+            consent: Some("Send {{ request.body.amount }} to {{ request.body.to }}".into()),
         }
     }
 
@@ -286,7 +287,7 @@ mod tests {
     #[test]
     fn an_oversized_card_is_refused() {
         let big = Card {
-            vars: vec![("raw".into(), "x".repeat(MAX_CARD_JSON))],
+            vars: vec![("request.body.raw".into(), "x".repeat(MAX_CARD_JSON))],
             consent: None,
         };
         assert!(seal(big, &[0u8; 32], "v", 0).is_err());

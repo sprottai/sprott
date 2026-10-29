@@ -35,8 +35,9 @@ pub struct DefSummary {
     /// The `[default]` approval window (seconds), when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u64>,
-    /// `[requests]` name → the variables an approval binds (its `scope`),
-    /// sorted. Requests that bind nothing are left out.
+    /// `[requests]` name → the request paths an approval binds (its `scope`
+    /// and what its `consent` reads), sorted. Requests that bind nothing are
+    /// left out.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scopes: BTreeMap<String, Vec<String>>,
     /// The OAuth connect flow runs without PKCE (`pkce = false`).
@@ -48,7 +49,7 @@ pub struct DefSummary {
 /// line to show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSummary {
-    /// What the rule matches (method/path patterns, body, when): two rules
+    /// What the rule matches (method/path patterns, condition): two rules
     /// with the same key decide the same requests.
     pub key: String,
     pub level: String,
@@ -67,13 +68,12 @@ fn rule_summary(r: &PolicyRule) -> RuleSummary {
     let level = r.level.map(|l| l.to_string()).unwrap_or_default();
     let matched = r.select.display().join(" | ");
     let mut key = matched.clone();
-    if let Some(b) = &r.body {
-        key.push_str(" body~");
-        key.push_str(b.as_str());
-    }
-    if let Some(w) = &r.when {
-        key.push_str(" when ");
-        key.push_str(w);
+    if let Some(c) = &r.condition {
+        if !key.is_empty() {
+            key.push(' ');
+        }
+        key.push_str("if ");
+        key.push_str(c.as_str());
     }
     let label = r.label.clone().or_else(|| r.id.clone());
     let name = label.clone().unwrap_or_else(|| {
@@ -204,11 +204,11 @@ pub fn summarize(def: &ServiceDef) -> DefSummary {
         }
     }
     for (name, shape) in &applied.requests {
-        let mut vars: Vec<String> = shape.scope.clone();
-        vars.sort();
-        vars.dedup();
-        if !vars.is_empty() {
-            s.scopes.insert(name.clone(), vars);
+        let mut paths: Vec<String> = shape.binds().iter().map(ToString::to_string).collect();
+        paths.sort();
+        paths.dedup();
+        if !paths.is_empty() {
+            s.scopes.insert(name.clone(), paths);
         }
     }
     s

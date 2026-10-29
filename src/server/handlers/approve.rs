@@ -3729,15 +3729,9 @@ mod tests {
         u64,
     ) {
         let inputs = state.snapshot(RV).expect("unlocked").inputs.clone();
-        let (l, by, t) = state.evaluate_request_decision(
-            &inputs,
-            RC,
-            RC,
-            method,
-            path,
-            None,
-            &crate::core::policy::VarMap::new(),
-        );
+        let (l, by, t) = state
+            .evaluate_request_decision(&inputs, RC, RC, &crate::core::request::Request::bare(method, path))
+            .unwrap();
         (l, by, t.unwrap_or(900))
     }
 

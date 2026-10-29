@@ -50,16 +50,16 @@ level = "ask-always"
 | `label` | yes | What the action is, in words. Shown on approval cards and in the console. |
 | `method` | no | An HTTP method, or a list (any one matches). Unset: any method. |
 | `path` | no | A path pattern, or a list (any one matches). Unset: any path. |
+| `condition` | no | A [CEL](https://cel.dev) expression over the request: `"has(request.body.amount) && request.body.amount > 100"`. Unset: any request. |
 | `level` | yes | `allow`, `ask`, `ask-always` or `deny`. |
-| `body` | no | A regular expression the request body must match. |
-| `when` | no | A condition on a request value: `"vars.<name> <op> <literal>"`, with `>`, `<`, `>=`, `<=`, `==` or `!=`. |
 | `ttl` | no | The approval window for `ask`, in seconds. |
 
 Unknown keys reject the whole file.
 
 ### Method and path
 
-A rule matches a request when its `method` and its `path` both match.
+A rule matches a request when its `method`, its `path` and its `condition`
+all match.
 
 - `method` is an HTTP method token, stored uppercase: `"DELETE"` or
   `["PUT", "PATCH"]`.
@@ -69,18 +69,51 @@ A rule matches a request when its `method` and its `path` both match.
   segment to those words; `{/:name}?` makes a segment optional.
 - A path is matched without its query string and without one trailing `/`.
 - The host is fixed by the connection.
-- A rule with no `method`, `path`, `body` or `when` rejects the file; the level
+- A rule with no `method`, `path` or `condition` rejects the file; the level
   for every request is `[default]`.
 - `match` (the 2.0 `"METHOD /path"` with `*` and `**`) rejects the file.
   Write `method = "DELETE"` and `path = "/repos/:owner/:repo"` instead.
+- `when` and a rule's `body` regex (2.0) reject the file. Write `condition`.
+
+### Condition
+
+`condition` reads one object, `request`:
+
+| Field | Value |
+|---|---|
+| `request.host` | The host, lowercase, with the port unless it is 443. |
+| `request.query` | The query parameters, by name: `request.query.addParents`. |
+| `request.headers` | The headers as forwarded, by lowercase name: `request.headers['x-account']`. |
+| `request.body` | A member of the body (`request.body.amount`, `request.body.order.price`), or the body's text when the condition reads `request.body` itself. |
+| `request.graphql` | The `calls`, `fields` and `request` of a GraphQL request, on a path whose request shape says `body = "graphql"`. |
+
+- `method` and `path` select the method and the path. A condition that reads
+  `request.method`, `request.path` or `request.params` rejects the file, and
+  so does one that calls a function CEL here lacks, or reads `request.body`
+  whole and a member of it.
+- The body is read as JSON where it parses as JSON, and as a form unless its
+  one Content-Type names another type. Both readings must agree on every
+  value read.
+- A request is refused when a value the condition reads is ambiguous: a query
+  parameter or header given twice, a body with a byte-order mark, JSON with a
+  duplicate key or with a member that differs from a read name only in case
+  (`Amount` beside `amount`).
+- A value the request leaves out makes the condition an error. An error
+  matches a `deny`, `ask-always` or `ask` rule where that makes the decision
+  stricter, and leaves an `allow` rule unmatched. Guard a value a request may
+  leave out: `has(request.body.amount) && …`, or
+  `'x-account' in request.headers && …` for a name `has()` can't select.
+  `sprott service validate` warns about each read with no guard.
+- A server may take `"false"` for `false`. Compare such a value as text:
+  `string(request.body.private) == 'false'`.
 
 ### Limits
 
 - `ttl` is at most 31536000 seconds (one year). A larger value rejects the
   file; it is never cut down. Your own settings in the console have no cap.
-- A file is at most 64 KiB, with at most 128 rules, 32 method × path pairs
-  per rule and 16 `body` rules.
-- A `body` pattern is at most 1024 bytes.
+- A file is at most 64 KiB, with at most 128 rules and 32 method × path pairs
+  per rule.
+- A condition is at most 1024 bytes.
 
 ## How a request is decided
 
@@ -126,29 +159,28 @@ What it lets through afterwards:
 |---|---|
 | `ask` from a rule | Later requests the same rule decides, for the rule's window, of the same kind (read or write). |
 | `ask` from a floor | Later reads (or writes) on that connection that no rule matches, for the floor's window. |
-| `ask` on a value-scoped request | This exact request with the same values, for the window. |
+| `ask` on a request a `[requests]` shape matched | This exact request with the same `scope` values, for the window. |
 | `ask-always` | This one request. |
 
 With no `ttl` on the rule or floor, the window is 900 seconds. A read
 approval never lets a write through. Locking the vault or changing it ends
 every window. An approval request waits 1800 seconds for a decision.
 
-## Value-scoped requests
+## Request shapes
 
-A service can name the request values an approval binds to, in
-`service.toml`:
+A service can say how it reads a request, and which values an approval binds
+to, in `service.toml`:
 
 ```toml
 [requests.purchase]
 method  = "POST"
 path    = "/v2/purchase"
-vars.amount   = "/amount"            # a JSON pointer into the body
-vars.merchant = "/merchant_id"
-scope   = ["amount", "merchant"]     # these values bind the approval
-consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
+body    = "json"           # json (the default), form, graphql or text
+scope   = ["request.body.amount", "request.body.merchant"]
+consent = "Buy from {{ request.body.merchant }} for {{ request.body.amount }}"
 ```
 
-and decide on them in `policy.toml`:
+and decide on the request in `policy.toml`:
 
 ```toml
 [[rule]]
@@ -156,18 +188,21 @@ id    = "purchase-large"
 label = "Large purchase"
 method = "POST"
 path  = "/v2/purchase"
-when  = "vars.amount > 100"
+condition = "!has(request.body.amount) || request.body.amount > 100"
 level = "ask-always"
 ```
 
-- A var is a JSON pointer into the body, or `{ in = "query", at = "<param>" }`.
-- `scope` lists the vars whose values the approval binds. A different value
-  asks again.
-- `consent` is the line on the approval card. It may show only vars in
-  `scope`.
-- On a path a request shape covers, an `ask` or `ask-always` rule may not
-  decide on `body`, and a `when` must use a var the shape binds. An approval
-  there could not pin anything else.
+- `method`, `path` and `condition` select requests, as in a rule. The first
+  shape by name that selects a request reads it.
+- `body` is the format the service reads the body in. With `graphql`, rules
+  can read `request.graphql`.
+- `scope` lists the request paths whose values an approval binds. A
+  different value asks again.
+- `consent` is the line on the approval card, over request paths, with the
+  filters `email` and `graphql`. The values it shows are bound too.
+- `encoded."<request path>"` names a value that carries encoded media, with
+  JSON Schema's `contentEncoding` and `contentMediaType`.
+- `vars` (2.0) rejects the file. Name each value by its request path.
 
 ## Example: Gmail
 

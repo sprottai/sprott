@@ -164,9 +164,10 @@ fn human_window(secs: u64) -> String {
     }
 }
 
-/// Render a `{{ vars.x | filter }}` consent template to plain text for the CLI:
-/// interpolate each reference with its bound value (a filter is a
-/// console-display concern, so here the value is shown as-is / truncated).
+/// Render a `{{ request.<path> | filter }}` consent template to plain text
+/// for the CLI: interpolate each reference with the value bound at that
+/// request path (a filter is a console-display concern, so here the value is
+/// shown as-is / truncated).
 fn interpolate(template: &str, bound: &[(String, String)]) -> String {
     let vals: std::collections::HashMap<&str, &str> = bound
         .iter()
@@ -182,10 +183,16 @@ fn interpolate(template: &str, bound: &[(String, String)]) -> String {
             rest = after;
             continue;
         };
-        let inner = after[..end].trim();
-        let name = inner.splitn(2, '|').next().unwrap_or("").trim();
-        if let Some(var) = name.strip_prefix("vars.").map(str::trim) {
-            out.push_str(&truncate(vals.get(var).copied().unwrap_or(""), 80));
+        let token = &after[..end + 2];
+        if let Some(r) = crate::service::consent_refs(&format!("{{{{{}", token))
+            .ok()
+            .and_then(|refs| refs.into_iter().next())
+        {
+            // Bound pairs are keyed by the path's canonical text.
+            let key = crate::core::request::ReadPath::parse(&r.path)
+                .map(|p| p.to_string())
+                .unwrap_or(r.path);
+            out.push_str(&truncate(vals.get(key.as_str()).copied().unwrap_or(""), 80));
         }
         rest = &after[end + 2..];
     }
@@ -278,6 +285,12 @@ mod tests {
             exact.ends_with("reuse: exact (this identical request) for 2 min."),
             "{exact}"
         );
+        // A consent template reads the values bound at request paths.
+        let consent = with(json!({
+            "consent": "Send {{ request.body.amount }} to {{ request.body['to'] | email }}",
+            "scope_vars": { "request.body.amount": "5.00", "request.body.to": "+1555" }
+        }));
+        assert!(consent.contains("\nSend 5.00 to +1555"), "{consent}");
         // No signed level: no grant line is invented.
         let bare = render_operation(&use_op(base.clone()));
         assert_eq!(bare, "Use POST api.github.com/x for a brokered call.");

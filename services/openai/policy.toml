@@ -11,7 +11,8 @@ path = [
   "/v1/threads/runs", "/v1/threads/:thread/runs",
   "/v1/assistants", "/v1/assistants/:assistant",
 ]
-when = "['o3', 'o4-mini', 'gpt-4.5'].exists(p, vars.model.startsWith(p) || vars.model.startsWith('ft:' + p))"
+# OpenAI accepts `"model": null` (the assistant's own model): it rides the floor.
+condition = "has(request.body.model) && request.body.model != null && ['o3', 'o4-mini', 'gpt-4.5'].exists(p, request.body.model.startsWith(p) || request.body.model.startsWith('ft:' + p))"
 level = "ask"
 
 # A batch job names its model per line inside the uploaded file, which this

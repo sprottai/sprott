@@ -239,12 +239,10 @@ pub struct RegistryPolicyRule {
         serialize_with = "crate::core::selector::serialize_one_or_many"
     )]
     pub match_pattern: Vec<String>,
+    /// The rule's condition, CEL over the request
+    /// (`"has(request.body.amount) && request.body.amount > 80"`), as written.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    /// Structured field condition (`"vars.amount > 80"`) — surfaced so the
-    /// console can show it beside the rule and offer it as an override.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub when: Option<String>,
+    pub condition: Option<String>,
     /// The built-in access decision (`allow` | `ask` | `ask-always` | `deny`)
     /// the recipe declares for this action. The console shows it and lets the
     /// user override it per-connection.
@@ -319,8 +317,7 @@ fn policy_for(def: &ServiceDef, include_rules: bool) -> Option<RegistryServicePo
                 method: r.select.methods().to_vec(),
                 path: r.select.paths(),
                 match_pattern: r.select.display(),
-                body: r.body.as_ref().map(|b| b.as_str().to_string()),
-                when: r.when.clone(),
+                condition: r.condition.as_ref().map(|c| c.as_str().to_string()),
                 level: level(r.level),
                 ttl: r.ttl,
             })

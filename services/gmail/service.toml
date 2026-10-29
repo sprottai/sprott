@@ -13,12 +13,11 @@ secrets = ["GMAIL_REFRESH_TOKEN"]
 [requests.send]
 method = "POST"
 path = "/gmail/v1/users/me/messages/send"
-vars.raw = "/raw"
-scope   = ["raw"]
+scope   = ["request.body.raw"]
 # The `email` filter (console code, like git's `| basic`) decodes the bound
 # base64url `raw` into a legible From/To/Subject/Body card, raw under Advanced
 # Details. Same pipe syntax as `{{ secret.X | basic }}`.
-consent = "{{ vars.raw | email }}"
+consent = "{{ request.body.raw | email }}"
 
 [auth]
 type = "oauth2"

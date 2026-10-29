@@ -39,7 +39,9 @@ id = "make-public"
 label = "Make repository public"
 method = ["PATCH", "POST"]
 path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
-when = "vars.private == false || vars.visibility == 'public'"
+# GitHub reads `"private": "false"` and a form body too: the comparison is
+# type-free, and each read is guarded so a body without it is routine.
+condition = "has(request.body.private) && string(request.body.private) == 'false' || has(request.body.visibility) && request.body.visibility == 'public'"
 level = "ask-always"
 
 [[rule]]
@@ -233,5 +235,5 @@ id = "graphql-gated-mutations"
 label = "Change branch protection or rulesets, change who can access, or delete a branch (GraphQL)"
 method = "POST"
 path = "/graphql"
-when = "vars.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef', 'updateRefs', 'addEnterpriseOrganizationMember'])"
+condition = "request.graphql.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef', 'updateRefs', 'addEnterpriseOrganizationMember'])"
 level = "ask-always"

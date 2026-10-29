@@ -25,17 +25,13 @@ secret_url = "https://github.com/settings/tokens?type=beta"
 [requests.repo_settings]
 method = ["PATCH", "POST"]
 path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
-vars.private    = "/private"
-vars.visibility = "/visibility"
-scope = ["private", "visibility"]
+scope = ["request.body.private", "request.body.visibility"]
 
 # The GraphQL API reaches the same consequential actions as the REST routes
 # above. Policy decides on the called mutations; an approval binds the calls.
 [requests.graphql]
 method = "POST"
 path = "/graphql"
-vars.request = { in = "graphql", at = "request" }
-vars.calls   = { in = "graphql", at = "calls" }
-vars.fields  = { in = "graphql", at = "fields" }
-scope   = ["request", "calls", "fields"]
-consent = "{{ vars.calls | graphql }}"
+body = "graphql"
+scope   = ["request.graphql.request", "request.graphql.calls", "request.graphql.fields"]
+consent = "{{ request.graphql.calls | graphql }}"

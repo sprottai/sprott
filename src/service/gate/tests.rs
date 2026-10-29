@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::request::BodyFormat;
 
 const GITHUB: &str = r#"
 [service]
@@ -25,21 +26,13 @@ fn mentions(errs: &[String], needle: &str) -> bool {
     errs.iter().any(|e| e.contains(needle))
 }
 
-/// `"METHOD /path"` or `"/path"` as the `method` and `path` lines of a rule
-/// or a shape.
-fn sel(spec: &str) -> String {
-    match spec.split_once(' ') {
-        Some((m, p)) => format!("method = \"{m}\"\npath = \"{p}\"\n"),
-        None => format!("path = \"{spec}\"\n"),
-    }
-}
-
 // ── compiled-in definitions ──────────────────────────────────────────────────
 
 /// Every compiled service, with its policy.toml, passes the gate under its
-/// directory name: the build-time check for in-tree definitions (a `when`
-/// var that is not declared and bound, an unknown level, a bad regex, ...
-/// fails the suite here).
+/// directory name: the build-time check for in-tree definitions (a condition
+/// that is not CEL over the request, an unknown level, a request path that
+/// names nothing, ... fails the suite here). Every shipped condition guards
+/// what it reads: no warnings.
 #[test]
 fn compiled_services_pass_validator() {
     let policies: HashMap<&str, &str> = crate::generated_services::compiled_policy_tomls()
@@ -49,11 +42,8 @@ fn compiled_services_pass_validator() {
     for (id, toml_str) in crate::generated_services::compiled_service_tomls() {
         let def = admit(Some(id), toml_str, policies.get(id).copied())
             .unwrap_or_else(|e| panic!("compiled service '{}' rejected: {:?}", id, e));
-        // Every body regex is compiled at load.
+        assert!(def.warnings.is_empty(), "{id}: {:?}", def.warnings);
         for rule in def.policy.iter().flat_map(|p| p.rules.iter()) {
-            if let Some(b) = &rule.body {
-                assert!(b.error().is_none(), "{id}: {:?}", b);
-            }
             assert!(rule.level.is_some(), "{id}: every rule decides");
         }
     }
@@ -295,13 +285,13 @@ fn unknown_fields_are_rejected_everywhere() {
     // A typo in [service] (it used to be silently ignored there).
     let e = rejected(&GITHUB.replace("secrets =", "secret ="));
     assert!(mentions(&e, "unknown field at line"), "{e:?}");
-    // [requests] shape, and the table form of a var.
+    // [requests] shape, and an `encoded` entry.
     let req =
-        "[requests.buy]\nmethod = \"POST\"\npath = \"/buy\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n";
+        "[requests.buy]\nmethod = \"POST\"\npath = \"/buy\"\nscope = [\"request.body.amount\"]\n";
     ok(&format!("{GITHUB}{req}"));
-    rejected(&format!("{GITHUB}{req}scopes = [\"amount\"]\n"));
+    rejected(&format!("{GITHUB}{req}scopes = [\"request.body.amount\"]\n"));
     rejected(&format!(
-        "{GITHUB}[requests.buy]\nmethod = \"POST\"\npath = \"/buy\"\nvars.f = {{ in = \"query\", at = \"f\", as = \"int\" }}\n"
+        "{GITHUB}{req}encoded.\"request.body.raw\" = {{ contentEncoding = \"base64\", as = \"int\" }}\n"
     ));
     // policy.toml: top level, [default], [[rule]].
     let rule =
@@ -495,27 +485,51 @@ secrets = ["PAY_KEY"]
 [requests.purchase]
 method = "POST"
 path = "/buy"
-vars.amount = "/amount"
-scope = ["amount"]
-consent = "Spend {{ vars.amount }}"
+scope = ["request.body.amount"]
+consent = "Spend {{ request.body.amount }}"
 "#;
 
 #[test]
 fn requests_shapes_are_checked() {
-    ok(REQ_SERVICE);
-    let e = rejected(&REQ_SERVICE.replace("{{ vars.amount }}", "{{ vars.secret }}"));
-    assert!(mentions(&e, "consent references '{secret}'"), "{e:?}");
-    let e =
-        rejected(&REQ_SERVICE.replace("scope = [\"amount\"]", "scope = [\"amount\", \"ghost\"]"));
-    assert!(
-        mentions(&e, "'ghost', which is not a declared var"),
-        "{e:?}"
+    let def = ok(REQ_SERVICE);
+    let shape = &def.requests["purchase"];
+    assert_eq!(shape.format, BodyFormat::Json);
+    assert_eq!(shape.binds().iter().map(ToString::to_string).collect::<Vec<_>>(), ["request.body.amount"]);
+    // A consent path is bound with the scope.
+    let def = ok(&REQ_SERVICE.replace("{{ request.body.amount }}", "{{ request.body.memo }}"));
+    assert_eq!(
+        def.requests["purchase"].binds().iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["request.body.amount", "request.body.memo"]
     );
-    let e =
-        rejected(&REQ_SERVICE.replace("scope = [\"amount\"]", "scope = [\"amount\", \"amount\"]"));
-    assert!(mentions(&e, "more than once"));
-    let e = rejected(&REQ_SERVICE.replace("vars.amount = \"/amount\"", "vars.amount = \"amount\""));
-    assert!(mentions(&e, "must be a JSON Pointer"));
+    // `scope` absent or empty is accepted.
+    ok(&REQ_SERVICE.replace("scope = [\"request.body.amount\"]\n", ""));
+    ok(&REQ_SERVICE.replace("scope = [\"request.body.amount\"]", "scope = []"));
+    for (from, to, why) in [
+        ("{{ request.body.amount }}", "{{ secret.raw }}", "is not a request path"),
+        ("{{ request.body.amount }}", "{{ request }}", "`request` is read whole"),
+        ("\"request.body.amount\"]", "\"request.body.amount\", \"ghost\"]", "'ghost' is not a request path"),
+        ("\"request.body.amount\"]", "\"request.body.amount\", \"request.body['amount']\"]", "lists request.body.amount more than once"),
+        ("\"request.body.amount\"]", "\"request.nope\"]", "request has no field 'nope'"),
+        ("\"request.body.amount\"]", "\"request.headers['X-Acl']\"]", "header names are lowercase"),
+        ("\"request.body.amount\"]", "\"request.graphql.calls\"]", "is read only with body = \"graphql\""),
+        ("path = \"/buy\"", "path = \"/buy\"\nbody = \"xml\"", "body = \"xml\" is not a body format (json, form, graphql, text)"),
+        ("path = \"/buy\"", "path = \"/buy\"\nvars.amount = \"/amount\"", "`vars` is not read; name each value by its request path"),
+        ("path = \"/buy\"", "path = \"/buy\"\ncondition = \"request.graphql.fields.size() > 0\"", "can't read request.graphql"),
+        ("path = \"/buy\"", "path = \"/buy\"\ncondition = \"request.path == '/buy'\"", "select the path with `path"),
+    ] {
+        let e = rejected(&REQ_SERVICE.replace(from, to));
+        assert!(mentions(&e, why), "{to}: {e:?}");
+    }
+    // A shape's condition and the graphql body format.
+    let def = ok(&REQ_SERVICE.replace(
+        "path = \"/buy\"",
+        "path = \"/buy\"\ncondition = \"has(request.body.amount)\"\nbody = \"form\"",
+    ));
+    assert_eq!(def.requests["purchase"].format, BodyFormat::Form);
+    assert!(def.requests["purchase"].condition.is_some());
+    ok(&REQ_SERVICE
+        .replace("path = \"/buy\"", "path = \"/buy\"\nbody = \"graphql\"")
+        .replace("\"request.body.amount\"]", "\"request.graphql.calls\"]"));
     // A 2.0 `match` is refused, with the replacement spelled out.
     let e = rejected(&REQ_SERVICE.replace("method = \"POST\"\npath = \"/buy\"", "match = \"POST /buy\""));
     assert!(mentions(&e, "[requests.purchase]: `match` is not read; use method = \"DELETE\" and path = \"/v1/x/:id\""), "{e:?}");
@@ -545,27 +559,47 @@ fn requests_shapes_are_checked() {
     assert!(mentions(&e, "selects every request"), "{e:?}");
     // A method alone selects that method on any path; one is stored uppercase.
     let def = ok(&REQ_SERVICE.replace("method = \"POST\"\npath = \"/buy\"\n", "method = \"post\"\n"));
-    assert!(def.request_shape("POST", "/anything").is_some());
+    assert!(def.shape_selects("POST", "/anything"));
+}
+
+#[test]
+fn encoded_values_are_declared_in_json_schema_content_keywords() {
+    let with = |entry: &str| REQ_SERVICE.replace("consent =", &format!("{entry}\nconsent ="));
+    let def = ok(&with(
+        "encoded.\"request.body.raw\" = { contentEncoding = \"base64url\", contentMediaType = \"message/rfc822\" }",
+    ));
+    let e = &def.requests["purchase"].encoded["request.body.raw"];
+    assert_eq!(e.content_encoding.as_deref(), Some("base64url"));
+    assert_eq!(e.content_media_type.as_deref(), Some("message/rfc822"));
+    for (entry, why) in [
+        ("encoded.\"request.body.raw\" = { contentEncoding = \"rot13\" }", "contentEncoding \"rot13\" is unknown"),
+        ("encoded.\"request.body.raw\" = { contentMediaType = \"not a type\" }", "is not a media type"),
+        ("encoded.\"request.body.raw\" = {}", "declares neither"),
+        ("encoded.\"body.raw\" = { contentEncoding = \"base64\" }", "is not a request path"),
+        ("encoded.\"request.host\" = { contentEncoding = \"base64\" }", "names no value that carries media"),
+        ("encoded.\"request.body.raw\" = { contentEncoding = \"base64\", schema = \"x\" }", "unknown field"),
+    ] {
+        let e = rejected(&with(entry));
+        assert!(mentions(&e, why), "{entry}: {e:?}");
+    }
 }
 
 #[test]
 fn consent_filters_are_the_ones_the_console_implements() {
     let raw = |consent: &str| {
         format!(
-            "[service]\nid = \"m\"\nname = \"M\"\nhosts = [\"api.m.com\"]\n[requests.send]\nmethod = \"POST\"\npath = \"/send\"\nvars.raw = \"/raw\"\nscope = [\"raw\"]\nconsent = \"{}\"\n",
+            "[service]\nid = \"m\"\nname = \"M\"\nhosts = [\"api.m.com\"]\n[requests.send]\nmethod = \"POST\"\npath = \"/send\"\nscope = [\"request.body.raw\"]\nconsent = \"{}\"\n",
             consent
         )
     };
-    ok(&raw("{{ vars.raw | email }}"));
+    ok(&raw("{{ request.body.raw | email }}"));
     // `graphql` renders only a GraphQL request's calls.
-    let e = rejected(&raw("{{ vars.raw | graphql }}"));
-    assert!(mentions(&e, "reads only a `{ in = \"graphql\", at = \"calls\" }` var"), "{e:?}");
-    ok(&raw("{{ vars.raw | email }}").replace(
-        "vars.raw = \"/raw\"",
-        "vars.raw = \"/raw\"\nvars.calls = { in = \"graphql\", at = \"calls\" }",
-    ).replace("scope = [\"raw\"]", "scope = [\"raw\", \"calls\"]").replace("{{ vars.raw | email }}", "{{ vars.calls | graphql }}"));
-    ok(&raw("Send {{vars.raw}} now"));
-    let e = rejected(&raw("{{ vars.raw | html }}"));
+    let e = rejected(&raw("{{ request.body.raw | graphql }}"));
+    assert!(mentions(&e, "consent filter 'graphql' reads only request.graphql.calls"), "{e:?}");
+    ok(&raw("{{ request.graphql.calls | graphql }}").replace("path = \"/send\"", "path = \"/send\"\nbody = \"graphql\""));
+    ok(&raw("Send {{request.body.raw}} now"));
+    ok(&raw("To {{ request.headers['x-to'] }}"));
+    let e = rejected(&raw("{{ request.body.raw | html }}"));
     assert!(
         mentions(&e, "consent filter 'html' is unknown (known: email, graphql)"),
         "{e:?}"
@@ -573,8 +607,9 @@ fn consent_filters_are_the_ones_the_console_implements() {
     // A token the console's grammar does not read is refused, not left literal.
     for bad in [
         "{{ raw }}",
-        "{{ vars.a-b }}",
-        "{{ vars.raw",
+        "{{ vars.raw }}",
+        "{{ request.body.a-b }}",
+        "{{ request.body.raw",
         "{{ secret.raw | basic }}",
     ] {
         rejected(&raw(bad));
@@ -589,7 +624,7 @@ id = "big"
 label = "Big purchase"
 method = "POST"
 path = "/buy"
-when = "vars.amount > 80"
+condition = "has(request.body.amount) && request.body.amount > 80"
 level = "ask-always"
 "#;
 
@@ -598,6 +633,8 @@ fn policy_rules_are_recognized_whole_or_rejected() {
     let def = admit(None, REQ_SERVICE, Some(RULE)).expect("valid policy");
     let rule = &def.policy.as_ref().unwrap().rules[0];
     assert_eq!(rule.level, Some(AccessLevel::AskAlways));
+    assert!(rule.condition.is_some());
+    assert!(def.warnings.is_empty(), "{:?}", def.warnings);
     for (from, to, why) in [
         (
             "level = \"ask-always\"",
@@ -605,11 +642,10 @@ fn policy_rules_are_recognized_whole_or_rejected() {
             "level 'sometimes' is unknown",
         ),
         ("level = \"ask-always\"\n", "", "declares no level"),
-        ("vars.amount > 80", "amount is big", "not a valid CEL condition"),
         (
-            "vars.amount > 80",
-            "vars.total > 80",
-            "references var 'total'",
+            "has(request.body.amount) && request.body.amount > 80",
+            "amount is big",
+            "is not valid",
         ),
         (
             "label = \"Big purchase\"",
@@ -643,194 +679,87 @@ fn policy_rules_are_recognized_whole_or_rejected() {
     ));
 }
 
-/// A rule that names nothing it matches (no `method`, `path`, body or when)
-/// matches every request: refused. With a body or a when it decides on
-/// those.
+/// A rule that names nothing it matches (no `method`, `path` or condition)
+/// matches every request: refused. With a condition it decides on that.
 #[test]
 fn a_rule_matching_every_request_is_refused() {
     let all = "[[rule]]\nid = \"all\"\nlabel = \"All\"\nlevel = \"deny\"\n";
     let e = rejected_with(GITHUB, all);
     assert!(mentions(&e, "matches every request"), "{e:?}");
-    let body = all.replace("level", "body = \"delete\"\nlevel");
-    assert!(admit(None, GITHUB, Some(&body)).is_ok());
+    let conditioned = all.replace("level", "condition = \"request.query.force == '1'\"\nlevel");
+    assert!(admit(None, GITHUB, Some(&conditioned)).is_ok());
 }
 
+/// The 2.0 `when` and `body` regex are refused with the replacement spelled
+/// out.
 #[test]
-fn when_that_is_not_cel_over_declared_vars_is_rejected() {
-    for (when, why) in [
-        ("vars.amount > 80usd", "not a valid CEL condition"),
-        ("vars.amount >= NaN", "`NaN` is not a known name"),
-        ("vars.amount == unlimited", "`unlimited` is not a known name"),
-        ("amount > 80", "`amount` is not a known name"),
-        ("1 > 0", "reads no `vars.<name>`"),
-        ("vars.nope.amount > 1", "names shape 'nope'"),
-        (
-            "vars.purchase.total > 1",
-            "[requests.purchase] does not declare",
-        ),
-    ] {
-        let e = rejected_with(REQ_SERVICE, &RULE.replace("vars.amount > 80", when));
-        assert!(mentions(&e, why), "{when}: {e:?}");
-    }
-    // A qualified var the shape declares and binds is fine; one it declares
-    // but does not bind is refused.
-    assert!(admit(
-        None,
+fn the_2_0_rule_syntax_is_refused_with_its_replacement() {
+    let e = rejected_with(
         REQ_SERVICE,
-        Some(&RULE.replace("vars.amount > 80", "vars.purchase.amount > 80"))
-    )
-    .is_ok());
-    let svc = REQ_SERVICE.replace(
-        "vars.amount = \"/amount\"",
-        "vars.amount = \"/amount\"\nvars.memo = \"/memo\"",
+        &RULE.replace("condition = \"has(request.body.amount) && request.body.amount > 80\"", "when = \"vars.amount > 80\""),
     );
-    let e = rejected_with(
-        &svc,
-        &RULE.replace("vars.amount > 80", "vars.purchase.memo == 'x'"),
+    assert!(
+        mentions(&e, "rule 'big': `when` is not read; use condition = \"request.body.amount > 80\""),
+        "{e:?}"
     );
-    assert!(mentions(&e, "[requests.purchase] does not bind"), "{e:?}");
-    // Standard CEL is accepted: macros, functions, comparisons of any type.
-    for ok in [
-        "vars.amount == 'unlimited'",
-        "double(vars.amount) > 80.0",
-        "['a', 'b'].exists(p, string(vars.amount).startsWith(p))",
-        "has(vars.amount) && vars.amount > 80",
+    let e = rejected_with(GITHUB, &RULE.replace("level", "body = \"gift\"\nlevel"));
+    assert!(
+        mentions(&e, "rule 'big': `body` (a regex) is not read; use condition = \"request.body.amount > 80\""),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_condition_that_is_not_cel_over_the_request_is_rejected() {
+    let cond = "has(request.body.amount) && request.body.amount > 80";
+    for (bad, why) in [
+        ("request.body.amount > 80usd", "is not valid"),
+        ("request.body.amount >= NaN", "`NaN` is not a known name"),
+        ("request.body.amount == unlimited", "`unlimited` is not a known name"),
+        ("vars.amount > 80", "`vars` is not a known name"),
+        ("request.path == '/buy'", "select the path with `path"),
+        ("request.method == 'POST'", "select the method with `method"),
+        ("request.params.owner == 'x'", "name the segment in `path`"),
+        ("request.body.model.lowerAscii() == 'o3'", "`lowerAscii()` is not a function"),
+        ("request.body.contains('x') && request.body.a == 1", "whole (its text) and a member"),
+    ] {
+        let e = rejected_with(REQ_SERVICE, &RULE.replace(cond, bad));
+        assert!(mentions(&e, why), "{bad}: {e:?}");
+    }
+    // Standard CEL is accepted: macros, functions, comparisons of any type,
+    // headers and the query.
+    for good in [
+        "request.body.amount == 'unlimited'",
+        "double(request.body.amount) > 80.0",
+        "['a', 'b'].exists(p, string(request.body.amount).startsWith(p))",
+        "'x-account' in request.headers && request.headers['x-account'] == 'prod'",
+        "request.query.force == '1'",
     ] {
         assert!(
-            admit(None, REQ_SERVICE, Some(&RULE.replace("vars.amount > 80", ok))).is_ok(),
-            "{ok}"
+            admit(None, REQ_SERVICE, Some(&RULE.replace(cond, good))).is_ok(),
+            "{good}"
         );
     }
 }
 
+/// A member read with no presence guard is admitted with a warning that says
+/// what it means and offers the guard.
 #[test]
-fn when_var_must_be_bound() {
-    let svc = REQ_SERVICE.replace(
-        "vars.amount = \"/amount\"",
-        "vars.amount = \"/amount\"\nvars.risk = \"/risk\"",
+fn an_unguarded_read_is_a_warning_not_a_refusal() {
+    let cond = "has(request.body.amount) && request.body.amount > 80";
+    let def = admit(None, REQ_SERVICE, Some(&RULE.replace(cond, "request.body.max_tokens > 1000"))).unwrap();
+    assert_eq!(
+        def.warnings,
+        ["rule 'big': the condition reads request.body.max_tokens with no presence test: a request without it is decided ask-always by this rule too; guard it with has(request.body.max_tokens) && …"]
     );
-    let policy = RULE.replace("vars.amount > 80", "vars.risk == 'high'");
-    let e = rejected_with(&svc, &policy);
-    assert!(mentions(&e, "[requests.purchase] does not bind"), "{e:?}");
-}
-
-/// A `when` var is judged per shape covering the rule's `method` / `path`, never
-/// against the union of all shapes.
-#[test]
-fn when_var_is_declared_and_bound_by_every_shape_covering_the_rule() {
-    let svc = |pay: &str| {
-        format!(
-            "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n\
-             [requests.transfer]\nmethod = \"POST\"\npath = \"/transfer\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n{pay}"
-        )
-    };
-    let rule = |m: &str, when: &str| {
-        format!(
-            "[[rule]]\nid = \"big\"\nlabel = \"Big payment\"\n{}when = \"{when}\"\nlevel = \"ask-always\"\n",
-            sel(m)
-        )
-    };
-    // No shape covers POST /pay: the var never resolves there.
-    let e = rejected_with(&svc(""), &rule("POST /pay", "vars.amount > 100"));
-    assert!(mentions(&e, "no [requests] shape covers"), "{e:?}");
-    // The covering shape declares the var but does not bind it, while
-    // another shape binds it.
-    let unbound = "[requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.amount = \"/amount\"\n";
-    let e = rejected_with(&svc(unbound), &rule("POST /pay", "vars.amount > 100"));
-    assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
-    // The covering shape does not declare it.
-    let other =
-        "[requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.total = \"/total\"\nscope = [\"total\"]\n";
-    let e = rejected_with(&svc(other), &rule("POST /pay", "vars.amount > 100"));
-    assert!(
-        mentions(&e, "'amount', which [requests.pay] does not declare"),
-        "{e:?}"
-    );
-    // A rule spanning both shapes needs the var from each.
-    let e = rejected_with(&svc(other), &rule("POST /:any", "vars.amount > 100"));
-    assert!(mentions(&e, "[requests.pay] does not declare"), "{e:?}");
-    let e = rejected_with(&svc(unbound), &rule("/*", "vars.amount > 100"));
-    assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
-    let bound =
-        "[requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n";
-    for m in ["POST /pay", "POST /:any", "/*"] {
-        assert!(
-            admit(None, &svc(bound), Some(&rule(m, "vars.amount > 100"))).is_ok(),
-            "{m}"
-        );
-    }
-    // A rule with no `method` or `path` covers every shape.
-    let no_match = "[[rule]]\nid = \"big\"\nlabel = \"Big\"\nwhen = \"vars.amount > 100\"\nlevel = \"ask-always\"\n";
-    assert!(admit(None, &svc(bound), Some(no_match)).is_ok());
-    let e = rejected_with(&svc(unbound), no_match);
-    assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
-    // Qualified: the named shape must cover the rule's paths.
-    let e = rejected_with(
-        &svc(bound),
-        &rule("POST /pay", "vars.transfer.amount > 100"),
-    );
-    assert!(
-        mentions(&e, "[requests.transfer] does not cover the rule's `method` / `path`"),
-        "{e:?}"
-    );
-    assert!(admit(
-        None,
-        &svc(unbound),
-        Some(&rule("POST /:any", "vars.transfer.amount > 100"))
-    )
-    .is_ok());
-    let e = rejected_with(&svc(unbound), &rule("POST /:any", "vars.pay.amount > 100"));
-    assert!(mentions(&e, "[requests.pay] does not bind"), "{e:?}");
-}
-
-#[test]
-fn body_regex_compiles_at_load_or_rejects() {
-    let rule = |body: &str| {
-        format!(
-            "[[rule]]\nid = \"pub\"\nlabel = \"Make public\"\nmethod = \"PATCH\"\npath = \"/repos/:owner/:repo\"\nbody = '{}'\nlevel = \"ask-always\"\n",
-            body
-        )
-    };
-    let def = admit(None, GITHUB, Some(&rule("\"private\"\\s*:\\s*false"))).unwrap();
-    assert!(def.policy.unwrap().rules[0]
-        .body
-        .as_ref()
-        .unwrap()
-        .error()
-        .is_none());
-    let e = rejected_with(GITHUB, &rule("(unclosed"));
-    assert!(mentions(&e, "body regex"), "{e:?}");
-    let e = rejected_with(GITHUB, &rule(&"a".repeat(MAX_BODY_PATTERN_BYTES + 1)));
-    assert!(mentions(&e, "body is 1025 bytes"), "{e:?}");
-    // Compiled size is bounded explicitly.
-    let e = rejected_with(GITHUB, &rule("(\\w{50}){50}"));
-    assert!(mentions(&e, "body regex"), "{e:?}");
-}
-
-#[test]
-fn ask_on_the_body_where_a_shape_binds_is_rejected() {
-    let body_rule = |level: &str, m: &str| {
-        format!(
-            "[[rule]]\nid = \"gift\"\nlabel = \"Gift cards\"\n{}body = \"gift\"\nlevel = \"{level}\"\n",
-            sel(m)
-        )
-    };
-    for level in ["ask", "ask-always"] {
-        for m in ["POST /buy", "/buy", "POST /:any", "/*", "post /buy"] {
-            let e = rejected_with(REQ_SERVICE, &body_rule(level, m));
-            assert!(
-                mentions(&e, "[requests.purchase] covers"),
-                "{level} {m}: {e:?}"
-            );
-        }
-        // Another path, or another method: no shape covers it.
-        assert!(admit(None, REQ_SERVICE, Some(&body_rule(level, "POST /refund"))).is_ok());
-        assert!(admit(None, REQ_SERVICE, Some(&body_rule(level, "GET /buy"))).is_ok());
-    }
-    // allow / deny mint no approval: a body may decide them anywhere.
-    for level in ["allow", "deny"] {
-        assert!(admit(None, REQ_SERVICE, Some(&body_rule(level, "POST /buy"))).is_ok());
-    }
+    let deny = RULE.replace(cond, "request.headers['x-account'] == 'prod'").replace("ask-always", "deny");
+    let def = admit(None, REQ_SERVICE, Some(&deny)).unwrap();
+    assert!(mentions(&def.warnings, "is denied by this rule too; guard it with 'x-account' in request.headers && …"), "{:?}", def.warnings);
+    let allow = RULE.replace(cond, "request.body.amount < 10").replace("ask-always", "allow");
+    let def = admit(None, REQ_SERVICE, Some(&allow)).unwrap();
+    assert!(mentions(&def.warnings, "this rule doesn't allow a request without it"), "{:?}", def.warnings);
+    let shape = REQ_SERVICE.replace("path = \"/buy\"", "path = \"/buy\"\ncondition = \"request.body.amount > 1\"");
+    assert!(mentions(&ok(&shape).warnings, "[requests.purchase]: the condition reads request.body.amount with no presence test: a request without it doesn't match this shape"));
 }
 
 #[test]
@@ -839,16 +768,7 @@ fn rule_method_word_is_case_insensitive() {
     let def = admit(None, GITHUB, Some(policy)).unwrap();
     let rules = def.policy.unwrap().rules;
     let decide = |m: &str, p: &str| {
-        crate::core::policy::evaluate(
-            m,
-            p,
-            None,
-            &crate::core::policy::VarMap::new(),
-            Some(&rules),
-            None,
-            &crate::core::policy::Policy::default(),
-            &[],
-        )
+        crate::core::policy::evaluate(&crate::core::request::Request::bare(m, p), Some(&rules), None, &crate::core::policy::Policy::default(), &[]).unwrap()
     };
     assert_eq!(decide("DELETE", "/repos/o/r"), AccessLevel::Deny);
     assert_eq!(decide("GET", "/repos/o/r"), AccessLevel::Allow);
@@ -857,27 +777,16 @@ fn rule_method_word_is_case_insensitive() {
 // ── limits ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn body_rules_are_capped() {
-    let rules: String = (0..=MAX_BODY_RULES)
-        .map(|i| {
-            format!("[[rule]]\nid = \"b{i}\"\nlabel = \"B\"\nmethod = \"POST\"\npath = \"/b{i}\"\nbody = \"x\"\nlevel = \"deny\"\n")
-        })
-        .collect();
-    let e = rejected_with(GITHUB, &rules);
-    assert!(mentions(&e, "rules with a body has 17 entries"), "{e:?}");
-}
-
-#[test]
-fn over_limit_lists_never_reach_the_cross_checks() {
-    // A shape and a body rule with huge path lists: refused on the counts,
-    // before any pairwise rule/shape comparison (12k x 12k would be ~1.4e8).
+fn over_limit_lists_are_refused_on_their_counts() {
+    // A shape and a rule with huge path lists: refused on the counts, before
+    // anything is compiled.
     let matches = vec!["\"/b\""; 12_000].join(",");
     let svc = format!(
-        "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n[requests.purchase]\npath = [{}]\nvars.amount = \"/amount\"\nscope = [\"amount\"]\n",
+        "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n[requests.purchase]\npath = [{}]\nscope = [\"request.body.amount\"]\n",
         matches
     );
     let rule = format!(
-        "[[rule]]\nid = \"g\"\nlabel = \"G\"\nmethod = \"POST\"\npath = [{}]\nbody = \"gift\"\nlevel = \"ask\"\n",
+        "[[rule]]\nid = \"g\"\nlabel = \"G\"\nmethod = \"POST\"\npath = [{}]\ncondition = \"request.body.gift == true\"\nlevel = \"ask\"\n",
         matches
     );
     assert!(svc.len() < MAX_FILE_BYTES && rule.len() < MAX_FILE_BYTES);
