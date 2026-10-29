@@ -739,6 +739,9 @@ fn fresh_keyset_matches_a_fresh_daemon_adopt() {
         ("admin signed on an untrusted fold", "triple_short_anchor", false, native(Some(&p.c), true, false), dropped.clone()),
         ("admin signed after a failed adopt", "triple_bad_own_cid", false, native(Some(&p.c), true, false), dropped.clone()),
     ];
+    // Items for one honor_rows batch over the delegated vault, with the verdict
+    // each single call gives.
+    let mut batch: Vec<(Value, Value)> = Vec::new();
     for (label, scenario, rs, mut row, expected) in owner_config_cases {
         if label == "legacy tombstone with a live signature" {
             row["sig"] = json!(sidecar(&p.c, "policy", &item, 4, &ct, true));
@@ -778,6 +781,10 @@ fn fresh_keyset_matches_a_fresh_daemon_adopt() {
             assert_eq!(row_expected, expected, "owner_config_row {}", label);
         } else {
             assert_eq!(row_expected, dropped, "a tombstone signed as live is not honored");
+        }
+        if scenario == "triple_delegated" && !rs {
+            batch.push((with(&row, json!({ "kind": "owner_config" })), expected.clone()));
+            batch.push((with(&row, json!({ "kind": "owner_config_row" })), row_expected.clone()));
         }
         cases.push(case(&format!("owner_config {}", label), "owner_config", with(&base(scenario, rs), row.clone()), expected));
         cases.push(case(&format!("owner_config_row {}", label), "owner_config_row", with(&base(scenario, rs), row), row_expected));
@@ -822,6 +829,9 @@ fn fresh_keyset_matches_a_fresh_daemon_adopt() {
         };
         assert_eq!(got.is_some(), ok, "agent_record {}", label);
         let expected = json!({ "honored": ok, "data": if ok { row["body"].clone() } else { Value::Null } });
+        if scenario == "triple_delegated" && !rs {
+            batch.push((with(&row, json!({ "kind": "agent_record" })), expected.clone()));
+        }
         cases.push(case(&format!("agent_record {}", label), "agent_record", with(&base(scenario, rs), row), expected));
     }
 
@@ -853,8 +863,32 @@ fn fresh_keyset_matches_a_fresh_daemon_adopt() {
             )
         });
         assert_eq!(json!(got), expected, "sidecar_signer {}", label);
+        if scenario == "triple_delegated" {
+            let verdict = json!({ "honored": !expected.is_null(), "data": expected });
+            batch.push((with(&row, json!({ "kind": "sidecar_signer" })), verdict));
+        }
         cases.push(case(&format!("sidecar_signer {}", label), "sidecar_signer", with(&base(scenario, false), row), expected));
     }
+
+    // One batch: every item judged against one adoption, as each single call
+    // judges it; an item that does not parse is reported and the rest judged.
+    let bad_ct = sprott_trust::decode_keys_data_field("!!").unwrap_err();
+    let (first, _) = batch[0].clone();
+    batch.push((
+        with(&first, json!({ "ct_b64": "!!" })),
+        json!({ "honored": false, "data": null, "error": format!("ct_b64: {}", bad_ct) }),
+    ));
+    batch.push((
+        with(&first, json!({ "kind": "nope" })),
+        json!({ "honored": false, "data": null, "error": "unknown kind nope" }),
+    ));
+    let (items, verdicts): (Vec<Value>, Vec<Value>) = batch.into_iter().unzip();
+    cases.push(case(
+        "honor_rows on the delegated vault",
+        "honor_rows",
+        with(&base("triple_delegated", false), json!({ "items": items })),
+        Value::Array(verdicts),
+    ));
 
     for (label, scenario, requester, signer, expected) in [
         ("the requester", "triple_delegated", &mid, &mid, "requester"),

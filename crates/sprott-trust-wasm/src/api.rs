@@ -342,6 +342,42 @@ fn sidecar_signer_of(f: &Fold, v: &Value) -> Out {
     )))
 }
 
+/// `honor_rows(input)`: the fold input and `items`, an array of rows to judge,
+/// each `{kind, ...}` with the fields of the call its kind names: `owner_config`,
+/// `owner_config_row`, `agent_record` or `sidecar_signer`. The keyset is adopted
+/// and folded once for all of them. Returns one entry per item, in order:
+/// `{"honored": bool, "data": ...}` as that call gives it (for `sidecar_signer`:
+/// `honored` = the signature verifies, `data` = the signer or `null`), or
+/// `{"honored": false, "data": null, "error": "..."}` for an item whose fields
+/// do not parse (the others are still judged).
+pub fn honor_rows(input: &str) -> String {
+    call(input, honor_rows_value)
+}
+
+fn honor_rows_value(v: &Value) -> Out {
+    let f = Fold::parse(v)?;
+    let items = get(v, "items")
+        .ok_or_else(|| "items is missing".to_string())?
+        .as_array()
+        .ok_or_else(|| "items is not an array".to_string())?;
+    let verdicts = items
+        .iter()
+        .map(|item| {
+            let verdict = match item.get("kind").and_then(|k| k.as_str()) {
+                Some("owner_config") => owner_config_of(&f, item, Reading::Fold),
+                Some("owner_config_row") => owner_config_of(&f, item, Reading::Row),
+                Some("agent_record") => agent_record_of(&f, item),
+                Some("sidecar_signer") => sidecar_signer_of(&f, item)
+                    .map(|signer| json!({ "honored": !signer.is_null(), "data": signer })),
+                Some(other) => Err(format!("unknown kind {}", other)),
+                None => Err("kind is missing".to_string()),
+            };
+            verdict.unwrap_or_else(|e| json!({ "honored": false, "data": null, "error": e }))
+        })
+        .collect();
+    Ok(Value::Array(verdicts))
+}
+
 /// `approval_authority(input)`: the fold input and `{requester: [us_id],
 /// signer}`. Returns `"requester"`, `"admin"` or `"refused"`: the requester
 /// always may approve; anyone else only as an admin of a verified fold.

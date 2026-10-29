@@ -28,6 +28,12 @@ pub fn owner_config_row(input: &str) -> String {
     api::owner_config_row(input)
 }
 
+/// Many rows judged against one adoption of the keyset ([`api::honor_rows`]).
+#[wasm_bindgen]
+pub fn honor_rows(input: &str) -> String {
+    api::honor_rows(input)
+}
+
 /// Whether the daemon's fold honors an authorized-agent row, and its data
 /// ([`api::agent_record`]).
 #[wasm_bindgen]
