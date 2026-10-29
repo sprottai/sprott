@@ -1212,7 +1212,7 @@ fn verify_rekey_proof(
     // A re-key must be authorized by an OWNER, so a confirmed owner-set is
     // required. `uik` is present here, so `trust` is Verified or Untrusted;
     // Untrusted (anchor stripped) ⇒ no confirmable owner ⇒ refuse the bump.
-    let MembershipTrust::Verified(membership) = trust else {
+    let MembershipTrust::Verified(_) = trust else {
         return false;
     };
     let Some(proof) = uik.rekey_proof.as_ref() else {
@@ -1226,9 +1226,12 @@ fn verify_rekey_proof(
     if proof.k_commitment.as_slice() != rekey_commitment(content_key).as_slice() {
         return false;
     }
-    // The signer must be an ADMIN in the verified role set (D). (`is_admin`, not a
-    // pattern: a legacy `"owner"` grant reads as `LegacyOwner`, also an admin.)
-    let admin = membership
+    // The signer must have been an ADMIN when it signed (D): in the fold of the log
+    // prefix the proof commits, which `trust` being Verified has just checked against
+    // the served log. Not today's roles: an admin who re-keyed and was later demoted
+    // still signed with authority, and the vault must stay readable. (`is_admin`, not
+    // a pattern: a legacy `"owner"` grant reads as `LegacyOwner`, also an admin.)
+    let admin = fold_roles_of(uik, vault_id, Some(proof.membership_len as usize))
         .get(&proof.signer_id)
         .is_some_and(|r| r.is_admin());
     if !admin {
@@ -1237,6 +1240,131 @@ fn verify_rekey_proof(
     // Signed under a PUBLISHED member key whose id matches the claimed signer
     // (C.1 anchor) — a backend-minted key isn't in the keyset.
     proof.signature_valid(uik, vault_id)
+}
+
+/// The role fold of `uik` ([`PerItemVault::fold_roles`]): the checkpoint under the
+/// current root, then the delegation log in `(seq, sig)` order. `limit`: fold only the
+/// first `limit` events of that order, which is the prefix a re-key proof commits
+/// (`membership_len`, [`membership_prefix_ok`]), so a proof's signer is judged by the
+/// roles at the time it signed (issuance-time authority, as for log events).
+fn fold_roles_of(
+    uik: &KeysetUik,
+    vault_id: &str,
+    limit: Option<usize>,
+) -> BTreeMap<String, crate::storage::plaintext::MemberRole> {
+    use crate::storage::plaintext::MemberRole;
+    let mut map: BTreeMap<String, MemberRole> = BTreeMap::new();
+    let Some((root_pub, role_epoch)) = resolve_current_root(uik, vault_id) else {
+        return map; // no resolvable root → no confirmable owner
+    };
+    let root_id = crate::identity::derive_id(crate::identity::IdKind::User, &root_pub);
+    // Genesis: the current root is an owner (TOFU-pinned anchor + succession).
+    map.insert(root_id.clone(), MemberRole::Admin);
+    // Checkpoint: root-signed grants @ the current (succession-derived) role_epoch
+    // (depth-1 → a fresh daemon verifies with no history).
+    for cred in uik.creds.values() {
+        // The root's ownership is the genesis pin — a checkpoint grant must NEVER
+        // overwrite/demote it (defense in depth for "the owner-set always contains
+        // the root as Owner").
+        if cred.user_id == root_id {
+            continue;
+        }
+        // Self-certifying: the cred's `user_id` label MUST derive from its
+        // `sig_pub`, so a spoofed `(user_id, sig_pub)` pair can't seat a phantom
+        // owner keyed on a label the server chose.
+        let Ok(cred_pub) = <[u8; 32]>::try_from(cred.sig_pub.as_slice()) else {
+            continue;
+        };
+        if crate::identity::derive_id(crate::identity::IdKind::User, &cred_pub) != cred.user_id {
+            continue;
+        }
+        let Ok(sig) = <[u8; 64]>::try_from(cred.role_sig.as_slice()) else {
+            continue; // no / malformed grant → not in the checkpoint
+        };
+        // A legacy admin grant was signed over `"owner"`, a new one over
+        // `"admin"`: either spelling of the cred's OWN role verifies it.
+        let granted = role_sig_tokens(cred.role).iter().any(|tok| {
+            let input = crate::identity::role_grant_input(vault_id, &cred.user_id, tok, role_epoch);
+            crate::identity::verify(&root_pub, &input, &sig)
+        });
+        if granted {
+            map.insert(cred.user_id.clone(), cred.role);
+        }
+    }
+    // Delegation log: apply in a DETERMINISTIC total order; only events on the
+    // current role_epoch (a pre-compaction replay carries an older epoch → ignored).
+    let mut events: Vec<&DelegationEvent> = uik
+        .delegation_log
+        .iter()
+        .filter(|e| e.role_epoch == role_epoch)
+        .collect();
+    // Sort by (seq, sig) — NOT seq alone: a stable sort by seq leaves same-seq
+    // order at the mercy of storage/Vec order, which the server controls, so the
+    // three implementations (daemon / backend / browser) could pick different
+    // same-seq winners. Breaking the tie on the signature bytes makes the winner
+    // deterministic and server-independent.
+    events.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.sig.cmp(&b.sig)));
+    if let Some(n) = limit {
+        events.truncate(n);
+    }
+    let mut last_seq: Option<u64> = None;
+    for e in events {
+        if matches!(last_seq, Some(ls) if e.seq <= ls) {
+            continue; // a seq already CONSUMED by a validated event
+        }
+        // Issuance-time authority: the granter must be an Owner in the fold SO FAR.
+        // A junk / non-owner event must NOT consume the seq slot (else it could
+        // suppress a legitimate same-seq event — the dup guard would then drop the
+        // real one), so `last_seq` advances ONLY AFTER full validation below.
+        if !map.get(&e.granter_id).is_some_and(|r| r.is_admin()) {
+            continue;
+        }
+        // The granter's verifying key rides INLINE and is SELF-CERTIFYING: it must
+        // derive to `granter_id`. This makes the event immune to a poisoned cred row
+        // (which lies about `sig_pub`) AND keeps it verifiable after the granter's
+        // own cred row is deleted at offboard (so NON-CASCADE survives eviction).
+        let Ok(granter_pub) = <[u8; 32]>::try_from(e.granter_sig_pub.as_slice()) else {
+            continue;
+        };
+        if crate::identity::derive_id(crate::identity::IdKind::User, &granter_pub) != e.granter_id {
+            continue;
+        }
+        if !e.signature_verifies(vault_id, &granter_pub) {
+            continue;
+        }
+        // VALIDATED (owner + self-certifying key + signature): now consume the seq
+        // slot, so a later same-seq event is a dup (equivocation) and is dropped.
+        last_seq = Some(e.seq);
+        // The creator (root) is seated at the base for ISSUANCE-TIME authority (so
+        // grants they signed verify), but is a NORMAL owner in the FINAL set: any
+        // owner (incl. the creator themselves) can be removed/demoted via the log
+        // (creator-offboard is just a `remove`). The ONLY invariant is the
+        // owner-set is never EMPTIED — a remove/demote that would drop the LAST
+        // owner is ignored (last-owner guard; also enforced at write time in the
+        // console). This replaces the old "root is permanently immune" rule.
+        let admin_count =
+            |m: &BTreeMap<String, MemberRole>| m.values().filter(|r| r.is_admin()).count();
+        match e.op.as_str() {
+            "remove" => {
+                if map.get(&e.subject_id).is_some_and(|r| r.is_admin()) && admin_count(&map) <= 1 {
+                    continue; // last-admin guard: never empty the admin set
+                }
+                map.remove(&e.subject_id); // NON-CASCADE: only the subject
+            }
+            "set" => {
+                // A demote (admin → member) of the last admin would empty it → skip.
+                if !e.role.is_admin()
+                    && map.get(&e.subject_id).is_some_and(|r| r.is_admin())
+                    && admin_count(&map) <= 1
+                {
+                    continue;
+                }
+                map.insert(e.subject_id.clone(), e.role);
+            }
+            _ => {} // unknown op → ignore
+        }
+    }
+    map
 }
 
 /// Membership anti-rollback check (delegation-log-review-findings.md C2): the current
@@ -2924,126 +3052,23 @@ impl PerItemVault {
         &self,
         vault_id: &str,
     ) -> BTreeMap<String, crate::storage::plaintext::MemberRole> {
-        use crate::storage::plaintext::MemberRole;
-        let mut map: BTreeMap<String, MemberRole> = BTreeMap::new();
-        let Some(uik) = self.keyset.uik.as_ref() else {
-            return map;
-        };
-        let Some((root_pub, role_epoch)) = resolve_current_root(uik, vault_id) else {
-            return map; // no resolvable root → no confirmable owner
-        };
-        let root_id = crate::identity::derive_id(crate::identity::IdKind::User, &root_pub);
-        // Genesis: the current root is an owner (TOFU-pinned anchor + succession).
-        map.insert(root_id.clone(), MemberRole::Admin);
-        // Checkpoint: root-signed grants @ the current (succession-derived) role_epoch
-        // (depth-1 → a fresh daemon verifies with no history).
-        for cred in uik.creds.values() {
-            // The root's ownership is the genesis pin — a checkpoint grant must NEVER
-            // overwrite/demote it (defense in depth for "the owner-set always contains
-            // the root as Owner").
-            if cred.user_id == root_id {
-                continue;
-            }
-            // Self-certifying: the cred's `user_id` label MUST derive from its
-            // `sig_pub`, so a spoofed `(user_id, sig_pub)` pair can't seat a phantom
-            // owner keyed on a label the server chose.
-            let Ok(cred_pub) = <[u8; 32]>::try_from(cred.sig_pub.as_slice()) else {
-                continue;
-            };
-            if crate::identity::derive_id(crate::identity::IdKind::User, &cred_pub) != cred.user_id
-            {
-                continue;
-            }
-            let Ok(sig) = <[u8; 64]>::try_from(cred.role_sig.as_slice()) else {
-                continue; // no / malformed grant → not in the checkpoint
-            };
-            // A legacy admin grant was signed over `"owner"`, a new one over
-            // `"admin"`: either spelling of the cred's OWN role verifies it.
-            let granted = role_sig_tokens(cred.role).iter().any(|tok| {
-                let input =
-                    crate::identity::role_grant_input(vault_id, &cred.user_id, tok, role_epoch);
-                crate::identity::verify(&root_pub, &input, &sig)
-            });
-            if granted {
-                map.insert(cred.user_id.clone(), cred.role);
-            }
+        match self.keyset.uik.as_ref() {
+            Some(uik) => fold_roles_of(uik, vault_id, None),
+            None => BTreeMap::new(),
         }
-        // Delegation log: apply in a DETERMINISTIC total order; only events on the
-        // current role_epoch (a pre-compaction replay carries an older epoch → ignored).
-        let mut events: Vec<&DelegationEvent> = uik
-            .delegation_log
-            .iter()
-            .filter(|e| e.role_epoch == role_epoch)
-            .collect();
-        // Sort by (seq, sig) — NOT seq alone: a stable sort by seq leaves same-seq
-        // order at the mercy of storage/Vec order, which the server controls, so the
-        // three implementations (daemon / backend / browser) could pick different
-        // same-seq winners. Breaking the tie on the signature bytes makes the winner
-        // deterministic and server-independent.
-        events.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.sig.cmp(&b.sig)));
-        let mut last_seq: Option<u64> = None;
-        for e in events {
-            if matches!(last_seq, Some(ls) if e.seq <= ls) {
-                continue; // a seq already CONSUMED by a validated event
-            }
-            // Issuance-time authority: the granter must be an Owner in the fold SO FAR.
-            // A junk / non-owner event must NOT consume the seq slot (else it could
-            // suppress a legitimate same-seq event — the dup guard would then drop the
-            // real one), so `last_seq` advances ONLY AFTER full validation below.
-            if !map.get(&e.granter_id).is_some_and(|r| r.is_admin()) {
-                continue;
-            }
-            // The granter's verifying key rides INLINE and is SELF-CERTIFYING: it must
-            // derive to `granter_id`. This makes the event immune to a poisoned cred row
-            // (which lies about `sig_pub`) AND keeps it verifiable after the granter's
-            // own cred row is deleted at offboard (so NON-CASCADE survives eviction).
-            let Ok(granter_pub) = <[u8; 32]>::try_from(e.granter_sig_pub.as_slice()) else {
-                continue;
-            };
-            if crate::identity::derive_id(crate::identity::IdKind::User, &granter_pub)
-                != e.granter_id
-            {
-                continue;
-            }
-            if !e.signature_verifies(vault_id, &granter_pub) {
-                continue;
-            }
-            // VALIDATED (owner + self-certifying key + signature): now consume the seq
-            // slot, so a later same-seq event is a dup (equivocation) and is dropped.
-            last_seq = Some(e.seq);
-            // The creator (root) is seated at the base for ISSUANCE-TIME authority (so
-            // grants they signed verify), but is a NORMAL owner in the FINAL set: any
-            // owner (incl. the creator themselves) can be removed/demoted via the log
-            // (creator-offboard is just a `remove`). The ONLY invariant is the
-            // owner-set is never EMPTIED — a remove/demote that would drop the LAST
-            // owner is ignored (last-owner guard; also enforced at write time in the
-            // console). This replaces the old "root is permanently immune" rule.
-            let admin_count = |m: &BTreeMap<String, MemberRole>| {
-                m.values().filter(|r| r.is_admin()).count()
-            };
-            match e.op.as_str() {
-                "remove" => {
-                    if map.get(&e.subject_id).is_some_and(|r| r.is_admin())
-                        && admin_count(&map) <= 1
-                    {
-                        continue; // last-admin guard: never empty the admin set
-                    }
-                    map.remove(&e.subject_id); // NON-CASCADE: only the subject
-                }
-                "set" => {
-                    // A demote (admin → member) of the last admin would empty it → skip.
-                    if !e.role.is_admin()
-                        && map.get(&e.subject_id).is_some_and(|r| r.is_admin())
-                        && admin_count(&map) <= 1
-                    {
-                        continue;
-                    }
-                    map.insert(e.subject_id.clone(), e.role);
-                }
-                _ => {} // unknown op → ignore
-            }
+    }
+
+    /// [`fold_roles`](Self::fold_roles) over only the first `events` delegation-log
+    /// events: the roles at the log prefix a re-key proof commits (`membership_len`).
+    pub(crate) fn fold_roles_at(
+        &self,
+        vault_id: &str,
+        events: usize,
+    ) -> BTreeMap<String, crate::storage::plaintext::MemberRole> {
+        match self.keyset.uik.as_ref() {
+            Some(uik) => fold_roles_of(uik, vault_id, Some(events)),
+            None => BTreeMap::new(),
         }
-        map
     }
 
     /// Fold all **live** items into a [`VaultPlaintextView`] — the per-item
@@ -5264,6 +5289,8 @@ pub(crate) mod tests {
         );
         {
             let uik = pv.keyset.uik.as_mut().unwrap();
+            // The owner is the vault's creator, so the fold seats it as an admin.
+            uik.creator_sig_pub = owner_sig_pub.clone();
             uik.generation = gen;
             uik.rekey_proof = Some(RekeyProof {
                 generation: gen,
@@ -5294,18 +5321,7 @@ pub(crate) mod tests {
             vault,
             &[0x00u8; 32]
         ));
-        // Signer is only a member (not owner) → reject.
-        let member_trust = MembershipTrust::Verified(
-            [(owner_id.clone(), MemberRole::Member)]
-                .into_iter()
-                .collect(),
-        );
-        assert!(!verify_rekey_proof(
-            &pv.keyset,
-            &member_trust,
-            vault,
-            &content
-        ));
+        // A signer that was never an admin: `rekey_signer_is_judged_when_it_signed`.
         // Untrusted (v2 anchor stripped) → can't confirm owner → reject.
         assert!(!verify_rekey_proof(
             &pv.keyset,
@@ -5338,6 +5354,53 @@ pub(crate) mod tests {
             vault,
             &content
         ));
+    }
+
+    /// A re-key proof's signer is judged by the roles when it signed (the log
+    /// prefix the proof commits), not today's: an admin who re-keyed and was later
+    /// demoted leaves the vault readable; a signer that was never an admin doesn't.
+    #[test]
+    fn rekey_signer_is_judged_when_it_signed() {
+        use crate::crypto::vault_key::UikRoot;
+        use crate::storage::plaintext::MemberRole;
+        let (vault, _a_id, b_id, c_id, mut pv) = authority_fixture();
+        let creator = UikRoot::from_root([0x11u8; 32]);
+        let b = UikRoot::from_root([0x22u8; 32]);
+        let c = UikRoot::from_root([0x33u8; 32]);
+        // The creator makes C an admin; C re-keys over that one-event log.
+        push_event(&mut pv, vault, &creator, "set", &c_id, MemberRole::Admin, 1, 0);
+        let content = [0xCDu8; 32];
+        let commit = rekey_commitment(&content).to_vec();
+        let prefix_sig = pv.keyset.uik.as_ref().unwrap().delegation_log[0].sig.clone();
+        let membership_hash = crate::identity::membership_commitment(&[prefix_sig.as_slice()]).to_vec();
+        let proof_by = |who: &UikRoot| {
+            let input = crate::identity::rekey_sig_input(vault, 1, &commit, &who.user_id(), 1, &membership_hash);
+            RekeyProof {
+                generation: 1,
+                k_commitment: commit.clone(),
+                sig: who.signing().sign(&input).to_vec(),
+                signer_id: who.user_id(),
+                membership_len: 1,
+                membership_hash: membership_hash.clone(),
+            }
+        };
+        {
+            let uik = pv.keyset.uik.as_mut().unwrap();
+            uik.generation = 1;
+            uik.rekey_proof = Some(proof_by(&c));
+        }
+        let opens = |pv: &PerItemVault| {
+            verify_rekey_proof(&pv.keyset, &pv.resolve_membership_trust(vault), vault, &content)
+        };
+        assert!(opens(&pv), "a proof by an admin opens");
+        // The creator then demotes C: C is a member today, the vault still opens.
+        push_event(&mut pv, vault, &creator, "set", &c_id, MemberRole::Member, 2, 0);
+        assert_eq!(pv.fold_roles(vault).get(&c_id), Some(&MemberRole::Member));
+        assert!(opens(&pv), "an admin demoted after re-keying still signed with authority");
+        // The same proof signed by B, a member throughout, is refused.
+        pv.keyset.uik.as_mut().unwrap().rekey_proof = Some(proof_by(&b));
+        assert!(!opens(&pv), "a proof by a never-admin is refused");
+        let _ = b_id;
     }
 
     /// A re-keyed vault (generation 1): a v2 keyset pinned to its creator, the
