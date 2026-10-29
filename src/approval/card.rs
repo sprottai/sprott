@@ -231,6 +231,58 @@ mod tests {
         assert_ne!(binding_mac(&[1u8; 32], &json), binding_mac(&[2u8; 32], &json));
     }
 
+    /// The shared vectors (`card_vectors.json`, copied byte for byte to the
+    /// console's `lib/approval-card-vectors.json`): a pinned sealed card opens
+    /// to its JSON, its MAC and the card-bound signing input match.
+    #[test]
+    fn the_shared_vectors_hold() {
+        use base64::engine::general_purpose::STANDARD;
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("card_vectors.json")).unwrap();
+        let s = |k: &str| v[k].as_str().unwrap().to_string();
+        let key = STANDARD.decode(s("content_key")).unwrap();
+        let gen = v["gen"].as_u64().unwrap();
+        let json = open(&s("sealed"), &key, &s("vault_id"), gen).expect("opens");
+        assert_eq!(String::from_utf8(json.clone()).unwrap(), s("card_json"));
+        let mac = binding_mac(&key, &json);
+        assert_eq!(STANDARD.encode(mac), s("mac"));
+        let base = STANDARD.decode(s("grant_id_input")).unwrap();
+        let bound = crate::identity::with_card_binding(base, &mac);
+        assert_eq!(STANDARD.encode(bound), s("grant_id_input_with_card"));
+    }
+
+    /// Prints a fresh vectors document (`cargo test -- --ignored
+    /// print_card_vectors --nocapture`); the pinned one stays authoritative.
+    #[test]
+    #[ignore]
+    fn print_card_vectors() {
+        use base64::engine::general_purpose::STANDARD;
+        let key = [0x42u8; 32];
+        let s = seal(card(), &key, "vault-vectors", 2).unwrap();
+        let json = card().json().unwrap();
+        let base = crate::identity::grant_id_input(
+            "vault-vectors",
+            "op-vectors",
+            &[0xb0u8; 32],
+            b"cred",
+            &[1u8; 32],
+            &[2u8; 48],
+            &[3u8; 32],
+            "us_vectors",
+        );
+        let doc = serde_json::json!({
+            "content_key": STANDARD.encode(key),
+            "vault_id": "vault-vectors",
+            "gen": 2,
+            "sealed": s.sealed,
+            "card_json": String::from_utf8(json).unwrap(),
+            "mac": STANDARD.encode(s.mac),
+            "grant_id_input": STANDARD.encode(&base),
+            "grant_id_input_with_card": STANDARD.encode(crate::identity::with_card_binding(base, &s.mac)),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+    }
+
     #[test]
     fn an_oversized_card_is_refused() {
         let big = Card {
