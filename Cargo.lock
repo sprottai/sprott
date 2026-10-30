@@ -3011,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "sprott"
-version = "2.1.2-rc.1"
+version = "2.1.2-rc.2"
 dependencies = [
  "apollo-compiler",
  "axum",
