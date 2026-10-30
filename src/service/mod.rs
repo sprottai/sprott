@@ -2860,6 +2860,45 @@ scope = ["request.body.memo"]
         }
     }
 
+    /// Every rule id the 2.0 rule sets had (v2.0.5) is still there: a user's
+    /// override names it, and an override of an id that is gone is refused
+    /// when it tightens (DESIGN §2). Retired ids are listed with why.
+    #[test]
+    fn every_2_0_rule_id_is_kept() {
+        const V2_0: &[(&str, &[&str])] = &[
+            ("circleci", &["trigger-pipeline", "job-ssh", "schedule-pipeline", "pipeline-definition", "approve-job", "rollback-project", "create-env-var", "add-project-key", "project-settings", "oidc-claims", "remove-context-restriction"]),
+            ("cloudflare", &["delete-dns-record", "overwrite-dns-record", "patch-dns-record", "batch-dns-records", "delete-zone"]),
+            ("cratesio", &["publish", "yank", "unyank", "update-version", "add-owner", "remove-owner", "add-trusted-publishing", "remove-trusted-publishing", "crate-settings", "revoke-token", "revoke-current-token"]),
+            ("gcalendar", &["list-events", "delete-event", "delete-calendar", "batch"]),
+            ("gcp", &["delete-project", "delete-instance", "delete-bucket", "mint-sa-key", "batch"]),
+            ("gdrive", &["list-files", "delete-file"]),
+            ("github", &["delete-repo", "transfer-repo", "make-public", "add-collaborator", "remove-collaborator", "set-branch-protection", "remove-branch-protection", "change-ruleset", "change-org-access", "add-deploy-key", "add-webhook", "edit-webhook", "set-actions-secret", "set-org-actions-secret", "dispatch-workflow", "repo-dispatch", "register-runner", "delete-branch", "delete-release", "graphql-gated-mutations"]),
+            ("gmail", &["list-emails", "list-labels", "read-email", "send-email", "modify-email", "delete-email"]),
+            ("googletasks", &["delete-tasklist", "clear-tasks"]),
+            ("neon", &["delete-project", "delete-branch", "delete-database", "delete-role", "mint-api-key"]),
+            ("openai", &["expensive-model", "batch-run"]),
+            ("railway", &["delete-infra", "delete-via-config", "mint-token", "change-access"]),
+            ("snaplii", &["purchase", "purchase-large", "transfer"]),
+            ("supabase", &["read-secrets", "delete-project", "mint-api-key", "open-network", "transfer-ownership"]),
+            ("vercel", &["delete-project", "delete-deployment", "delete-domain", "remove-member", "change-member", "create-webhook", "delete-integration"]),
+        ];
+        // A batch is decided by its requests (DESIGN §7): no batch rule.
+        const RETIRED: &[(&str, &str)] = &[("gcalendar", "batch"), ("gcp", "batch")];
+        let r = ServiceRegistry::load();
+        for (service, ids) in V2_0 {
+            let have: std::collections::HashSet<&str> = r
+                .default_policy_rules(service)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|rule| rule.id.as_deref())
+                .collect();
+            for id in *ids {
+                let retired = RETIRED.contains(&(*service, *id));
+                assert_eq!(have.contains(id), !retired, "{service} {id}");
+            }
+        }
+    }
+
     /// A Gmail `drafts/send` that names only a draft id reads as its own
     /// shape, whose card names the draft; one carrying the message reads as
     /// the send of that message.

@@ -567,22 +567,10 @@ pub struct Levels {
     pub ttl: Option<u64>,
 }
 
-/// A sparse user edit to one rule, keyed by rule id in `aux.policy.connections.
-/// <id>.rules`. Two modes:
-///   - **override** an existing built-in rule (set `level` and/or `ttl`; the id
-///     matches a built-in),
-///   - **add** a new rule (carries its own selector, `method` and / or
-///     `path`: having one is what makes it a new rule rather than an
-///     override).
-///
-/// Each selector key is read (and its patterns compiled) once, when the
-/// A sparse user edit to one rule, keyed by rule id in `aux.policy.connections.
-/// <id>.rules`. Two modes:
-///   - **override** an existing built-in rule (set `level`, `ttl`, `label`,
-///     `condition`; the id matches a built-in),
-///   - **add** a new rule (carries its own selector, `method`, `path` and / or
-///     `condition`: having one is what makes it a new rule rather than an
-///     override).
+/// The fields of a user rule the user added ([`UserRule`]): its selector
+/// (`method`, `path`, `condition`), `label`, `level` and `ttl`. A 2.0 entry's
+/// `match`, `when` and `body` are kept so the record reads back as stored;
+/// an entry that carries one is refused ([`RuleConfig::select`]).
 ///
 /// Each selector key is read (its patterns and condition compiled) once, when
 /// the sealed policy is read, and written back as it was stored.
@@ -700,9 +688,9 @@ pub struct ConnectionPolicy {
     /// Override this connection's default read/write floor (over the service's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Levels>,
-    /// Per-rule edits (override built-in by id) and additions (new id + match).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub rules: HashMap<String, RuleConfig>,
+    /// The user's rules on this connection, in order ([`UserRules`]).
+    #[serde(default, skip_serializing_if = "UserRules::is_empty")]
+    pub rules: UserRules,
 }
 
 /// The whole policy tree (`aux.policy`, PROTOCOL.md §5.2 / §6.4 `M.policy`).
@@ -804,61 +792,440 @@ pub fn merge_levels(user: Option<&Levels>, built_in: Option<&Levels>) -> Option<
 }
 
 
-/// Merge a connection's user [`RuleConfig`] edits onto a service's built-in
-/// rules. By id: an edit overrides `level` / `ttl` (and `label` / `condition`
-/// if given) of the matching built-in, in its place (an edit whose condition
-/// doesn't compile refuses the rule it produces); an entry with a selector
-/// whose id is *not* built-in is appended as a new rule, in id order (the
-/// declaration order a tie between equally strict rules goes to). An entry in
-/// 2.0 syntax is appended as a refused rule, whatever its id, and overrides
-/// nothing. PROTOCOL.md §6.4 `M.policy` (logical merged view).
-pub fn merge_rules(built_in: &[PolicyRule], user: &HashMap<String, RuleConfig>) -> Vec<PolicyRule> {
+// ── User rules ───────────────────────────────────────────────────────────────
+
+/// A connection's user rules (DESIGN §2): an ordered list, each entry an
+/// override of one of the definition's rules (`{"override": "<id>", "level",
+/// "ttl"}`) or a rule of the user's own under a stable id (`{"id": "<id>",
+/// "label", "method", "path", "condition", "level", "ttl"}`; no selector key:
+/// every request on the connection). Rules of the same level tie in the order
+/// the definition's rules, then this list.
+///
+/// A 2.0 record (a map by id) is read as such a list in id order (the order
+/// 2.0 broke ties in): an entry with a selector key, or in 2.0 syntax, is an
+/// added rule; any other overrides the rule of that id. Either form is
+/// written back as it was stored. An entry that can't be read is kept as
+/// stored and refused ([`UserRules::resolve`]).
+#[derive(Debug, Clone, Default)]
+pub struct UserRules {
+    entries: Vec<UserRule>,
+    /// Read from a 2.0 map by id, and written back as one.
+    by_id: bool,
+}
+
+/// One stored user rule: as stored, and as read.
+#[derive(Debug, Clone)]
+struct UserRule {
+    /// The entry as stored: a list entry, or a 2.0 map entry's value.
+    raw: serde_json::Value,
+    /// A 2.0 map entry's key.
+    key: Option<String>,
+    entry: Result<UserEntry, String>,
+}
+
+/// What a user rule says.
+#[derive(Debug, Clone)]
+pub enum UserEntry {
+    /// The `level` and `ttl` of the definition's rule `id`.
+    Override {
+        id: String,
+        level: Option<AccessLevel>,
+        ttl: Option<u64>,
+    },
+    /// A rule of the user's own; windows key on its `id`.
+    Added { id: String, rule: RuleConfig },
+}
+
+/// A 2.1 list entry as stored.
+#[derive(Deserialize)]
+struct ListEntry {
+    #[serde(default, rename = "override")]
+    target: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(flatten)]
+    rule: RuleConfig,
+}
+
+impl RuleConfig {
+    /// It has a selector key, or 2.0 syntax: a rule of its own.
+    fn selects(&self) -> bool {
+        self.method.is_some()
+            || self.path.is_some()
+            || self.condition.is_some()
+            || self.legacy().is_some()
+    }
+}
+
+impl UserEntry {
+    fn read_list(v: &serde_json::Value) -> Result<UserEntry, String> {
+        let e: ListEntry = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        match (e.target, e.id) {
+            (Some(id), None) => {
+                if e.rule.selects() || e.rule.label.is_some() {
+                    return Err(format!(
+                        "an override of '{id}' sets only `level` and `ttl`"
+                    ));
+                }
+                Ok(UserEntry::Override {
+                    id,
+                    level: e.rule.level,
+                    ttl: e.rule.ttl,
+                })
+            }
+            (None, Some(id)) if !id.is_empty() => Ok(UserEntry::Added { id, rule: e.rule }),
+            _ => Err("an entry has an `id`, or the `override` of a rule".into()),
+        }
+    }
+
+    fn read_by_id(id: &str, v: &serde_json::Value) -> Result<UserEntry, String> {
+        let rule: RuleConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+        Ok(if rule.selects() {
+            UserEntry::Added {
+                id: id.to_string(),
+                rule,
+            }
+        } else {
+            UserEntry::Override {
+                id: id.to_string(),
+                level: rule.level,
+                ttl: rule.ttl,
+            }
+        })
+    }
+
+    fn to_list_value(&self) -> serde_json::Value {
+        match self {
+            UserEntry::Override { id, level, ttl } => {
+                let mut v = serde_json::json!({ "override": id });
+                if let Some(l) = level {
+                    v["level"] = serde_json::json!(l);
+                }
+                if let Some(t) = ttl {
+                    v["ttl"] = serde_json::json!(t);
+                }
+                v
+            }
+            UserEntry::Added { id, rule } => {
+                let mut v = serde_json::to_value(rule).unwrap_or_else(|_| serde_json::json!({}));
+                v["id"] = serde_json::json!(id);
+                v
+            }
+        }
+    }
+}
+
+impl UserRules {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Append an entry (to a 2.0 record: under its id).
+    pub fn push(&mut self, entry: UserEntry) {
+        let (raw, key) = if self.by_id {
+            let (id, rule) = match &entry {
+                UserEntry::Override { id, level, ttl } => (
+                    id.clone(),
+                    RuleConfig {
+                        level: *level,
+                        ttl: *ttl,
+                        ..Default::default()
+                    },
+                ),
+                UserEntry::Added { id, rule } => (id.clone(), rule.clone()),
+            };
+            self.entries.retain(|e| e.key.as_deref() != Some(id.as_str()));
+            let raw = serde_json::to_value(rule).unwrap_or_else(|_| serde_json::json!({}));
+            (raw, Some(id))
+        } else {
+            (entry.to_list_value(), None)
+        };
+        self.entries.push(UserRule {
+            raw,
+            key,
+            entry: Ok(entry),
+        });
+        if self.by_id {
+            self.entries.sort_by(|a, b| a.key.cmp(&b.key));
+        }
+    }
+
+    /// Every entry as read: `Err` with why for one that can't be read.
+    pub fn entries(&self) -> impl Iterator<Item = Result<&UserEntry, &str>> {
+        self.entries
+            .iter()
+            .map(|e| e.entry.as_ref().map_err(String::as_str))
+    }
+
+    /// What each entry is on a connection whose definition has the rules
+    /// `defined` (DESIGN §2), in order:
+    ///   - an override of one of them sets its `level` and `ttl`; the first
+    ///     override of an id counts, a later one is refused;
+    ///   - an override of an id the definition doesn't have is refused when
+    ///     it tightens (`deny`, `ask-always`) and dropped otherwise;
+    ///   - an added rule is a rule, or refused when its selector or condition
+    ///     can't be read, it is in 2.0 syntax, or its id is taken (by one of
+    ///     the definition's rules or an earlier added rule);
+    ///   - an entry that can't be read is refused.
+    pub fn resolve(&self, defined: &[PolicyRule]) -> Vec<Resolved<'_>> {
+        let defined: std::collections::HashSet<&str> =
+            defined.iter().filter_map(|r| r.id.as_deref()).collect();
+        let mut overridden = std::collections::HashSet::new();
+        let mut added = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(self.entries.len());
+        for e in &self.entries {
+            let refused = |id: Option<String>, level: Option<AccessLevel>, why: String| {
+                Resolved::Refused(PolicyRule {
+                    id,
+                    label: None,
+                    select: Select::refused(why),
+                    condition: None,
+                    level,
+                    ttl: None,
+                })
+            };
+            out.push(match &e.entry {
+                Err(why) => {
+                    let id = e.key.clone().or_else(|| {
+                        ["id", "override"]
+                            .iter()
+                            .find_map(|k| e.raw.get(*k).and_then(|v| v.as_str()))
+                            .map(str::to_string)
+                    });
+                    let level = e
+                        .raw
+                        .get("level")
+                        .and_then(|v| v.as_str())
+                        .and_then(AccessLevel::parse);
+                    refused(id, level, format!("it can't be read: {}", why))
+                }
+                Ok(UserEntry::Override { id, level, ttl }) => {
+                    if !defined.contains(id.as_str()) {
+                        let why = format!("it overrides '{}', a rule this service doesn't have", id);
+                        match level {
+                            Some(AccessLevel::Deny | AccessLevel::AskAlways) => {
+                                refused(Some(id.clone()), *level, why)
+                            }
+                            _ => Resolved::Dropped {
+                                id,
+                                why: format!("{why}; it is not applied"),
+                            },
+                        }
+                    } else if !overridden.insert(id.as_str()) {
+                        refused(Some(id.clone()), *level, format!("'{}' is overridden twice", id))
+                    } else {
+                        Resolved::Override {
+                            id,
+                            level: *level,
+                            ttl: *ttl,
+                        }
+                    }
+                }
+                Ok(UserEntry::Added { id, rule }) => {
+                    let taken = if defined.contains(id.as_str()) {
+                        Some(format!("its id '{}' is a rule of this service's", id))
+                    } else if !added.insert(id.as_str()) {
+                        Some(format!("its id '{}' is used by an earlier rule", id))
+                    } else {
+                        None
+                    };
+                    let select = match taken {
+                        Some(why) => Select::refused(why),
+                        None => rule.select().unwrap_or_else(Select::every),
+                    };
+                    let rule = PolicyRule {
+                        id: Some(id.clone()),
+                        label: rule.label.clone(),
+                        condition: rule.condition.clone().filter(|c| c.error().is_none()),
+                        select,
+                        level: rule.level,
+                        ttl: rule.ttl,
+                    };
+                    if rule.select.problem().is_some() {
+                        Resolved::Refused(rule)
+                    } else {
+                        Resolved::Rule(rule)
+                    }
+                }
+            });
+        }
+        out
+    }
+
+    /// The entries refused or dropped on a connection whose definition has
+    /// the rules `defined`, with why: what the console shows.
+    pub fn notes(&self, defined: &[PolicyRule]) -> Vec<RuleNote> {
+        self.resolve(defined)
+            .into_iter()
+            .filter_map(|r| match r {
+                Resolved::Refused(rule) => Some(RuleNote {
+                    rule: rule.id.clone(),
+                    level: rule.level,
+                    refused: true,
+                    why: rule.select.problem().unwrap_or_default().to_string(),
+                }),
+                Resolved::Dropped { id, why } => Some(RuleNote {
+                    rule: Some(id.to_string()),
+                    level: None,
+                    refused: false,
+                    why,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// A 2.0 map by id ([`UserRules`]), in id order.
+impl From<HashMap<String, RuleConfig>> for UserRules {
+    fn from(map: HashMap<String, RuleConfig>) -> UserRules {
+        let mut rules = UserRules {
+            entries: Vec::new(),
+            by_id: true,
+        };
+        let mut ids: Vec<_> = map.into_iter().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, rule) in ids {
+            let raw = serde_json::to_value(&rule).unwrap_or_else(|_| serde_json::json!({}));
+            let entry = UserEntry::read_by_id(&id, &raw);
+            rules.entries.push(UserRule {
+                raw,
+                key: Some(id),
+                entry,
+            });
+        }
+        rules
+    }
+}
+
+impl Serialize for UserRules {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.by_id {
+            let map: serde_json::Map<String, serde_json::Value> = self
+                .entries
+                .iter()
+                .map(|e| (e.key.clone().unwrap_or_default(), e.raw.clone()))
+                .collect();
+            map.serialize(s)
+        } else {
+            let list: Vec<&serde_json::Value> = self.entries.iter().map(|e| &e.raw).collect();
+            list.serialize(s)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UserRules {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<UserRules, D::Error> {
+        Ok(match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Null => UserRules::default(),
+            serde_json::Value::Array(list) => UserRules {
+                entries: list
+                    .into_iter()
+                    .map(|raw| UserRule {
+                        entry: UserEntry::read_list(&raw),
+                        raw,
+                        key: None,
+                    })
+                    .collect(),
+                by_id: false,
+            },
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<UserRule> = map
+                    .into_iter()
+                    .map(|(key, raw)| UserRule {
+                        entry: UserEntry::read_by_id(&key, &raw),
+                        raw,
+                        key: Some(key),
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.key.cmp(&b.key));
+                UserRules {
+                    entries,
+                    by_id: true,
+                }
+            }
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "rules: a list of rules, not {}",
+                    other
+                )))
+            }
+        })
+    }
+}
+
+/// A user rule as a connection reads it ([`UserRules::resolve`]).
+#[derive(Debug, Clone)]
+pub enum Resolved<'u> {
+    Override {
+        id: &'u str,
+        level: Option<AccessLevel>,
+        ttl: Option<u64>,
+    },
+    /// An added rule.
+    Rule(PolicyRule),
+    /// A rule the daemon refuses: it selects nothing, and decides how
+    /// [`evaluate_decision`] says.
+    Refused(PolicyRule),
+    /// An override of a rule the definition doesn't have that would not
+    /// tighten: not applied.
+    Dropped { id: &'u str, why: String },
+}
+
+/// A user rule the daemon refuses or doesn't apply, and why (the console
+/// shows it on the connection).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuleNote {
+    /// Its id, or the id it overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<AccessLevel>,
+    /// Refused: its connection asks every time (a refused `deny` denies
+    /// it). Otherwise it is only not applied.
+    pub refused: bool,
+    pub why: String,
+}
+
+/// A connection's rules for one pass: the definition rules `built_in` in
+/// file order with the user's overrides applied, then the user's added and
+/// refused rules in list order (DESIGN §2). PROTOCOL.md §6.4 `M.policy`
+/// (logical merged view).
+pub fn merge_rules(built_in: &[PolicyRule], user: &UserRules) -> Vec<PolicyRule> {
+    merge_rules_over(built_in, user, built_in)
+}
+
+/// [`merge_rules`] for a pass that leaves out some of the connection's
+/// definition rules: `defined` is all of them, so an override of one this
+/// pass leaves out applies to nothing, and is no override of a missing rule.
+pub fn merge_rules_over(
+    built_in: &[PolicyRule],
+    user: &UserRules,
+    defined: &[PolicyRule],
+) -> Vec<PolicyRule> {
+    let resolved = user.resolve(defined);
     let mut out: Vec<PolicyRule> = built_in
         .iter()
         .map(|rule| {
-            let edit = rule
-                .id
-                .as_ref()
-                .and_then(|id| user.get(id))
-                .filter(|e| e.legacy().is_none());
-            match edit {
-                Some(e) => {
-                    let select = match e.condition.as_ref().and_then(Condition::error) {
-                        Some(why) => Select::refused(format!("its condition is not valid: {}", why)),
-                        None => rule.select.clone(),
-                    };
-                    PolicyRule {
-                        level: e.level.or(rule.level),
-                        ttl: e.ttl.or(rule.ttl),
-                        label: e.label.clone().or_else(|| rule.label.clone()),
-                        condition: e.condition.clone().or_else(|| rule.condition.clone()),
-                        select,
-                        ..rule.clone()
-                    }
+            let edit = resolved.iter().find_map(|r| match r {
+                Resolved::Override { id, level, ttl } if rule.id.as_deref() == Some(*id) => {
+                    Some((*level, *ttl))
                 }
+                _ => None,
+            });
+            match edit {
+                Some((level, ttl)) => PolicyRule {
+                    level: level.or(rule.level),
+                    ttl: ttl.or(rule.ttl),
+                    ..rule.clone()
+                },
                 None => rule.clone(),
             }
         })
         .collect();
-    // New rules: user entries with a selector and an id not present in
-    // built-ins, and refused entries, in id order.
-    let built_in_ids: std::collections::HashSet<&str> =
-        built_in.iter().filter_map(|r| r.id.as_deref()).collect();
-    let mut added: Vec<(&String, &RuleConfig)> = user
-        .iter()
-        .filter(|(id, e)| !built_in_ids.contains(id.as_str()) || e.legacy().is_some())
-        .collect();
-    added.sort_by_key(|(id, _)| *id);
-    for (id, e) in added {
-        if let Some(select) = e.select() {
-            out.push(PolicyRule {
-                id: Some(id.clone()),
-                label: e.label.clone(),
-                condition: e.condition.clone().filter(|c| c.error().is_none()),
-                select,
-                level: e.level,
-                ttl: e.ttl,
-            });
+    for r in resolved {
+        if let Resolved::Rule(rule) | Resolved::Refused(rule) = r {
+            out.push(rule);
         }
     }
     out
@@ -1261,7 +1628,7 @@ mod tests {
         };
         let built_in = vec![rule("read", "GET /x", AccessLevel::Ask)];
         let decide = |user: &HashMap<String, RuleConfig>, m: &str, p: &str| {
-            let rules = merge_rules(&built_in, user);
+            let rules = merge_rules(&built_in, &user.clone().into());
             evaluate_decision(&Request::bare(m, p), Some(&rules), Some(&floor), &policy(), &[]).unwrap()
         };
         let olds = |level: AccessLevel| {
@@ -1317,7 +1684,7 @@ mod tests {
         ] {
             let mut user = HashMap::new();
             user.insert("read".to_string(), edit);
-            let merged = merge_rules(&built_in, &user);
+            let merged = merge_rules(&built_in, &user.clone().into());
             assert_eq!(merged[0].level, Some(AccessLevel::Ask));
             assert_eq!(decide(&user, "GET", "/x").0, AccessLevel::AskAlways);
         }
@@ -1329,7 +1696,7 @@ mod tests {
         assert_eq!(edit.method.as_deref(), Some(&["DELETE".to_string()][..]));
         let mut user = HashMap::new();
         user.insert("del".to_string(), edit);
-        let rules = merge_rules(&[], &user);
+        let rules = merge_rules(&[], &user.clone().into());
         assert_eq!(rules[0].select.exec("DELETE", "/repos/o/r").map(|p| p.len()), Some(2));
         assert_eq!(decide(&user, "DELETE", "/repos/o/r").0, AccessLevel::Deny);
         assert_eq!(decide(&user, "GET", "/elsewhere").0, AccessLevel::Allow);
@@ -1449,9 +1816,9 @@ mod tests {
                 },
             );
         }
-        let merged = merge_rules(&[], &user);
+        let merged = merge_rules(&[], &user.clone().into());
         assert_eq!(decide(&merged).as_deref(), Some("a-user"));
-        let merged = merge_rules(&[rule("built-in", "POST /m/:id", AccessLevel::Ask)], &user);
+        let merged = merge_rules(&[rule("built-in", "POST /m/:id", AccessLevel::Ask)], &user.clone().into());
         assert_eq!(decide(&merged).as_deref(), Some("built-in"));
     }
 
@@ -1556,7 +1923,7 @@ mod tests {
         let decide = |edit: RuleConfig, level: AccessLevel| {
             let mut user = HashMap::new();
             user.insert("r".to_string(), RuleConfig { level: Some(level), ..edit });
-            let rules = merge_rules(&[], &user);
+            let rules = merge_rules(&[], &user.clone().into());
             evaluate(&Request::bare("GET", "/elsewhere"), Some(&rules), Some(&floor), &policy(), &[]).unwrap()
         };
         for edit in [
@@ -1573,8 +1940,8 @@ mod tests {
             assert_eq!(decide(edit.clone(), AccessLevel::AskAlways), AccessLevel::AskAlways);
             assert_eq!(decide(edit, AccessLevel::Allow), AccessLevel::AskAlways);
         }
-        // An override of a built-in rule whose condition can't be read refuses
-        // the rule it produces.
+        // A 2.0 entry on a built-in id with a condition that can't be read is
+        // a refused rule beside the built-in one.
         let built_in = vec![rule("read", "GET /x", AccessLevel::Allow)];
         let mut user = HashMap::new();
         user.insert(
@@ -1584,8 +1951,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let rules = merge_rules(&built_in, &user);
-        assert!(rules[0].select.problem().is_some());
+        let rules = merge_rules(&built_in, &user.clone().into());
+        assert!(rules[1].select.problem().is_some());
         assert_eq!(
             evaluate(&Request::bare("GET", "/x"), Some(&rules), Some(&floor), &policy(), &[]).unwrap(),
             AccessLevel::AskAlways
@@ -1675,7 +2042,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let merged = merge_rules(&built_in, &user);
+        let merged = merge_rules(&built_in, &user.clone().into());
         assert_eq!(merged[0].level, Some(AccessLevel::Allow));
         assert_eq!(merged[0].select.display(), ["GET /m/:id"]); // preserved
     }
@@ -1691,7 +2058,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let merged = merge_rules(&built_in, &user);
+        let merged = merge_rules(&built_in, &user.clone().into());
         assert_eq!(level(&Request::bare("DELETE", "/m/1"), &merged, None), AccessLevel::Deny);
     }
 
@@ -1706,11 +2073,158 @@ mod tests {
                 ..RuleConfig::selecting("POST /m/vip")
             },
         );
-        let merged = merge_rules(&built_in, &user);
+        let merged = merge_rules(&built_in, &user.clone().into());
         assert_eq!(merged.len(), 2);
         assert!(merged
             .iter()
             .any(|r| r.id.as_deref() == Some("vip") && r.level == Some(AccessLevel::Allow)));
+    }
+
+    // ── User rules: the ordered list (DESIGN §2) ─────────────────────────────
+
+    fn user_rules(v: serde_json::Value) -> UserRules {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// A list and a 2.0 map are each read, and written back as stored; an
+    /// entry that can't be read is kept as stored.
+    #[test]
+    fn user_rules_read_a_list_and_a_2_0_map_and_write_each_back_as_stored() {
+        let list = serde_json::json!([
+            {"override": "read", "level": "allow", "ttl": 60},
+            {"id": "vip", "method": ["POST"], "path": ["/m/vip"], "level": "deny"},
+            {"id": "all", "level": "ask"},
+            {"id": "odd", "level": "sometimes", "future": 1}
+        ]);
+        let rules = user_rules(list.clone());
+        assert_eq!(serde_json::to_value(&rules).unwrap(), list);
+        let read: Vec<_> = rules.entries().collect();
+        assert!(matches!(read[0], Ok(UserEntry::Override { id, level: Some(AccessLevel::Allow), ttl: Some(60) }) if id == "read"));
+        assert!(matches!(read[1], Ok(UserEntry::Added { id, .. }) if id == "vip"));
+        assert!(matches!(read[2], Ok(UserEntry::Added { id, .. }) if id == "all"));
+        assert!(read[3].is_err());
+
+        // A 2.0 map: an entry with a selector (or 2.0 syntax) is an added
+        // rule, any other an override; read in id order.
+        let map = serde_json::json!({
+            "vip": {"method": ["POST"], "path": ["/m/vip"], "level": "deny"},
+            "read": {"level": "allow"},
+            "old": {"match": "GET /x", "level": "deny"}
+        });
+        let rules = user_rules(map.clone());
+        assert_eq!(serde_json::to_value(&rules).unwrap(), map);
+        let ids: Vec<String> = rules
+            .entries()
+            .map(|e| match e.unwrap() {
+                UserEntry::Override { id, .. } => format!("override {id}"),
+                UserEntry::Added { id, .. } => format!("added {id}"),
+            })
+            .collect();
+        assert_eq!(ids, ["added old", "override read", "added vip"]);
+
+        // In a connection's policy record, both ways.
+        for rules in [list, map] {
+            let cp = serde_json::json!({"default": {"write": "ask"}, "rules": rules});
+            let read: ConnectionPolicy = serde_json::from_value(cp.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&read).unwrap(), cp);
+        }
+        let empty: ConnectionPolicy = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.rules.is_empty());
+        assert_eq!(serde_json::to_value(&empty).unwrap(), serde_json::json!({}));
+    }
+
+    /// Equally strict rules tie in order: the definition's rules, then the
+    /// user's in list order (not id order). An added rule with no selector
+    /// key matches every request.
+    #[test]
+    fn user_rules_tie_in_list_order_after_the_definitions() {
+        let first = |rules: &[PolicyRule], m: &str, p: &str| {
+            match evaluate_decision(&Request::bare(m, p), Some(&rules.to_vec()), None, &policy(), &[])
+                .unwrap()
+                .1
+            {
+                DecidedBy::Rule { id, .. } => id,
+                DecidedBy::Floor => None,
+            }
+        };
+        let user = user_rules(serde_json::json!([
+            {"id": "b-user", "method": "POST", "path": "/m/send", "level": "ask"},
+            {"id": "a-user", "method": "POST", "path": "/m/send", "level": "ask"},
+            {"id": "everything", "level": "ask"}
+        ]));
+        let merged = merge_rules(&[], &user);
+        assert_eq!(first(&merged, "POST", "/m/send").as_deref(), Some("b-user"));
+        assert_eq!(first(&merged, "GET", "/anything").as_deref(), Some("everything"));
+        let merged = merge_rules(&[rule("built-in", "POST /m/:id", AccessLevel::Ask)], &user);
+        assert_eq!(first(&merged, "POST", "/m/send").as_deref(), Some("built-in"));
+    }
+
+    /// An override sets a rule's `level` and `ttl`, and nothing else; the
+    /// rest the daemon refuses: an override with other keys, a second
+    /// override of one rule, an added rule under a taken id.
+    #[test]
+    fn an_override_sets_level_and_ttl_and_the_rest_is_refused() {
+        let built_in = vec![rule("del", "DELETE /m/:id", AccessLevel::AskAlways)];
+        let decide = |user: serde_json::Value, m: &str, p: &str| {
+            let rules = merge_rules(&built_in, &user_rules(user));
+            evaluate_decision(&Request::bare(m, p), Some(&rules), None, &policy(), &[]).unwrap()
+        };
+        let (level, by, ttl) = decide(serde_json::json!([{"override": "del", "level": "ask", "ttl": 90}]), "DELETE", "/m/1");
+        assert_eq!((level, ttl), (AccessLevel::Ask, Some(90)));
+        assert!(matches!(by, DecidedBy::Rule { id: Some(ref id), .. } if id == "del"));
+        assert_eq!(decide(serde_json::json!([{"override": "del", "level": "deny"}]), "DELETE", "/m/1").0, AccessLevel::Deny);
+        for refused in [
+            serde_json::json!([{"override": "del", "level": "allow", "path": "/other"}]),
+            serde_json::json!([{"override": "del", "level": "ask"}, {"override": "del", "level": "allow"}]),
+            serde_json::json!([{"id": "del", "method": "GET", "path": "/x", "level": "allow"}]),
+            serde_json::json!([{"id": "x", "path": "/x", "level": "allow"}, {"id": "x", "path": "/y", "level": "allow"}]),
+            serde_json::json!([{"id": "x", "override": "del", "level": "allow"}]),
+            serde_json::json!([{"level": "allow"}]),
+        ] {
+            assert_eq!(decide(refused.clone(), "GET", "/elsewhere").0, AccessLevel::AskAlways, "{refused}");
+            let notes = user_rules(refused.clone()).notes(&built_in);
+            assert!(notes.iter().any(|n| n.refused && !n.why.is_empty()), "{refused}: {notes:?}");
+        }
+    }
+
+    /// An override of a rule the definition no longer has: one that tightens
+    /// is refused (`deny` denies the connection, `ask-always` asks every
+    /// time); any other is dropped, with a note.
+    #[test]
+    fn an_override_of_a_rule_the_service_lacks() {
+        let built_in = vec![rule("del", "DELETE /m/:id", AccessLevel::AskAlways)];
+        let floor = Levels {
+            read: Some(AccessLevel::Allow),
+            write: Some(AccessLevel::Allow),
+            ttl: None,
+        };
+        let decide = |user: &UserRules, m: &str, p: &str| {
+            let rules = merge_rules(&built_in, user);
+            evaluate_decision(&Request::bare(m, p), Some(&rules), Some(&floor), &policy(), &[]).unwrap().0
+        };
+        let gone = |level: &str| user_rules(serde_json::json!([{"override": "batch", "level": level}]));
+        assert_eq!(decide(&gone("deny"), "GET", "/m"), AccessLevel::Deny);
+        assert_eq!(decide(&gone("ask-always"), "GET", "/m"), AccessLevel::AskAlways);
+        for loosens in ["allow", "ask"] {
+            assert_eq!(decide(&gone(loosens), "GET", "/m"), AccessLevel::Allow);
+            assert_eq!(decide(&gone(loosens), "DELETE", "/m/1"), AccessLevel::AskAlways);
+            let notes = gone(loosens).notes(&built_in);
+            assert_eq!(notes.len(), 1);
+            assert!(!notes[0].refused && notes[0].why.contains("'batch'"), "{notes:?}");
+        }
+        let ttl_only = user_rules(serde_json::json!({"batch": {"ttl": 60}}));
+        assert_eq!(decide(&ttl_only, "GET", "/m"), AccessLevel::Allow);
+        let notes = gone("deny").notes(&built_in);
+        assert_eq!(notes, [RuleNote {
+            rule: Some("batch".into()),
+            level: Some(AccessLevel::Deny),
+            refused: true,
+            why: "it overrides 'batch', a rule this service doesn't have".into(),
+        }]);
+        // A pass that leaves the rule out applies the override to nothing.
+        let kept = user_rules(serde_json::json!([{"override": "del", "level": "deny"}]));
+        let rules = merge_rules_over(&[], &kept, &built_in);
+        assert!(rules.is_empty());
     }
 
     #[test]

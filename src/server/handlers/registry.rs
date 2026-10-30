@@ -195,6 +195,11 @@ pub struct RegistryConnection {
     /// agent-facing proxy surface; the console never sees it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// The user rules on this connection the daemon refuses (the connection
+    /// asks every time; a refused `deny` denies it) or doesn't apply, and
+    /// why (DESIGN §2). Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rule_notes: Vec<crate::core::policy::RuleNote>,
 }
 
 #[derive(Debug, Serialize)]
@@ -454,6 +459,7 @@ fn build_connection(
         phantoms: if summary { Vec::new() } else { phantoms },
         needs_reauth: None,
         locked: None,
+        rule_notes: Vec::new(),
     }
 }
 
@@ -539,12 +545,13 @@ pub fn vault_registry_value(
     // Snapshot native_keys + connections + custom services + lock state under the
     // mutex, then drop it before rendering.
     #[allow(clippy::type_complexity)]
-    let (native_keys, external_keys, custom_services, connections, locked): (
+    let (native_keys, external_keys, custom_services, connections, locked, mut notes): (
         HashSet<String>,
         HashSet<String>,
         Vec<(String, ServiceDef)>,
         std::collections::HashMap<String, Connection>,
         bool,
+        std::collections::HashMap<String, Vec<crate::core::policy::RuleNote>>,
     ) = {
         if let Some(gone) = state.vault_gone_error(vault_id) {
             return Err(gone);
@@ -559,12 +566,23 @@ pub fn vault_registry_value(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 custom.sort_by(|a, b| a.0.cmp(&b.0));
+                let notes = snapshot
+                    .connections
+                    .iter()
+                    .map(|(id, c)| {
+                        let service = c.service.as_deref().unwrap_or(id);
+                        let notes = snapshot.inputs.rule_notes(&state.services, id, service);
+                        (id.clone(), notes)
+                    })
+                    .filter(|(_, n)| !n.is_empty())
+                    .collect();
                 (
                     snapshot.native_names().cloned().collect(),
                     state.external_key_names(vault_id),
                     custom,
                     snapshot.connections.clone(),
                     false,
+                    notes,
                 )
             }
             None => (
@@ -573,6 +591,7 @@ pub fn vault_registry_value(
                 Vec::new(),
                 std::collections::HashMap::new(),
                 true,
+                std::collections::HashMap::new(),
             ),
         }
     };
@@ -643,6 +662,7 @@ pub fn vault_registry_value(
             if row.connected && state.oauth_needs_reauth(vault_id, conn_id) {
                 row.needs_reauth = Some(true);
             }
+            row.rule_notes = notes.remove(conn_id).unwrap_or_default();
             conn_rows.push(row);
         }
         conn_rows.sort_by(|a, b| a.id.cmp(&b.id));
@@ -661,6 +681,7 @@ pub fn vault_registry_value(
                         row.secrets = None;
                         row.phantoms.clear();
                         row.needs_reauth = None;
+                        row.rule_notes.clear();
                         row.connected = false;
                         row.locked = Some(true);
                     }

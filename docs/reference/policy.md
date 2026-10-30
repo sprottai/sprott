@@ -158,6 +158,19 @@ how long an approval request waits, and the default window for an `ask`.
 Rules apply per connection, so two connections of the same service are
 decided separately. On a shared vault, admins edit policy; members see it.
 
+A connection's own rules are a list. Each entry either overrides a service
+rule's `level` and `ttl` by its id, or is a rule of your own with an `id` and
+any of `method`, `path` and `condition` (none of them: every request). Rules at
+the same level are taken in order: the service's, then yours.
+
+Sprott refuses a rule it can't read: 2.0 syntax, a pattern or condition that
+doesn't compile, an id already taken, an override with other keys. While the
+connection has one, every request on it is `ask-always`, or `deny` when the
+refused rule is a `deny`. An override of a rule the service no longer has is
+refused the same way when it is `deny` or `ask-always`, and is left out
+otherwise. The vault's registry (`/v/<vault>/registry`) lists each such rule
+under its connection's `rule_notes`, with the reason.
+
 Service definitions you add to a vault with `sprott service add` only
 tighten: their `allow` rules and `allow` floors are dropped. Loosening is
 your setting in the console.

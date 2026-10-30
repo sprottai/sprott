@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::core::policy::{AccessLevel, Decision, Policy};
+use crate::core::policy::{AccessLevel, Decision, Policy, UserRules};
 use crate::core::request::{Request, Unreadable};
 use crate::error::AppError;
 use crate::service::{ServiceDef, ServiceRegistry};
@@ -176,25 +176,29 @@ impl PolicyInputs {
         request: &Request<'_>,
         with_rules: bool,
     ) -> Result<Decision, Unreadable> {
-        use crate::core::policy::{evaluate_decision, merge_levels, merge_rules, stricter};
+        use crate::core::policy::{evaluate_decision, merge_levels, merge_rules_over, stricter};
         // Built-in rules come from the connection's service definition; the
-        // user's per-connection edits merge on top, and the user's
+        // user's per-connection rules merge on top (DESIGN §2), and the user's
         // per-connection default overrides the service's field-wise.
         let conn_policy = self.policy.connections.get(connection_id);
-        let no_rules = HashMap::new();
+        let no_rules = UserRules::default();
         let user_rules = conn_policy.map(|c| &c.rules).unwrap_or(&no_rules);
         let user_default = conn_policy.and_then(|c| c.default.as_ref());
         let tags = services.service_tags(service_id);
+        let defined = self.defined_rules(services, service_id);
         let decide = |built_in: &[crate::core::policy::PolicyRule],
                       recipe: Option<&crate::core::policy::Levels>| {
             let rules = if with_rules {
-                merge_rules(built_in, user_rules)
+                merge_rules_over(built_in, user_rules, defined)
             } else {
                 Vec::new()
             };
             let levels = merge_levels(user_default, recipe);
             evaluate_decision(request, Some(&rules), levels.as_ref(), &self.policy, tags)
         };
+        // A vault definition's policy only tightens: the pass without it
+        // stands unless the pass with it is stricter, and decides the unit,
+        // window and label on a tie.
         Ok(match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
             Some(p) => stricter(decide(&[], None)?, decide(&p.rules, p.defaults.as_ref())?),
             None => decide(
@@ -202,6 +206,35 @@ impl PolicyInputs {
                 services.default_policy_levels(service_id).as_ref(),
             )?,
         })
+    }
+
+    /// The rules of the definition a connection of `service_id` resolves
+    /// (the vault's own, else the compiled one): what its user overrides
+    /// name.
+    fn defined_rules<'a>(
+        &'a self,
+        services: &'a ServiceRegistry,
+        service_id: &str,
+    ) -> &'a [crate::core::policy::PolicyRule] {
+        match self.custom.get(service_id) {
+            Some(d) => d.policy.as_ref().map_or(&[], |p| p.rules.as_slice()),
+            None => services.default_policy_rules(service_id).unwrap_or(&[]),
+        }
+    }
+
+    /// The user rules on `connection_id` the daemon refuses or doesn't
+    /// apply, and why ([`UserRules::notes`]).
+    pub fn rule_notes(
+        &self,
+        services: &ServiceRegistry,
+        connection_id: &str,
+        service_id: &str,
+    ) -> Vec<crate::core::policy::RuleNote> {
+        self.policy
+            .connections
+            .get(connection_id)
+            .map(|c| c.rules.notes(self.defined_rules(services, service_id)))
+            .unwrap_or_default()
     }
 
     /// The condition reads of every rule that matches `request` at `level`
@@ -216,14 +249,15 @@ impl PolicyInputs {
         request: &Request<'_>,
         level: AccessLevel,
     ) -> Result<Vec<crate::core::request::Read>, Unreadable> {
-        use crate::core::policy::{matched_reads, merge_rules};
-        let no_rules = HashMap::new();
+        use crate::core::policy::{matched_reads, merge_rules_over};
+        let no_rules = UserRules::default();
         let user_rules = self
             .policy
             .connections
             .get(connection_id)
             .map(|c| &c.rules)
             .unwrap_or(&no_rules);
+        let defined = self.defined_rules(services, service_id);
         let mut reads = Vec::new();
         let passes: Vec<&[crate::core::policy::PolicyRule]> =
             match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
@@ -231,7 +265,8 @@ impl PolicyInputs {
                 None => vec![services.default_policy_rules(service_id).unwrap_or(&[])],
             };
         for built_in in passes {
-            reads.extend(matched_reads(request, &merge_rules(built_in, user_rules), level)?);
+            let rules = merge_rules_over(built_in, user_rules, defined);
+            reads.extend(matched_reads(request, &rules, level)?);
         }
         reads.sort();
         reads.dedup();

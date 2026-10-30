@@ -3705,7 +3705,7 @@ mod tests {
                     write: Some(AccessLevel::Ask),
                     ttl: Some(300),
                 }),
-                rules,
+                rules: rules.into(),
             },
         );
         p

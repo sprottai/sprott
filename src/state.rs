@@ -2988,7 +2988,7 @@ mod tests {
                     write: Some(AccessLevel::Ask),
                     ttl: Some(300),
                 }),
-                rules,
+                rules: rules.into(),
             },
         );
         let state = test_state();
@@ -3155,6 +3155,86 @@ level = "allow"
         );
         assert_eq!(decide(&owner, "POST", "/v1/pay"), AccessLevel::Allow);
         assert_eq!(decide(&owner, "DELETE", "/v1/things"), AccessLevel::Deny);
+    }
+
+    /// User rules on a connection of a vault definition (DESIGN §2): an
+    /// override of the definition's rule is the owner's to make, and the pass
+    /// without the definition doesn't count it as a missing rule; on a tie
+    /// the pass without the definition keys the window (a 24 h `ask` of the
+    /// definition doesn't); the condition reads of the rules matched in both
+    /// passes are covered.
+    #[test]
+    fn user_rules_on_a_vault_definition() {
+        use crate::core::policy::{AccessLevel, DecidedBy, Policy};
+        use crate::core::request::{BodyFormat, Request, RequestInput};
+        let service = r#"
+[service]
+id = "acme"
+name = "Acme"
+hosts = ["api.acme.dev"]
+secrets = ["ACME_KEY"]
+"#;
+        let rules = r#"
+[[rule]]
+id = "nuke"
+label = "Delete things"
+method = "DELETE"
+path = "/v1/things"
+level = "deny"
+
+[[rule]]
+id = "pay"
+label = "Pay"
+method = "POST"
+path = "/v1/pay"
+condition = "request.body.a == 1"
+level = "ask"
+ttl = 86400
+"#;
+        let mut aux = std::collections::BTreeMap::new();
+        aux.insert(
+            "acme".to_string(),
+            crate::service::source::StoredService::new(service.into(), Some(rules.into()), None),
+        );
+        let state = test_state();
+        let (custom, skipped) = crate::service::vault_custom_services(&aux, true, &state.services);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let mut policy = Policy::default();
+        policy.connections.insert(
+            "acme".to_string(),
+            serde_json::from_value(serde_json::json!({"rules": [
+                {"override": "nuke", "level": "ask"},
+                {"id": "mine", "method": "POST", "path": "/v1/pay", "condition": "request.body.b == 2", "level": "ask", "ttl": 60}
+            ]}))
+            .unwrap(),
+        );
+        let inputs = PolicyInputs { policy, custom };
+        assert!(inputs.rule_notes(&state.services, "acme", "acme").is_empty());
+        let nuke = Request::bare("DELETE", "/v1/things");
+        let (level, _, _) = state.evaluate_request_decision(&inputs, "acme", "acme", &nuke).unwrap();
+        assert_eq!(level, AccessLevel::Ask);
+        let body = br#"{"a":1,"b":2}"#;
+        let pay = Request::new(
+            RequestInput {
+                method: "POST",
+                host: "api.acme.dev",
+                path: "/v1/pay",
+                body: Some(body),
+                ..Default::default()
+            },
+            BodyFormat::Json,
+            crate::core::selector::Params::new(),
+        );
+        let (level, by, ttl) = state.evaluate_request_decision(&inputs, "acme", "acme", &pay).unwrap();
+        assert_eq!((level, ttl), (AccessLevel::Ask, Some(60)));
+        assert!(matches!(by, DecidedBy::Rule { id: Some(ref id), .. } if id == "mine"));
+        let reads: Vec<String> = inputs
+            .matched_reads(&state.services, "acme", "acme", &pay, AccessLevel::Ask)
+            .unwrap()
+            .iter()
+            .map(|r| r.path.to_string())
+            .collect();
+        assert_eq!(reads, ["request.body.a", "request.body.b"]);
     }
 
     /// The policy fingerprint changes with any policy input and with nothing

@@ -100,13 +100,15 @@ impl Vault {
     /// A rule the owner adds to a connection, with an optional condition.
     fn rule(self, conn: &str, id: &str, pattern: &str, level: AccessLevel, condition: Option<&str>) -> Vault {
         self.policy(|p| {
-            p.connections.entry(conn.to_string()).or_default().rules.insert(
-                id.to_string(),
-                RuleConfig {
-                    condition: condition.map(crate::core::policy::Condition::lenient),
-                    level: Some(level),
-                    ttl: Some(600),
-                    ..RuleConfig::selecting(pattern)
+            p.connections.entry(conn.to_string()).or_default().rules.push(
+                crate::core::policy::UserEntry::Added {
+                    id: id.to_string(),
+                    rule: RuleConfig {
+                        condition: condition.map(crate::core::policy::Condition::lenient),
+                        level: Some(level),
+                        ttl: Some(600),
+                        ..RuleConfig::selecting(pattern)
+                    },
                 },
             );
         })
@@ -920,6 +922,55 @@ async fn a_google_batch_is_decided_by_its_requests() {
     for unreadable in [reads.replace("--b--\r\n", ""), reads.replace(" HTTP/1.1", "")] {
         send_with(&state, "POST", url, &auth, &headers, &unreadable).await.ask();
     }
+}
+
+/// A stored user rule the daemon refuses decides (a refused `deny` denies
+/// the connection), and the per-vault registry shows it on its connection
+/// with why; an override of a rule the service lacks that would loosen is
+/// only noted (DESIGN §2).
+#[tokio::test]
+async fn refused_user_rules_decide_and_show_on_their_connection() {
+    let (_dir, state) = new_state();
+    let vault = Vault::new()
+        .raw("svc", "api.svc.dev", &["SVC_TOKEN"])
+        .secret("SVC_TOKEN", "tok")
+        .floor("svc", AccessLevel::Allow, AccessLevel::Allow);
+    let with = |rules: serde_json::Value| {
+        vault.clone().policy(|p| {
+            p.connections.entry("svc".into()).or_default().rules = serde_json::from_value(rules).unwrap();
+        })
+    };
+    let notes = |state: &AppState| {
+        let q = crate::server::handlers::registry::RegistryQuery {
+            include: None,
+            ids: None,
+            view: None,
+        };
+        let v = crate::server::handlers::registry::vault_registry_value(state, V, &q, None).unwrap();
+        v["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "svc")
+            .map(|c| c["rule_notes"].clone())
+            .unwrap()
+    };
+    let auth = bearer("__sprott__svc__");
+    let url = "https://api.svc.dev/x";
+    with(json!([{"override": "gone", "level": "allow"}])).unlock(&state);
+    assert_eq!(send(&state, "GET", url, &auth, "").await.sent().0, "Bearer tok");
+    let shown = notes(&state);
+    assert_eq!(shown[0]["rule"], "gone");
+    assert_eq!(shown[0]["refused"], false);
+    with(json!([{"id": "old", "match": "DELETE /y", "level": "deny"}])).install(&state);
+    let (code, _) = send(&state, "GET", url, &auth, "").await.refused();
+    assert_eq!(code, "policy_denied");
+    let shown = notes(&state);
+    assert_eq!(shown[0]["rule"], "old");
+    assert_eq!(shown[0]["refused"], true);
+    assert!(shown[0]["why"].as_str().unwrap().contains("`match`"), "{shown}");
+    with(json!([])).install(&state);
+    assert_eq!(notes(&state), serde_json::Value::Null);
 }
 
 /// The permit identity is keyed by the vault's current content key: it
