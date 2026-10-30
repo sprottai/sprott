@@ -17,29 +17,34 @@ write = "allow"
 [[rule]]
 id = "delete-dns-record"
 label = "Delete a DNS record"
-match = "DELETE /client/v4/zones/*/dns_records/*"
+method = "DELETE"
+path = "/client/v4/zones/:zone/dns_records/:record"
 level = "ask-always"
 
 [[rule]]
 id = "overwrite-dns-record"
 label = "Overwrite a DNS record (can re-point traffic)"
-match = "PUT /client/v4/zones/*/dns_records/*"
+method = "PUT"
+path = "/client/v4/zones/:zone/dns_records/:record"
 level = "ask-always"
 
 [[rule]]
 id = "patch-dns-record"
 label = "Update a DNS record (can re-point traffic)"
-match = "PATCH /client/v4/zones/*/dns_records/*"
+method = "PATCH"
+path = "/client/v4/zones/:zone/dns_records/:record"
 level = "ask-always"
 
 [[rule]]
 id = "batch-dns-records"
 label = "Change DNS records in a batch (can delete or re-point traffic)"
-match = "POST /client/v4/zones/*/dns_records/batch"
+method = "POST"
+path = "/client/v4/zones/:zone/dns_records/batch"
 level = "ask-always"
 
 [[rule]]
 id = "delete-zone"
 label = "Delete a zone and all its DNS records"
-match = "DELETE /client/v4/zones/*"
+method = "DELETE"
+path = "/client/v4/zones/:zone"
 level = "ask-always"

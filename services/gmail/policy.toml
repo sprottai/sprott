@@ -1,48 +1,68 @@
-# Gmail policy — each rule declares its access decision (allow / ask /
-# ask-always / deny) directly. The user can override any rule per-connection
-# in the console. See docs/POLICY.md.
+# Gmail policy. Reading, labelling, drafting, archiving and trashing mail go
+# through; only deleting mail for good asks. Sending is a switch on each
+# connection: `send-email` and `send-draft` sit at "allow"; set them to
+# "ask-always" to approve every email, and the card shows that email.
+# See docs/POLICY.md.
 
-# Read/write floor for requests no rule matches.
 [default]
-read = "ask"
-write = "ask-always"
+read = "allow"
+write = "allow"
 
-# ── low: read-only metadata / listings, no private body, no side effect ──
 [[rule]]
 id = "list-emails"
 label = "List emails"
-match = "GET /gmail/v1/users/me/messages"
+method = "GET"
+path = "/gmail/v1/users/:user/messages"
 level = "allow"
 
 [[rule]]
 id = "list-labels"
 label = "List labels"
-match = "GET /gmail/v1/users/me/labels"
+method = "GET"
+path = "/gmail/v1/users/:user/labels"
 level = "allow"
 
-# ── medium: reads private message content (privacy surface, but read-only) ──
 [[rule]]
 id = "read-email"
 label = "Read email content"
-match = "GET /gmail/v1/users/me/messages/*"
-level = "ask"
+method = "GET"
+path = "/gmail/v1/users/:user/messages/:message"
+level = "allow"
 
-# ── high: outbound / mutating / hard to undo ──
 [[rule]]
 id = "send-email"
 label = "Send email"
-match = "POST /gmail/v1/users/me/messages/send"
-level = "ask-always"
+method = "POST"
+path = [
+  "/gmail/v1/users/:user/messages/send",
+  "/upload/gmail/v1/users/:user/messages/send",
+  "/resumable/upload/gmail/v1/users/:user/messages/send",
+]
+level = "allow"
+
+[[rule]]
+id = "send-draft"
+label = "Send a draft"
+method = "POST"
+path = [
+  "/gmail/v1/users/:user/drafts/send",
+  "/upload/gmail/v1/users/:user/drafts/send",
+  "/resumable/upload/gmail/v1/users/:user/drafts/send",
+]
+level = "allow"
 
 [[rule]]
 id = "modify-email"
 label = "Modify labels / archive / trash"
-match = "POST /gmail/v1/users/me/messages/*/modify"
-level = "ask-always"
+method = "POST"
+path = "/gmail/v1/users/:user/messages/:message/modify"
+level = "allow"
 
-# ── deletion: gated on every call; override to "deny" to block outright ──
+# Skips Trash and can't be undone. Needs the full-mail scope the connection
+# doesn't request today; kept because it is the one destructive mail call.
 [[rule]]
 id = "delete-email"
-label = "Delete email"
-match = "DELETE /gmail/v1/users/me/messages/*"
+label = "Delete email permanently (skips Trash)"
+method = "DELETE"
+path = ["/gmail/v1/users/:user/messages/:message", "/gmail/v1/users/:user/threads/:thread"]
 level = "ask-always"

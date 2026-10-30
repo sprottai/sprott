@@ -16,10 +16,10 @@ secret_url = "https://platform.openai.com/api-keys"
 # Assistants run (its `model` overrides the assistant's), and creating or
 # changing an assistant (runs without an override use the assistant's model).
 [requests.generate]
-match = [
-  "POST /v1/chat/completions", "POST /v1/responses", "POST /v1/completions",
-  "POST /v1/threads/runs", "POST /v1/threads/*/runs",
-  "POST /v1/assistants", "POST /v1/assistants/*",
+method = "POST"
+path = [
+  "/v1/chat/completions", "/v1/responses", "/v1/completions",
+  "/v1/threads/runs", "/v1/threads/:thread/runs",
+  "/v1/assistants", "/v1/assistants/:assistant",
 ]
-vars.model = "/model"
-scope = ["model"]
+scope = ["request.body.model"]

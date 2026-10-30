@@ -744,6 +744,8 @@ mod tests {
             host: Some("h".into()),
             credentials: None,
             policy_fp: None,
+            card: None,
+            identity: None,
         };
         let (a, b) = {
             let mut s = state.approvals.lock().unwrap();

@@ -1,0 +1,21 @@
+[package]
+name = "sprott-trust-wasm"
+version = "0.0.0"
+edition = "2021"
+description = "The Sprott membership and signature rules for the console, as wasm"
+# Same terms as the daemon: see the repository's LICENSE.
+license-file = "../../LICENSE"
+repository = "https://github.com/sprottai/sprott"
+publish = false
+
+# cdylib: the .wasm the console loads (build.sh). rlib: the JSON API in
+# `api`, tested natively against the fixtures.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sprott-trust = { path = "../sprott-trust" }
+serde_json = "1"
+base64 = "0.22"
+# Pinned to the wasm-bindgen CLI build.sh runs: the two must match exactly.
+wasm-bindgen = "=0.2.129"

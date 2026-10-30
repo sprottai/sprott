@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::core::policy::{AccessLevel, DecidedBy, Policy, VarMap};
+use crate::core::policy::{AccessLevel, Decision, Policy, UserRules};
+use crate::core::request::{Request, Unreadable};
 use crate::error::AppError;
 use crate::service::{ServiceDef, ServiceRegistry};
 use crate::storage::plaintext::{
@@ -116,8 +117,7 @@ impl std::fmt::Debug for Held {
 /// defaults (connection policies, floors, categories, the approval timeout,
 /// the installed-services switch) and the vault's own service definitions
 /// (their tightening policy and `[requests]` shapes); the built-in
-/// definitions are compiled in. [`Self::decide`] and [`Self::rule_problem`]
-/// read nothing else, and the policy fingerprint ([`Self::fingerprint`]) is a
+/// definitions are compiled in. [`Self::decide`] reads nothing else, and the policy fingerprint ([`Self::fingerprint`]) is a
 /// hash of exactly these.
 #[derive(Debug, Clone, Default)]
 pub struct PolicyInputs {
@@ -152,111 +152,125 @@ impl PolicyInputs {
     ///     decide alongside, and the stricter of the decision with and without
     ///     them stands ([`crate::core::policy::stricter`]).
     ///
+    /// `request` is read in the body format of the `[requests]` shape it
+    /// matched ([`crate::service::read_request`]). A value a condition reads
+    /// that can't be read refuses the request (`Err`).
+    ///
     /// Pure policy: no approval is consulted here (permits are looked up
     /// after the values are located, `crate::state::AppState::authorize`).
-    #[allow(clippy::too_many_arguments)]
     pub fn decide(
         &self,
         services: &ServiceRegistry,
         connection_id: &str,
         service_id: &str,
-        method: &str,
-        path: &str,
-        body: Option<&str>,
-        vars: &VarMap,
-    ) -> (AccessLevel, DecidedBy, Option<u64>) {
-        self.decide_with(
-            services,
-            connection_id,
-            service_id,
-            method,
-            path,
-            body,
-            vars,
-            true,
-        )
+        request: &Request<'_>,
+    ) -> Result<Decision, Unreadable> {
+        self.decide_with(services, connection_id, service_id, request, true)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decide_with(
         &self,
         services: &ServiceRegistry,
         connection_id: &str,
         service_id: &str,
-        method: &str,
-        path: &str,
-        body: Option<&str>,
-        vars: &VarMap,
+        request: &Request<'_>,
         with_rules: bool,
-    ) -> (AccessLevel, DecidedBy, Option<u64>) {
-        use crate::core::policy::{evaluate_decision, merge_levels, merge_rules, stricter};
+    ) -> Result<Decision, Unreadable> {
+        use crate::core::policy::{evaluate_decision, merge_levels, merge_rules_over, stricter};
         // Built-in rules come from the connection's service definition; the
-        // user's per-connection edits merge on top, and the user's
+        // user's per-connection rules merge on top (DESIGN §2), and the user's
         // per-connection default overrides the service's field-wise.
         let conn_policy = self.policy.connections.get(connection_id);
-        let no_rules = HashMap::new();
+        let no_rules = UserRules::default();
         let user_rules = conn_policy.map(|c| &c.rules).unwrap_or(&no_rules);
         let user_default = conn_policy.and_then(|c| c.default.as_ref());
         let tags = services.service_tags(service_id);
+        let defined = self.defined_rules(services, service_id);
         let decide = |built_in: &[crate::core::policy::PolicyRule],
                       recipe: Option<&crate::core::policy::Levels>| {
             let rules = if with_rules {
-                merge_rules(built_in, user_rules)
+                merge_rules_over(built_in, user_rules, defined)
             } else {
                 Vec::new()
             };
             let levels = merge_levels(user_default, recipe);
-            evaluate_decision(
-                method,
-                path,
-                body,
-                vars,
-                Some(&rules),
-                levels.as_ref(),
-                &self.policy,
-                tags,
-            )
+            evaluate_decision(request, Some(&rules), levels.as_ref(), &self.policy, tags)
         };
-        match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
-            Some(p) => stricter(decide(&[], None), decide(&p.rules, p.defaults.as_ref())),
+        // A vault definition's policy only tightens: the pass without it
+        // stands unless the pass with it is stricter, and decides the unit,
+        // window and label on a tie.
+        Ok(match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
+            Some(p) => stricter(decide(&[], None)?, decide(&p.rules, p.defaults.as_ref())?),
             None => decide(
                 services.default_policy_rules(service_id).unwrap_or(&[]),
                 services.default_policy_levels(service_id).as_ref(),
-            ),
+            )?,
+        })
+    }
+
+    /// The rules of the definition a connection of `service_id` resolves
+    /// (the vault's own, else the compiled one): what its user overrides
+    /// name.
+    fn defined_rules<'a>(
+        &'a self,
+        services: &'a ServiceRegistry,
+        service_id: &str,
+    ) -> &'a [crate::core::policy::PolicyRule] {
+        match self.custom.get(service_id) {
+            Some(d) => d.policy.as_ref().map_or(&[], |p| p.rules.as_slice()),
+            None => services.default_policy_rules(service_id).unwrap_or(&[]),
         }
     }
 
-    /// For a scoped request (`rs`: its matched `[requests]` shape), the first
-    /// of this connection's own policy edits that cannot be enforced as
-    /// written there, with the reason
-    /// ([`crate::core::policy::unenforceable_user_rule`]). The proxy refuses
-    /// such a request rather than ask under a rule an approval cannot bind.
-    #[allow(clippy::too_many_arguments)]
-    pub fn rule_problem(
+    /// The user rules on `connection_id` the daemon refuses or doesn't
+    /// apply, and why ([`UserRules::notes`]).
+    pub fn rule_notes(
         &self,
         services: &ServiceRegistry,
         connection_id: &str,
         service_id: &str,
-        method: &str,
-        path: &str,
-        rs: &crate::service::RequestScope,
-    ) -> Option<String> {
-        let user_rules = &self.policy.connections.get(connection_id)?.rules;
-        // The rules the edits merge onto: the vault definition's (tightening)
-        // rules, else the registry definition's.
-        let built_in = match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
-            Some(p) => p.rules.as_slice(),
-            None => services.default_policy_rules(service_id).unwrap_or(&[]),
-        };
-        crate::core::policy::unenforceable_user_rule(
-            built_in,
-            user_rules,
-            method,
-            path,
-            &rs.shape,
-            &rs.declared,
-            &rs.binds,
-        )
+    ) -> Vec<crate::core::policy::RuleNote> {
+        self.policy
+            .connections
+            .get(connection_id)
+            .map(|c| c.rules.notes(self.defined_rules(services, service_id)))
+            .unwrap_or_default()
+    }
+
+    /// The condition reads of every rule that matches `request` at `level`
+    /// on this connection, across the passes [`Self::decide`] makes (the
+    /// rules without a vault definition's, and with them): what an approval
+    /// of a request decided at `level` covers besides its scope.
+    pub fn matched_reads(
+        &self,
+        services: &ServiceRegistry,
+        connection_id: &str,
+        service_id: &str,
+        request: &Request<'_>,
+        level: AccessLevel,
+    ) -> Result<Vec<crate::core::request::Read>, Unreadable> {
+        use crate::core::policy::{matched_reads, merge_rules_over};
+        let no_rules = UserRules::default();
+        let user_rules = self
+            .policy
+            .connections
+            .get(connection_id)
+            .map(|c| &c.rules)
+            .unwrap_or(&no_rules);
+        let defined = self.defined_rules(services, service_id);
+        let mut reads = Vec::new();
+        let passes: Vec<&[crate::core::policy::PolicyRule]> =
+            match self.custom.get(service_id).and_then(|d| d.policy.as_ref()) {
+                Some(p) => vec![&[], &p.rules],
+                None => vec![services.default_policy_rules(service_id).unwrap_or(&[])],
+            };
+        for built_in in passes {
+            let rules = merge_rules_over(built_in, user_rules, defined);
+            reads.extend(matched_reads(request, &rules, level)?);
+        }
+        reads.sort();
+        reads.dedup();
+        Ok(reads)
     }
 
     /// Whether a connection's GET floor is `allow`: [`Self::decide`] on a
@@ -269,17 +283,9 @@ impl PolicyInputs {
         connection_id: &str,
         service_id: &str,
     ) -> bool {
-        let (level, _, _) = self.decide_with(
-            services,
-            connection_id,
-            service_id,
-            "GET",
-            "/",
-            None,
-            &VarMap::new(),
-            false,
-        );
-        level == AccessLevel::Allow
+        // With no rule, nothing reads the request: no refusal.
+        self.decide_with(services, connection_id, service_id, &Request::bare("GET", "/"), false)
+            .is_ok_and(|(level, _, _)| level == AccessLevel::Allow)
     }
 
     /// The policy fingerprint: a hash of the canonical form of these inputs
@@ -313,20 +319,25 @@ impl PolicyInputs {
         for (id, d) in &self.custom {
             let mut shapes = Map::new();
             for (name, s) in &d.requests {
-                // A var's address is plain data; its Debug form is stable.
-                let vars: BTreeMap<&String, String> =
-                    s.vars.iter().map(|(k, v)| (k, format!("{:?}", v))).collect();
                 let mut shape = Map::new();
-                shape.insert("match".into(), to_value(&s.match_pattern)?);
-                shape.insert("vars".into(), to_value(vars)?);
-                shape.insert("scope".into(), to_value(&s.scope)?);
+                shape.insert("select".into(), to_value(&s.select)?);
+                shape.insert("whole".into(), to_value(s.scope_whole)?);
+                shape.insert("condition".into(), to_value(&s.condition)?);
+                shape.insert("body".into(), to_value(s.format)?);
+                let scope: Option<Vec<String>> = s
+                    .scope
+                    .as_ref()
+                    .map(|p| p.iter().map(ToString::to_string).collect());
+                shape.insert("scope".into(), to_value(scope)?);
                 shape.insert("consent".into(), to_value(&s.consent)?);
+                shape.insert("encoded".into(), to_value(&s.encoded)?);
                 shapes.insert(name.clone(), Value::Object(shape));
             }
             let mut decided = Map::new();
             decided.insert("defaults".into(), to_value(d.policy.as_ref().map(|p| &p.defaults))?);
             decided.insert("rules".into(), to_value(d.policy.as_ref().map(|p| &p.rules))?);
             decided.insert("requests".into(), Value::Object(shapes));
+            decided.insert("order".into(), to_value(&d.request_order)?);
             custom.insert(id.clone(), Value::Object(decided));
         }
         let mut canonical = Map::new();

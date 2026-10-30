@@ -1,29 +1,46 @@
+# Google Calendar policy. Events go through: creating, editing, deleting,
+# inviting guests and emailing them. Asks before a whole calendar is shared,
+# deleted or cleared (both need more access than the connection requests).
+# See docs/POLICY.md.
+
 [default]
 read = "allow"
-write = "ask"
+write = "allow"
 
 [[rule]]
 id = "list-events"
 label = "List events"
-match = "GET /calendar/v3/calendars/*/events"
+method = "GET"
+path = "/calendar/v3/calendars/:calendar/events"
 level = "allow"
 
 [[rule]]
 id = "delete-event"
 label = "Delete event"
-match = "DELETE /calendar/v3/calendars/*/events/*"
+method = "DELETE"
+path = "/calendar/v3/calendars/:calendar/events/:event"
+level = "allow"
+
+[[rule]]
+id = "share-calendar"
+label = "Share a whole calendar with someone or publicly"
+method = ["POST", "PUT", "PATCH"]
+path = ["/calendar/v3/calendars/:calendar/acl", "/calendar/v3/calendars/:calendar/acl/:rule"]
 level = "ask-always"
 
 # Deleting a calendar, or clearing one, drops every event in it at once.
 [[rule]]
 id = "delete-calendar"
 label = "Delete or clear a whole calendar (drops all its events)"
-match = ["DELETE /calendar/v3/calendars/*", "POST /calendar/v3/calendars/*/clear"]
+method = ["DELETE", "POST"]
+path = ["/calendar/v3/calendars/:calendar", "/calendar/v3/calendars/:calendar/clear"]
 level = "ask-always"
 
-# A batch (POST /batch/calendar/v3, multipart/mixed) can carry an event delete.
+# A batch is decided by the calls inside it; this rule lets a connection ask
+# for every batch.
 [[rule]]
 id = "batch"
-label = "Send a batch of Calendar calls (can delete events)"
-match = "POST /batch/**"
-level = "ask-always"
+label = "Send a batch of Calendar calls"
+method = "POST"
+path = ["/batch", "/batch/*"]
+level = "allow"

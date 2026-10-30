@@ -64,7 +64,9 @@ pub struct OpGrantKey {
     pub method: String,
     pub host: String,
     pub path: String,
-    pub scope_digest: String,
+    /// The permit identity: an HMAC of what the approval covers
+    /// (`crate::approval::coverage`), hex.
+    pub identity: String,
     pub tier: crate::approval::reuse::BoundTier,
 }
 
@@ -76,7 +78,7 @@ impl OpGrantKey {
         method: &str,
         host: &str,
         path: &str,
-        scope_digest: &str,
+        identity: &str,
         tier: &crate::approval::reuse::BoundTier,
     ) -> OpGrantKey {
         OpGrantKey {
@@ -85,7 +87,7 @@ impl OpGrantKey {
             method: method.to_string(),
             host: host.to_ascii_lowercase(),
             path: path.to_string(),
-            scope_digest: scope_digest.to_string(),
+            identity: identity.to_string(),
             tier: tier.clone(),
         }
     }
@@ -136,11 +138,14 @@ pub enum PermitFor {
 }
 
 /// The key a permit is stored and looked up under: what it was approved for,
-/// and with which credentials. No value.
+/// with which credentials, under which content-key generation. No value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PermitKey {
     pub of: PermitFor,
     pub credentials: CredentialSet,
+    /// The vault's content-key generation the approval was made under: a
+    /// re-key ends every permit of the vault.
+    pub generation: u64,
 }
 
 impl PermitKey {
@@ -151,19 +156,22 @@ impl PermitKey {
     /// unit for `rule` and `floor`; with the credentials the request
     /// resolved. The proxy and approve both call this, so they cannot
     /// disagree. `None` for a decision that mints no op (allow, deny).
+    /// `identity` is the request's permit identity and generation
+    /// (`crate::approval::coverage::Identity`).
     #[allow(clippy::too_many_arguments)]
     pub fn of(
         level: crate::core::policy::AccessLevel,
         decided_by: &crate::core::policy::DecidedBy,
-        scoped: bool,
+        scoped: impl Into<crate::approval::reuse::Scoped>,
         agent: &str,
         conn: &str,
         method: &str,
         host: &str,
         path: &str,
-        scope_digest: &str,
+        identity: &crate::approval::coverage::Identity,
         credentials: CredentialSet,
     ) -> Option<PermitKey> {
+        let scoped = scoped.into();
         let reuse = crate::approval::Reuse::of(level, decided_by, scoped, method)?;
         let of = match reuse.unit() {
             Some(unit) => PermitFor::Unit {
@@ -181,12 +189,16 @@ impl PermitKey {
                     method,
                     host,
                     path,
-                    scope_digest,
+                    &identity.digest,
                     &tier,
                 ))
             }
         };
-        Some(PermitKey { of, credentials })
+        Some(PermitKey {
+            of,
+            credentials,
+            generation: identity.generation,
+        })
     }
 
     /// Spent by the request that redeems it (ask-always, an id-less rule's
@@ -199,22 +211,46 @@ impl PermitKey {
     }
 }
 
-/// The permits of an Unlocked vault (key → Unix expiry). They live only in
-/// Unlocked, so a lock, park or close drops them all.
+/// The approved request a single-use permit was minted for, by its covered
+/// components' HMACs (never values): what a re-run that misses it is told it
+/// changed.
+#[derive(Debug, Clone)]
+pub struct Approved {
+    /// When it was approved (Unix seconds).
+    pub at: u64,
+    pub components: Arc<Vec<(String, [u8; 32])>>,
+}
+
+/// One permit: its Unix expiry, and the request it was approved for.
+#[derive(Debug, Clone)]
+struct Permit {
+    expires_at: u64,
+    approved: Option<Approved>,
+}
+
+/// The permits of an Unlocked vault. They live only in Unlocked, so a lock,
+/// park or close drops them all; a re-key ends them too
+/// ([`Permits::keep_generation`]).
 #[derive(Debug, Default)]
-pub struct Permits(HashMap<PermitKey, u64>);
+pub struct Permits(HashMap<PermitKey, Permit>);
 
 impl Permits {
     /// Store a permit; expired ones are swept.
-    fn insert(&mut self, key: PermitKey, expires_at: u64, now: u64) {
-        self.0.retain(|_, exp| *exp > now);
-        self.0.insert(key, expires_at);
+    fn insert(&mut self, key: PermitKey, expires_at: u64, now: u64, approved: Option<Approved>) {
+        self.0.retain(|_, p| p.expires_at > now);
+        self.0.insert(
+            key,
+            Permit {
+                expires_at,
+                approved,
+            },
+        );
     }
 
     /// Is `key` live? An expired one is dropped.
     fn live(&mut self, key: &PermitKey, now: u64) -> bool {
         match self.0.get(key) {
-            Some(exp) if *exp > now => true,
+            Some(p) if p.expires_at > now => true,
             Some(_) => {
                 self.0.remove(key);
                 false
@@ -226,7 +262,7 @@ impl Permits {
     /// Spend `key`: removed if present; `false` when it was not (or had
     /// expired).
     fn take(&mut self, key: &PermitKey, now: u64) -> bool {
-        matches!(self.0.remove(key), Some(exp) if exp > now)
+        matches!(self.0.remove(key), Some(p) if p.expires_at > now)
     }
 
     /// Drop every window (decision D: a policy change ends them).
@@ -234,9 +270,36 @@ impl Permits {
         self.0.retain(|k, _| k.single_use());
     }
 
+    /// Drop every permit made under another content-key generation: the
+    /// vault was re-keyed since.
+    fn keep_generation(&mut self, generation: u64) {
+        self.0.retain(|k, _| k.generation == generation);
+    }
+
+    /// The newest live, unredeemed single-use permit `agent` holds for this
+    /// request line, with the request it was approved for.
+    fn approved_for(&self, line: &OpGrantKey, generation: u64, now: u64) -> Option<Approved> {
+        self.0
+            .iter()
+            .filter(|(k, p)| k.generation == generation && p.expires_at > now && k.single_use())
+            .filter_map(|(k, p)| match &k.of {
+                PermitFor::Request(r)
+                    if r.agent == line.agent
+                        && r.conn == line.conn
+                        && r.method == line.method
+                        && r.host == line.host
+                        && r.path == line.path =>
+                {
+                    p.approved.clone()
+                }
+                _ => None,
+            })
+            .max_by_key(|a| a.at)
+    }
+
     #[cfg(test)]
     pub(crate) fn all(&self) -> Vec<(PermitKey, u64)> {
-        self.0.iter().map(|(k, e)| (k.clone(), *e)).collect()
+        self.0.iter().map(|(k, p)| (k.clone(), p.expires_at)).collect()
     }
 }
 
@@ -1684,6 +1747,7 @@ impl AppState {
                     permits,
                     ..
                 } => {
+                    permits.keep_generation(key.generation);
                     let current_policy = current.fingerprint == snapshot.fingerprint;
                     Ok((key.single_use() || current_policy) && permits.live(&key, now))
                 }
@@ -1798,6 +1862,21 @@ impl AppState {
         expires_at: u64,
         window_fp: Option<[u8; 32]>,
     ) -> bool {
+        self.permit_insert_approved(vault_id, key, expires_at, window_fp, None)
+    }
+
+    /// [`Self::permit_insert`], keeping the request a single-use permit was
+    /// approved for (its covered components' HMACs), so a re-run that misses
+    /// it can be told what it changed. A permit of another content-key
+    /// generation than this one's is dropped.
+    pub fn permit_insert_approved(
+        &self,
+        vault_id: &str,
+        key: PermitKey,
+        expires_at: u64,
+        window_fp: Option<[u8; 32]>,
+        approved: Option<Approved>,
+    ) -> bool {
         let now = now_secs();
         let Some(runtime) = self.runtime_if_present(vault_id) else {
             return false;
@@ -1812,8 +1891,22 @@ impl AppState {
         if !key.single_use() && window_fp != Some(snapshot.fingerprint) {
             return false;
         }
-        permits.insert(key, expires_at, now);
+        permits.keep_generation(key.generation);
+        permits.insert(key, expires_at, now, approved);
         true
+    }
+
+    /// The request a live, unredeemed single-use permit for this request line
+    /// (`line`'s agent, connection, method, host and path) was approved for,
+    /// the newest when there are several; `None` when the vault holds none
+    /// (or is not Unlocked).
+    pub fn approved_request(&self, vault_id: &str, line: &OpGrantKey, generation: u64) -> Option<Approved> {
+        let runtime = self.runtime_if_present(vault_id)?;
+        let state = runtime.state.lock().unwrap();
+        match &*state {
+            VaultState::Unlocked { permits, .. } => permits.approved_for(line, generation, now_secs()),
+            VaultState::Locked => None,
+        }
     }
 
     /// Serve a rotated refresh token the store took, without an install. The
@@ -2008,50 +2101,20 @@ impl AppState {
 
     /// The policy decision for a request, from a snapshot's policy inputs and
     /// this daemon's compiled services ([`crate::snapshot::PolicyInputs::decide`]):
-    /// `(effective level, what decided it, ttl seconds)`. Pure policy.
-    #[allow(clippy::too_many_arguments)]
+    /// `(effective level, what decided it, ttl seconds)`, or why the request
+    /// can't be read. Pure policy.
     pub fn evaluate_request_decision(
         &self,
         inputs: &crate::snapshot::PolicyInputs,
         connection_id: &str,
         service_id: &str,
-        method: &str,
-        path: &str,
-        body: Option<&str>,
-        vars: &crate::core::policy::VarMap,
-    ) -> (
-        crate::core::policy::AccessLevel,
-        crate::core::policy::DecidedBy,
-        Option<u64>,
-    ) {
-        inputs.decide(
-            &self.services,
-            connection_id,
-            service_id,
-            method,
-            path,
-            body,
-            vars,
-        )
+        request: &crate::core::request::Request<'_>,
+    ) -> Result<crate::core::policy::Decision, crate::core::request::Unreadable> {
+        inputs.decide(&self.services, connection_id, service_id, request)
     }
 
-    /// For a scoped request (`rs`: its matched `[requests]` shape), the first
-    /// of this connection's own policy edits that cannot be enforced as
-    /// written there ([`crate::snapshot::PolicyInputs::rule_problem`]). The
-    /// policy is sealed and written by the console, so this is where the
-    /// daemon holds the line.
-    #[allow(clippy::too_many_arguments)]
-    pub fn connection_rule_problem(
-        &self,
-        inputs: &crate::snapshot::PolicyInputs,
-        connection_id: &str,
-        service_id: &str,
-        method: &str,
-        path: &str,
-        rs: &crate::service::RequestScope,
-    ) -> Option<String> {
-        inputs.rule_problem(&self.services, connection_id, service_id, method, path, rs)
-    }
+    // `connection_rule_problem` went with `when` and `body` (step 3 covers
+    // condition reads).
 
     /// Keep why a change of `item_id` was not applied (see
     /// the vault runtime's sync notes).
@@ -2712,6 +2775,7 @@ mod tests {
                 agent, conn, method, host, path, digest, tier,
             )),
             credentials: creds(keys),
+            generation: 0,
         }
     }
 
@@ -2747,8 +2811,8 @@ mod tests {
     fn a_request_bound_permit_misses_any_other_request() {
         let state = test_state();
         unlock_empty(&state, "v1");
-        let d80 = crate::service::scope_digest(&[("amount".into(), "80".into())]);
-        let d180 = crate::service::scope_digest(&[("amount".into(), "180".into())]);
+        // Two permit identities (what the approvals cover differs).
+        let (d80, d180) = ("id-80".to_string(), "id-180".to_string());
         let k = |agent: &str, conn: &str, m: &str, h: &str, p: &str, d: &str| {
             bound(agent, conn, m, h, p, d, &aa(), &["K"])
         };
@@ -2784,6 +2848,7 @@ mod tests {
                 unit: GrantUnit::Floor(Class::Read),
             },
             credentials: CredentialSet::new(service, keys.iter().map(|k| k.to_string())),
+            generation: 0,
         };
         assert!(state.permit_insert("v1", unit(&["A"], "svc"), far(), Some(fp)));
         assert!(!redeem(&state, "v1", unit(&["B"], "svc")));
@@ -2796,6 +2861,24 @@ mod tests {
         state.permit_insert("v1", one(&["A"]), far(), None);
         assert!(!redeem(&state, "v1", one(&["A", "B"])));
         assert!(redeem(&state, "v1", one(&["A"])));
+    }
+
+    /// A re-key ends every permit of the vault: a request keyed under the new
+    /// content-key generation finds none of the earlier ones, and they are
+    /// dropped.
+    #[test]
+    fn a_new_generation_drops_the_permits() {
+        let state = test_state();
+        unlock_empty(&state, "v1");
+        let at = |generation: u64| PermitKey {
+            generation,
+            ..bound("agA", "svc", "POST", "h", "/p", "", &aa(), &["K"])
+        };
+        assert!(state.permit_insert("v1", at(0), far(), None));
+        assert!(!redeem(&state, "v1", at(1)));
+        assert!(state.permits("v1").is_empty(), "dropped");
+        assert!(state.permit_insert("v1", at(1), far(), None));
+        assert!(redeem(&state, "v1", at(1)));
     }
 
     /// An expired permit is absent, at the lookup and when it is spent.
@@ -2815,7 +2898,7 @@ mod tests {
         let state = test_state();
         unlock_empty(&state, "v1");
         let fp = state.snapshot("v1").unwrap().fingerprint;
-        let d = |q: &str| crate::service::scope_digest(&[("q".into(), q.into())]);
+        let d = |q: &str| format!("id-{q}");
         let key = |q: &str| bound("agA", "svc", "POST", "api.x.com", "/search", &d(q), &ex(), &["K"]);
         assert!(state.permit_insert("v1", key("alpha"), far(), Some(fp)));
         assert!(redeem(&state, "v1", key("alpha")));
@@ -2854,6 +2937,7 @@ mod tests {
                 unit: GrantUnit::Floor(Class::Read),
             },
             credentials: creds(&["K"]),
+            generation: 0,
         };
         assert!(!state.permit_insert("v1", key(), far(), None), "a window needs its fingerprint");
         assert!(!state.permit_insert("v1", key(), far(), Some([9u8; 32])), "another policy");
@@ -2882,19 +2966,17 @@ mod tests {
         rules.insert(
             "big".to_string(),
             RuleConfig {
-                match_pattern: Some("POST /pay".into()),
-                when: Some("vars.amount > 100".into()),
+                condition: Some(crate::core::policy::Condition::lenient("request.body.amount > 100")),
                 level: Some(AccessLevel::AskAlways),
-                ..Default::default()
+                ..RuleConfig::selecting("POST /pay")
             },
         );
         rules.insert(
             "pay".to_string(),
             RuleConfig {
-                match_pattern: Some("POST /pay".into()),
                 level: Some(AccessLevel::Ask),
                 ttl: Some(60),
-                ..Default::default()
+                ..RuleConfig::selecting("POST /pay")
             },
         );
         let mut policy = Policy::default();
@@ -2906,7 +2988,7 @@ mod tests {
                     write: Some(AccessLevel::Ask),
                     ttl: Some(300),
                 }),
-                rules,
+                rules: rules.into(),
             },
         );
         let state = test_state();
@@ -2916,14 +2998,23 @@ mod tests {
         state.unlock_vault(vid.to_string(), snapshot, zeroize::Zeroizing::new(Vec::new()));
         let fp = state.snapshot(vid).unwrap().fingerprint;
         let key_of = |agent: &str, method: &str, path: &str, host: &str, amount: Option<&str>| {
-            let mut vars = crate::core::policy::VarMap::new();
-            if let Some(a) = amount {
-                vars.insert("amount".into(), serde_json::from_str(a).unwrap());
-            }
+            let body = amount.map(|a| format!("{{\"amount\": {a}}}")).unwrap_or_default();
+            let request = crate::core::request::Request::new(
+                crate::core::request::RequestInput {
+                    method,
+                    path,
+                    host,
+                    body: Some(body.as_bytes()),
+                    ..Default::default()
+                },
+                crate::core::request::BodyFormat::Json,
+                Default::default(),
+            );
             let inputs = state.snapshot(vid).unwrap().inputs.clone();
-            let (level, by, _) =
-                state.evaluate_request_decision(&inputs, "shop", "shop", method, path, None, &vars);
-            PermitKey::of(level, &by, false, agent, "shop", method, host, path, "", creds(&["K"]))
+            let (level, by, _) = state
+                .evaluate_request_decision(&inputs, "shop", "shop", &request)
+                .unwrap();
+            PermitKey::of(level, &by, false, agent, "shop", method, host, path, &Default::default(), creds(&["K"]))
                 .unwrap()
         };
         let approve = |key: PermitKey| assert!(state.permit_insert(vid, key, far(), Some(fp)));
@@ -2964,7 +3055,10 @@ mod tests {
                 "POST",
                 "api.shop.com",
                 "/buy",
-                digest,
+                &crate::approval::coverage::Identity {
+                    digest: digest.into(),
+                    ..Default::default()
+                },
                 creds(&["K"]),
             )
             .unwrap()
@@ -2984,7 +3078,7 @@ mod tests {
             "POST",
             "h",
             "/buy",
-            "",
+            &Default::default(),
             creds(&["K"])
         )
         .is_none());
@@ -3026,15 +3120,8 @@ level = "allow"
                 custom: custom.clone(),
             };
             state
-                .evaluate_request_decision(
-                    &inputs,
-                    "acme",
-                    "acme",
-                    m,
-                    p,
-                    None,
-                    &crate::core::policy::VarMap::new(),
-                )
+                .evaluate_request_decision(&inputs, "acme", "acme", &crate::core::request::Request::bare(m, p))
+                .unwrap()
                 .0
         };
         // Global floor allow: the deny rule and the write default tighten;
@@ -3070,69 +3157,84 @@ level = "allow"
         assert_eq!(decide(&owner, "DELETE", "/v1/things"), AccessLevel::Deny);
     }
 
-    /// A connection's own rule edit that decides a scoped request on a field
-    /// its approval does not bind (a declared but unscoped var, or the body)
-    /// is reported for that connection only; a rule on a bound field is not.
+    /// User rules on a connection of a vault definition (DESIGN §2): an
+    /// override of the definition's rule is the owner's to make, and the pass
+    /// without the definition doesn't count it as a missing rule; on a tie
+    /// the pass without the definition keys the window (a 24 h `ask` of the
+    /// definition doesn't); the condition reads of the rules matched in both
+    /// passes are covered.
     #[test]
-    fn connection_rule_problem_flags_unbound_deciding_fields() {
-        use crate::core::policy::{AccessLevel, ConnectionPolicy, Policy, RuleConfig};
-        let def: crate::service::ServiceDef = crate::service::gate::admit_toml(
-            r#"
+    fn user_rules_on_a_vault_definition() {
+        use crate::core::policy::{AccessLevel, DecidedBy, Policy};
+        use crate::core::request::{BodyFormat, Request, RequestInput};
+        let service = r#"
 [service]
-id = "shop"
-name = "Shop"
-hosts = ["api.shop.com"]
-secrets = ["SHOP_KEY"]
-[requests.purchase]
-match = "POST /buy"
-vars.amount = "/amount"
-vars.force  = { in = "query", at = "force" }
-scope = ["amount"]
-"#,
-        )
-        .unwrap();
-        let rs = def
-            .extract_request_scope("POST", "/buy", Some("force=1"), Some(br#"{"amount":5}"#))
-            .expect("shape matches");
-        let rule = |when: Option<&str>, body: Option<&str>| RuleConfig {
-            match_pattern: Some("POST /buy".into()),
-            when: when.map(str::to_string),
-            body: body.map(crate::core::policy::BodyPattern::lenient),
-            level: Some(AccessLevel::Ask),
-            ..Default::default()
-        };
-        let state = test_state();
-        let problem = |rules: Vec<(&str, RuleConfig)>, conn: &str| {
-            let mut p = Policy::default();
-            p.connections.insert(
-                "shop".to_string(),
-                ConnectionPolicy {
-                    default: None,
-                    rules: rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
-                },
-            );
-            let inputs = PolicyInputs {
-                policy: p,
-                custom: Default::default(),
-            };
-            state.connection_rule_problem(&inputs, conn, "shop", "POST", "/buy", &rs)
-        };
-        assert_eq!(
-            problem(vec![("small", rule(Some("vars.amount < 10"), None))], "shop"),
-            None
+id = "acme"
+name = "Acme"
+hosts = ["api.acme.dev"]
+secrets = ["ACME_KEY"]
+"#;
+        let rules = r#"
+[[rule]]
+id = "nuke"
+label = "Delete things"
+method = "DELETE"
+path = "/v1/things"
+level = "deny"
+
+[[rule]]
+id = "pay"
+label = "Pay"
+method = "POST"
+path = "/v1/pay"
+condition = "request.body.a == 1"
+level = "ask"
+ttl = 86400
+"#;
+        let mut aux = std::collections::BTreeMap::new();
+        aux.insert(
+            "acme".to_string(),
+            crate::service::source::StoredService::new(service.into(), Some(rules.into()), None),
         );
-        let forced = vec![("forced", rule(Some("vars.force == 1"), None))];
-        let e = problem(forced.clone(), "shop").expect("unbound deciding field");
-        assert!(e.contains("'forced'") && e.contains("vars.force"), "{e}");
-        // Another connection of the vault has no such edit.
-        assert_eq!(problem(forced, "shop_2"), None);
-        assert!(problem(vec![("bodyish", rule(None, Some("gift")))], "shop").is_some());
-        // A protective deny on the body mints no approval: not refused.
-        let no_gifts = RuleConfig {
-            level: Some(AccessLevel::Deny),
-            ..rule(None, Some("gift"))
-        };
-        assert_eq!(problem(vec![("no_gifts", no_gifts)], "shop"), None);
+        let state = test_state();
+        let (custom, skipped) = crate::service::vault_custom_services(&aux, true, &state.services);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let mut policy = Policy::default();
+        policy.connections.insert(
+            "acme".to_string(),
+            serde_json::from_value(serde_json::json!({"rules": [
+                {"override": "nuke", "level": "ask"},
+                {"id": "mine", "method": "POST", "path": "/v1/pay", "condition": "request.body.b == 2", "level": "ask", "ttl": 60}
+            ]}))
+            .unwrap(),
+        );
+        let inputs = PolicyInputs { policy, custom };
+        assert!(inputs.rule_notes(&state.services, "acme", "acme").is_empty());
+        let nuke = Request::bare("DELETE", "/v1/things");
+        let (level, _, _) = state.evaluate_request_decision(&inputs, "acme", "acme", &nuke).unwrap();
+        assert_eq!(level, AccessLevel::Ask);
+        let body = br#"{"a":1,"b":2}"#;
+        let pay = Request::new(
+            RequestInput {
+                method: "POST",
+                host: "api.acme.dev",
+                path: "/v1/pay",
+                body: Some(body),
+                ..Default::default()
+            },
+            BodyFormat::Json,
+            crate::core::selector::Params::new(),
+        );
+        let (level, by, ttl) = state.evaluate_request_decision(&inputs, "acme", "acme", &pay).unwrap();
+        assert_eq!((level, ttl), (AccessLevel::Ask, Some(60)));
+        assert!(matches!(by, DecidedBy::Rule { id: Some(ref id), .. } if id == "mine"));
+        let reads: Vec<String> = inputs
+            .matched_reads(&state.services, "acme", "acme", &pay, AccessLevel::Ask)
+            .unwrap()
+            .iter()
+            .map(|r| r.path.to_string())
+            .collect();
+        assert_eq!(reads, ["request.body.a", "request.body.b"]);
     }
 
     /// The policy fingerprint changes with any policy input and with nothing
@@ -3145,7 +3247,7 @@ scope = ["amount"]
             let src = format!(
                 "[service]\nid = \"acme\"\nname = \"Acme\"\nhosts = [{hosts}]\nsecrets = [\"ACME_KEY\"]\n\
                  [policy.levels]\nwrite = \"{write}\"\n\
-                 [requests.pay]\nmatch = \"POST /pay\"\nvars.amount = \"/amount\"\nvars.to = \"/to\"\nscope = [{scope}]\n"
+                 [requests.pay]\nmethod = \"POST\"\npath = \"/pay\"\nscope = [{scope}]\n"
             );
             crate::service::gate::admit_toml(&src).unwrap()
         };
@@ -3156,25 +3258,25 @@ scope = ["amount"]
             }
             .fingerprint()
         };
-        let base = with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\""));
-        assert_eq!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        let base = with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"request.body.amount\""));
+        assert_eq!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"request.body.amount\"")));
         assert_eq!(
             base,
-            with(Policy::default(), def("\"api.acme.dev\", \"x.acme.dev\"", "ask", "\"amount\"")),
+            with(Policy::default(), def("\"api.acme.dev\", \"x.acme.dev\"", "ask", "\"request.body.amount\"")),
             "a definition's hosts are not policy"
         );
-        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask-always", "\"amount\"")));
-        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"amount\", \"to\"")));
+        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask-always", "\"request.body.amount\"")));
+        assert_ne!(base, with(Policy::default(), def("\"api.acme.dev\"", "ask", "\"request.body.amount\", \"request.body.to\"")));
         let mut timeout = Policy::default();
         timeout.timeout = Some(60);
-        assert_ne!(base, with(timeout, def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        assert_ne!(base, with(timeout, def("\"api.acme.dev\"", "ask", "\"request.body.amount\"")));
         let mut floor = Policy::default();
         floor.default = Some(Levels {
             read: Some(AccessLevel::Ask),
             write: None,
             ttl: None,
         });
-        assert_ne!(base, with(floor, def("\"api.acme.dev\"", "ask", "\"amount\"")));
+        assert_ne!(base, with(floor, def("\"api.acme.dev\"", "ask", "\"request.body.amount\"")));
     }
 }
 
@@ -3552,6 +3654,7 @@ mod install_tests {
                 &crate::approval::reuse::BoundTier::AskAlways,
             )),
             credentials: CredentialSet::new("foo", ["FOO".to_string()]),
+            generation: 0,
         };
         assert!(state.permit_insert(V, key.clone(), now_secs() + 600, None));
         state.oauth_access_insert(V, "h", b"at".to_vec(), u64::MAX);

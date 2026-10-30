@@ -13,7 +13,6 @@ type = "oauth2"
 provider = "google"
 scopes = [
   "https://www.googleapis.com/auth/tasks",
-  "https://www.googleapis.com/auth/tasks.readonly",
 ]
 refresh_token = "GOOGLE_TASKS_REFRESH_TOKEN"
 

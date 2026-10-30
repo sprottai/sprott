@@ -4,8 +4,8 @@
 # Sprott never sees, a direct end-run around credential separation. Routine
 # reads and creates ride the floor. Each rule is a per-connection console toggle.
 #
-# Paths are relative to host console.neon.tech (base /api/v2). Single `*` = one
-# segment, so `projects/*` matches project-level deletes only, not the deeper
+# Paths are relative to host console.neon.tech (base /api/v2). `:name` = one
+# segment, so `projects/:project` matches project-level deletes only, not the deeper
 # branch/database/role paths (each gated by its own rule below).
 
 [default]
@@ -16,30 +16,35 @@ write = "allow"
 [[rule]]
 id = "delete-project"
 label = "Delete a project (destroys its database and every branch)"
-match = "DELETE /api/v2/projects/*"
+method = "DELETE"
+path = "/api/v2/projects/:project"
 level = "ask-always"
 
 [[rule]]
 id = "delete-branch"
 label = "Delete a branch"
-match = "DELETE /api/v2/projects/*/branches/*"
+method = "DELETE"
+path = "/api/v2/projects/:project/branches/:branch"
 level = "ask-always"
 
 [[rule]]
 id = "delete-database"
 label = "Delete a database"
-match = "DELETE /api/v2/projects/*/branches/*/databases/*"
+method = "DELETE"
+path = "/api/v2/projects/:project/branches/:branch/databases/:database"
 level = "ask-always"
 
 [[rule]]
 id = "delete-role"
 label = "Delete a role"
-match = "DELETE /api/v2/projects/*/branches/*/roles/*"
+method = "DELETE"
+path = "/api/v2/projects/:project/branches/:branch/roles/:role"
 level = "ask-always"
 
 # ── Mint a durable credential (escapes the broker) ───────────────────────────
 [[rule]]
 id = "mint-api-key"
 label = "Create an API key"
-match = ["POST /api/v2/api_keys", "POST /api/v2/organizations/*/api_keys"]
+method = "POST"
+path = ["/api/v2/api_keys", "/api/v2/organizations/:org/api_keys"]
 level = "ask-always"

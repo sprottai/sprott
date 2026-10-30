@@ -9,6 +9,7 @@
 pub mod gate;
 pub mod graphql;
 pub mod limits;
+pub mod readings;
 pub mod source;
 pub mod strict_json;
 
@@ -42,19 +43,23 @@ pub struct ServiceDef {
     /// inline `[policy]` section (`[policy.levels]` / `[[policy.rules]]`) of a
     /// service.toml without one. `None` when it declares neither.
     pub policy: Option<ServicePolicy>,
-    /// Request shapes (`[requests.<name>]`): the body/query fields this
-    /// service's endpoints expose, which of them identify an action for
-    /// binding (`scope`), and how to phrase them (`consent`). Opt-in — absent
-    /// ⇒ the body is not part of any grant identity (Phase-1 behavior). See
-    /// design/request-scope.md and [`RequestShape`].
+    /// Request shapes (`[requests.<name>]`): which requests they read and in
+    /// what body format, which request values an approval covers (`scope`),
+    /// and how to phrase them (`consent`). See [`RequestShape`].
     pub requests: HashMap<String, RequestShape>,
+    /// The shapes' names in declaration order: the order they are tried in.
+    pub request_order: Vec<String>,
+    /// What the gate found worth saying about an admitted definition (a
+    /// condition member read without a presence guard): printed by `sprott
+    /// service validate` / `add`, never a refusal.
+    pub warnings: Vec<String>,
     /// Set only by the gate.
     _gate: (),
 }
 
 /// A definition's policy, compiled at the gate: the read/write floor when no
 /// rule matches, and the rules in file order, each with a parsed level and a
-/// compiled `body`.
+/// compiled `condition`.
 #[derive(Debug, Clone, Default)]
 pub struct ServicePolicy {
     /// `[default]` in policy.toml, `[policy.levels]` inline.
@@ -166,95 +171,26 @@ impl ServiceDef {
             .map(|s| s.to_string())
     }
 
-    /// Resolve the request into its matching `[requests]` shape and extract the
-    /// declared vars — the join point that feeds both a policy `when` and the
-    /// approval binding/consent. `None` when no shape matches (⇒ no vars, an
-    /// empty scope: the Phase-1 path-only grant). Selection is deterministic
-    /// (see below); shapes should not overlap.
-    ///
-    /// Each source is read the way its standard says a server reads it: the
-    /// body as strict JSON (strict_json.rs), the query as
-    /// `application/x-www-form-urlencoded`, a GraphQL body as the operation the
-    /// server runs (graphql.rs). A source a var needs that can't be read that
-    /// way sets `unreadable`, and the request is refused with that status: a
-    /// server would refuse it too, and deciding on a guess could let it past a
-    /// rule. A value that is simply absent leaves its var undefined (per P3,
-    /// an undefined var makes a `when` simply not fire, and it is omitted from
-    /// the bound set).
-    pub fn extract_request_scope(
+    /// Read a request against this definition's `[requests]` shapes: the
+    /// first, in declaration order, whose `method`, `path` and `condition`
+    /// select it (a condition that errors doesn't select), with what its
+    /// approval covers, and the request object rules then read, in that
+    /// shape's body format (`json` when no shape matched). A value a shape's
+    /// condition, `scope` or `consent` reads that can't be read refuses the
+    /// request.
+    pub fn read_request<'a>(
         &self,
-        method: &str,
-        path: &str,
-        query: Option<&str>,
-        body: Option<&[u8]>,
-    ) -> Option<RequestScope> {
-        let (shape_name, shape) = self.request_shape(method, path)?;
-        let mut declared: Vec<String> = shape.vars.keys().cloned().collect();
-        declared.sort();
-        let mut scope = RequestScope {
-            consent: shape.consent.clone(),
-            shape: shape_name.clone(),
-            declared,
-            binds: shape.scope.clone(),
-            ..Default::default()
-        };
-        let mut reads = Reads::new(body, query);
-        // Sorted, so which unreadable source is reported is stable.
-        let mut defs: Vec<(&String, &VarDef)> = shape.vars.iter().collect();
-        defs.sort_by(|a, b| a.0.cmp(b.0));
-        for (name, def) in defs {
-            match def.resolve(&mut reads) {
-                Ok(Some(v)) => {
-                    // Bare name for the common single-shape case; qualified
-                    // `shape.name` so a rule spanning several shapes can
-                    // disambiguate.
-                    scope.vars.insert(format!("{}.{}", shape_name, name), v.clone());
-                    scope.vars.insert(name.clone(), v);
-                }
-                Ok(None) => {}
-                Err(why) => {
-                    scope.vars.clear();
-                    scope.unreadable = Some(why);
-                    return Some(scope);
-                }
-            }
-        }
-        // The bound subset: scope vars that actually resolved, sorted for a
-        // stable digest. An unresolved scope var is simply omitted (approve and
-        // redeem both omit it, so the identity stays consistent). A large value
-        // (a whole email with an attachment) is bound by DIGEST, not verbatim —
-        // otherwise it would bloat the op that travels the approval relay
-        // (approve.rs would 413). approve and redeem apply the SAME cap, so the
-        // grant identity is unchanged; only the display degrades to a summary.
-        scope.bound = shape
-            .scope
-            .iter()
-            .filter_map(|k| {
-                let v = json_scalar_to_string(scope.vars.get(k)?)?;
-                Some((k.clone(), cap_bound_value(&v)))
-            })
-            .collect();
-        scope.bound.sort_by(|a, b| a.0.cmp(&b.0));
-        Some(scope)
+        input: crate::core::request::RequestInput<'a>,
+    ) -> Result<ReadRequest<'a>, Unreadable> {
+        read_request(Some(self), input)
     }
 
-    /// The `[requests]` shape a request on `method` + `path` matches, with its
-    /// name. Deterministic: `requests` is a HashMap, so keys are tried in a
-    /// STABLE (sorted) order. Otherwise two overlapping shapes would pick a
-    /// random winner per process, making the bound digest unstable (a legit
-    /// replay could hash a different shape than approve did → spurious
-    /// re-prompt). Shapes should not overlap; this makes "they shouldn't, but
-    /// if they do" harmless and repeatable.
-    pub fn request_shape(&self, method: &str, path: &str) -> Option<(&String, &RequestShape)> {
-        let mut names: Vec<&String> = self.requests.keys().collect();
-        names.sort();
-        names.into_iter().find_map(|n| {
-            let s = &self.requests[n];
-            s.match_pattern
-                .iter()
-                .any(|p| crate::core::policy::pattern_matches(p, method, path))
-                .then_some((n, s))
-        })
+    /// Whether some `[requests]` shape's `method` and `path` select this
+    /// request (its condition aside).
+    pub fn shape_selects(&self, method: &str, path: &str) -> bool {
+        self.requests
+            .values()
+            .any(|s| s.select.exec(method, path).is_some())
     }
 
     /// The stored secret role that backs this service's credential: the mint
@@ -540,384 +476,211 @@ pub struct ConnectDescriptor {
     pub authorize_params: HashMap<String, String>,
 }
 
-// ── Request shapes: `[requests.<name>]` (design/request-scope.md) ──────────────
+// ── Request shapes: `[requests.<name>]` (request-model design §3) ──────────────
 
-/// One request shape: a method+path matcher plus the body/query fields it
-/// exposes (`vars`), which of them bind the grant (`scope`), and how to phrase
-/// the action for a human (`consent`). `deny_unknown_fields` so a typo is a
-/// parse error, not a silently-ignored field.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+pub use crate::core::request::{BodyFormat, ReadPath, Unreadable};
+
+/// One request shape, as the gate compiled it: which requests it reads
+/// (`method`, `path` and `condition`, the selector a policy rule has), the
+/// body format they are read in (`body`), which request values an approval
+/// binds (`scope`), how the approval card phrases them (`consent`), and
+/// which values carry encoded media (`encoded`).
+#[derive(Debug, Clone)]
 pub struct RequestShape {
-    /// `"METHOD /path"` (or `"/path"`), or a list = OR. Same grammar / serde as
-    /// a policy rule's `match`.
-    #[serde(
-        rename = "match",
-        deserialize_with = "crate::core::policy::match_spec::deserialize"
-    )]
-    pub match_pattern: Vec<String>,
-    /// `name → address`. A bare string addresses a body JSON Pointer; the table
-    /// form `{ in = "query", at = "<param>" }` addresses a query parameter, and
-    /// `{ in = "graphql", at = "request" | "calls" | "fields" }` reads the body
-    /// as the GraphQL operation a server would run (graphql.rs).
-    #[serde(default)]
-    pub vars: HashMap<String, VarDef>,
-    /// The subset of `vars` whose VALUES bind the grant identity. Absent/empty ⇒
-    /// nothing bound (P5). Whitelist only in v1.
-    #[serde(default)]
-    pub scope: Vec<String>,
-    /// The approval-screen phrasing: a template over the bound vars, using the
-    /// SAME `{{ vars.x | filter }}` pipe syntax as git-integration's
-    /// `{{ secret.X | basic }}` (the Liquid/Jinja convention). Two shapes:
-    ///   - plain interpolation — `"Buy from {{ vars.merchant }} for {{ vars.amount }}"`;
-    ///   - a rich renderer via a filter — `"{{ vars.raw | email }}"` (the `email`
-    ///     console filter decodes the bound base64url message into a card).
-    /// One field, always a string; a filter names console code (declarative
-    /// toml, code in the console — the same split as `[auth]`). Every referenced
-    /// `vars.<name>` must be in `scope` (P4 show ⊆ bind, build-checked); a filter
-    /// reads ONLY that bound value. Interpolated values are auto-escaped by the
+    /// Which requests it reads ([`crate::core::selector`]).
+    pub select: crate::core::selector::Select,
+    /// AND-combined with the selector; it can't read `request.graphql`. One
+    /// that errors doesn't select.
+    pub condition: Option<crate::core::policy::Condition>,
+    /// The server's body format (`body = "json" | "form" | "graphql" |
+    /// "text"`, absent = `json`), never the caller's Content-Type.
+    pub format: BodyFormat,
+    /// The request paths whose values an approval covers, as written
+    /// (`None`: absent, the whole request; `[]`: none beyond what is always
+    /// covered). The token `request` stands for the whole request
+    /// ([`Self::scope_whole`]).
+    pub scope: Option<Vec<ReadPath>>,
+    /// `scope` lists the token `request`: the whole request, plus the paths.
+    pub scope_whole: bool,
+    /// The approval card's phrasing: a template over request paths, with the
+    /// `{{ x | filter }}` pipe syntax of git-integration's
+    /// `{{ secret.X | basic }}` (the Liquid/Jinja convention):
+    ///   - plain interpolation, `"Send {{ request.body.amount }} to {{ request.body.to }}"`;
+    ///   - a rich renderer through a filter, `"{{ request.body.raw | email }}"`
+    ///     (the console's `email` filter decodes a base64url message into a card).
+    ///
+    /// A filter names console code (declarative toml, code in the console,
+    /// the same split as `[auth]`). Interpolated values are escaped by the
     /// renderer (they come from the agent).
-    #[serde(default)]
     pub consent: Option<String>,
+    /// The paths `consent` reads: always covered, so what the card phrases
+    /// is what an approval covers.
+    pub consent_reads: Vec<ReadPath>,
+    /// Request paths whose string values carry encoded media, keyed by the
+    /// path's text, in JSON Schema's own content keywords (2020-12 §8): a
+    /// compiled-in definition's are covered by their content
+    /// (`crate::approval::coverage`), a vault definition's are for display.
+    pub encoded: std::collections::BTreeMap<String, Encoded>,
 }
 
-/// One `{{ vars.<name> [| <filter>] }}` reference in a consent template.
+/// `encoded."<request path>" = { contentEncoding = …, contentMediaType = … }`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Encoded {
+    #[serde(rename = "contentEncoding", skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+    #[serde(rename = "contentMediaType", skip_serializing_if = "Option::is_none")]
+    pub content_media_type: Option<String>,
+}
+
+impl RequestShape {
+    /// Whether an approval of a request this shape matched covers the whole
+    /// request: `scope` absent, or listing the token `request`.
+    pub fn covers_whole(&self) -> bool {
+        self.scope.is_none() || self.scope_whole
+    }
+
+    /// What an approval of a request this shape matched covers, as text:
+    /// `request` for the whole request, then the listed paths and what
+    /// `consent` reads, sorted, each once. (A rule's condition reads join at
+    /// the request.)
+    pub fn covers(&self) -> Vec<String> {
+        let mut paths: Vec<ReadPath> = self
+            .scope
+            .iter()
+            .flatten()
+            .chain(self.consent_reads.iter())
+            .cloned()
+            .collect();
+        paths.sort();
+        paths.dedup();
+        self.covers_whole()
+            .then(|| "request".to_string())
+            .into_iter()
+            .chain(paths.iter().map(ToString::to_string))
+            .collect()
+    }
+}
+
+/// One `{{ <request path> [| <filter>] }}` token of a consent template: the
+/// path as written and the filter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentRef {
-    pub var: String,
+    pub path: String,
     pub filter: Option<String>,
 }
 
-/// Parse a consent template's `{{ vars.<name> [| <filter>] }}` references (the
-/// same pipe grammar as git-integration's `{{ secret.X | basic }}`). Literal
-/// text and malformed/prefix-less tokens are skipped. Used for both build
-/// verification (var ⊆ scope) and the CLI's plain-text render.
-pub fn consent_refs(template: &str) -> Vec<ConsentRef> {
+/// The tokens of a consent template (`{{ request.body.raw | email }}`), in
+/// order; `Err` when a `{{` is never closed. A filter is the name after the
+/// last `|` (a header name may hold a `|` itself).
+pub fn consent_refs(template: &str) -> Result<Vec<ConsentRef>, String> {
     let mut out = Vec::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
-        let Some(end) = after.find("}}") else { break };
+        let Some(end) = after.find("}}") else {
+            return Err("an unclosed '{{'".into());
+        };
         let inner = after[..end].trim();
-        let mut parts = inner.splitn(2, '|');
-        let expr = parts.next().unwrap_or("").trim();
-        let filter = parts
-            .next()
-            .map(|f| f.trim().to_string())
-            .filter(|f| !f.is_empty());
-        if let Some(name) = expr.strip_prefix("vars.").map(str::trim) {
-            if !name.is_empty() {
-                out.push(ConsentRef {
-                    var: name.to_string(),
-                    filter,
-                });
-            }
-        }
+        let is_name = |f: &str| !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let (path, filter) = match inner.rsplit_once('|') {
+            Some((p, f)) if is_name(f.trim()) => (p.trim(), Some(f.trim().to_string())),
+            _ => (inner, None),
+        };
+        out.push(ConsentRef {
+            path: path.to_string(),
+            filter,
+        });
         rest = &after[end + 2..];
     }
-    out
+    Ok(out)
 }
 
-/// The `vars.<name>` names a consent template references — for the show ⊆ bind
-/// build check.
-pub fn consent_tokens(template: &str) -> Vec<String> {
-    consent_refs(template).into_iter().map(|r| r.var).collect()
+/// A request read against a definition's `[requests]` shapes.
+pub struct ReadRequest<'a> {
+    /// The matched shape, `None` when none matched.
+    pub scope: Option<RequestScope>,
+    /// The request object, in the matched shape's body format.
+    pub request: crate::core::request::Request<'a>,
+    /// No shape matched, and a shape whose `method` and `path` selected the
+    /// request has a condition that errored: an approval of it is
+    /// single-use (a window would be the whole rule's, which is looser).
+    pub errored: bool,
 }
 
-/// Where a var is addressed. OpenAPI's `in` convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VarLoc {
-    Body,
-    Query,
-    /// The body read as the GraphQL operation a server would run: `at` is
-    /// `request` (every top-level call with its arguments, canonical JSON: what
-    /// an approval binds), `calls` (the same, shortened for a person to read)
-    /// or `fields` (the list of called field names).
-    Graphql,
-}
-
-/// The `at` values a `graphql` var may take.
-pub const GRAPHQL_AT: &[&str] = &["request", "calls", "fields"];
-
-/// A var's address into the request. Untagged: a bare string is the common
-/// case (a body JSON Pointer); the table form spells the location out.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum VarDef {
-    /// Bare string = a JSON Pointer (RFC 6901) into the request BODY.
-    BodyPointer(String),
-    /// `{ in = "body"|"query", at = "<pointer-or-param>" }`.
-    Located(VarAt),
-}
-
-/// The table form of a var address. `deny_unknown_fields` so a typo is a
-/// parse error, not a silently-ignored field.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VarAt {
-    #[serde(rename = "in")]
-    pub location: VarLoc,
-    pub at: String,
-}
-
-/// The value at JSON Pointer `ptr` (RFC 6901) in a parsed body. `Ok(None)`
-/// when a member is absent (or a step is null, which reads as absent);
-/// `Err` (422) when the path meets something that has no members to read: a
-/// string, number or bool, or an array where the step isn't an index. Such a
-/// body (Google's array-encoded JSPB, for one) is read by its server in a way
-/// the shape can't see, so the request is refused rather than bound to nothing.
-fn body_member<'a>(
-    body: &'a serde_json::Value,
-    ptr: &str,
-) -> Result<Option<&'a serde_json::Value>, Unreadable> {
-    use serde_json::Value as Json;
-    if ptr.is_empty() {
-        return Ok(Some(body));
-    }
-    let Some(rest) = ptr.strip_prefix('/') else {
-        return Ok(None);
-    };
-    let unreadable = || Unreadable {
-        status: 422,
-        message: format!("the request body can't be read at {ptr}: it is not a JSON object there"),
-    };
-    let mut cur = body;
-    for raw in rest.split('/') {
-        let token = raw.replace("~1", "/").replace("~0", "~");
-        cur = match cur {
-            Json::Object(m) => match m.get(&token) {
-                Some(v) => v,
-                None => return Ok(None),
-            },
-            Json::Array(a) => {
-                let index = (token == "0" || !token.starts_with('0'))
-                    .then(|| token.parse::<usize>().ok())
-                    .flatten()
-                    .ok_or_else(unreadable)?;
-                match a.get(index) {
-                    Some(v) => v,
-                    None => return Ok(None),
+/// [`ServiceDef::read_request`] for a connection whose definition may be
+/// missing (a raw connection named like nothing: no shapes).
+pub fn read_request<'a>(
+    def: Option<&ServiceDef>,
+    input: crate::core::request::RequestInput<'a>,
+) -> Result<ReadRequest<'a>, Unreadable> {
+    use crate::core::request::Request;
+    let mut errored = false;
+    if let Some(def) = def {
+        for name in &def.request_order {
+            let Some(shape) = def.requests.get(name) else {
+                continue;
+            };
+            let Some(params) = shape.select.exec(input.method, input.path) else {
+                continue;
+            };
+            let request = Request::new(input, shape.format, params);
+            if let Some(c) = &shape.condition {
+                match c.eval(&request)? {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => {
+                        errored = true;
+                        continue;
+                    }
                 }
             }
-            Json::Null => return Ok(None),
-            _ => return Err(unreadable()),
-        };
-    }
-    Ok(Some(cur))
-}
-
-impl VarDef {
-    /// Resolve this var's value, keeping its JSON type. `Ok(None)` = absent
-    /// (an undefined var; a JSON null too); `Err` = its source can't be read
-    /// the standard way.
-    fn resolve(&self, reads: &mut Reads<'_>) -> Result<Option<serde_json::Value>, Unreadable> {
-        use serde_json::Value as Json;
-        match self {
-            VarDef::BodyPointer(ptr)
-            | VarDef::Located(VarAt {
-                location: VarLoc::Body,
-                at: ptr,
-            }) => Ok(match reads.json()? {
-                Some(b) => body_member(b, ptr)?
-                    .filter(|v| !v.is_null())
-                    .cloned(),
-                None => None,
-            }),
-            VarDef::Located(VarAt {
-                location: VarLoc::Query,
-                at,
-            }) => Ok(reads.query_param(at)?.map(Json::String)),
-            VarDef::Located(VarAt {
-                location: VarLoc::Graphql,
-                at,
-            }) => {
-                let Some(op) = reads.graphql()? else {
-                    return Ok(None);
-                };
-                Ok(match at.as_str() {
-                    "request" => Some(Json::String(op.request_var())),
-                    "calls" => Some(Json::String(op.calls_var(BOUND_VALUE_CAP))),
-                    "fields" => Some(Json::from(op.fields())),
-                    _ => None,
-                })
+            // Every value the consent reads is read now: one that can't be
+            // read refuses the request before any decision.
+            for path in shape.scope.iter().flatten().chain(shape.consent_reads.iter()) {
+                request.value(path)?;
             }
-        }
-    }
-}
-
-/// A request a shape needs to read but can't, the way a server would refuse
-/// it: the HTTP status (400 unreadable, 422 a GraphQL document that fails
-/// validation) and why.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Unreadable {
-    pub status: u16,
-    pub message: String,
-}
-
-impl From<graphql::Refusal> for Unreadable {
-    fn from(r: graphql::Refusal) -> Self {
-        Unreadable {
-            status: r.status,
-            message: r.message,
-        }
-    }
-}
-
-/// One request's sources, each parsed at most once and only when a var asks.
-struct Reads<'a> {
-    body: Option<&'a [u8]>,
-    query: Option<&'a str>,
-    json: Option<Result<Option<serde_json::Value>, Unreadable>>,
-    gql: Option<Result<Option<graphql::Operation>, Unreadable>>,
-}
-
-impl<'a> Reads<'a> {
-    fn new(body: Option<&'a [u8]>, query: Option<&'a str>) -> Self {
-        Reads {
-            body,
-            query,
-            json: None,
-            gql: None,
-        }
-    }
-
-    /// The body as strict JSON; `None` for an empty body (nothing to read).
-    fn json(&mut self) -> Result<Option<&serde_json::Value>, Unreadable> {
-        let body = self.body;
-        self.json
-            .get_or_insert_with(|| match body {
-                Some(b) if !b.iter().all(u8::is_ascii_whitespace) => strict_json::parse(b)
-                    .map(Some)
-                    .map_err(|e| Unreadable {
-                        status: 400,
-                        message: format!("the request body is not valid JSON: {e}"),
-                    }),
-                _ => Ok(None),
-            })
-            .as_ref()
-            .map(Option::as_ref)
-            .map_err(Clone::clone)
-    }
-
-    /// The body as the GraphQL operation a server would run.
-    fn graphql(&mut self) -> Result<Option<&graphql::Operation>, Unreadable> {
-        if self.gql.is_none() {
-            let read = match self.json() {
-                Ok(Some(body)) => graphql::read(body).map(Some).map_err(Unreadable::from),
-                Ok(None) => Ok(None),
-                Err(e) => Err(e),
+            let scope = RequestScope {
+                shape: name.clone(),
+                consent: shape.consent.clone(),
+                whole: shape.covers_whole(),
+                listed: shape.scope.clone().unwrap_or_default(),
+                consent_reads: shape.consent_reads.clone(),
+                encoded: shape.encoded.clone(),
             };
-            self.gql = Some(read);
-        }
-        self.gql
-            .as_ref()
-            .expect("set above")
-            .as_ref()
-            .map(Option::as_ref)
-            .map_err(Clone::clone)
-    }
-
-    /// A query parameter, decoded as `application/x-www-form-urlencoded`
-    /// (WHATWG URL). Given twice it is ambiguous (servers differ on which one
-    /// counts), so it is refused.
-    fn query_param(&self, name: &str) -> Result<Option<String>, Unreadable> {
-        let Some(q) = self.query else {
-            return Ok(None);
-        };
-        let mut found = url::form_urlencoded::parse(q.as_bytes()).filter(|(k, _)| k == name);
-        let first = found.next().map(|(_, v)| v.into_owned());
-        if found.next().is_some() {
-            return Err(Unreadable {
-                status: 400,
-                message: format!("the query parameter {name} is given more than once"),
+            return Ok(ReadRequest {
+                scope: Some(scope),
+                request,
+                errored: false,
             });
         }
-        Ok(first)
     }
+    Ok(ReadRequest {
+        scope: None,
+        request: Request::new(input, BodyFormat::Json, crate::core::selector::Params::new()),
+        errored,
+    })
 }
 
-/// A JSON value → the string used for `when` comparison and grant binding. A
-/// number renders via serde (`80` → `"80"`); a string is itself; a bool →
-/// `"true"`/`"false"`; a container binds its compact JSON; null = undefined.
-fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        other => serde_json::to_string(other).ok(),
-    }
-}
-
-/// The result of resolving a request against its `[requests]` shape.
+/// The `[requests]` shape a request matched, as its approval covers it.
 #[derive(Debug, Clone, Default)]
 pub struct RequestScope {
-    /// Every resolved var, `name → value` and `shape.name → value`. Fed to a
-    /// policy `when`.
-    pub vars: crate::core::policy::VarMap,
-    /// The scope-bound `(name, value)` pairs, SORTED by name. What
-    /// [`scope_digest`] hashes into the grant identity. Empty ⇒ nothing bound.
-    pub bound: Vec<(String, String)>,
-    /// The shape's consent template (`{{ vars.x | filter }}` syntax).
-    pub consent: Option<String>,
     /// The matched shape's name (its `[requests.<name>]` key).
     pub shape: String,
-    /// Every var the matched shape declares, resolved on this request or not.
-    pub declared: Vec<String>,
-    /// The matched shape's `scope`: the var names whose values bind an
-    /// approval of a request on this path.
-    pub binds: Vec<String>,
-    /// Set when a source a var needs can't be read the standard way: the
-    /// request is refused with this status before policy.
-    pub unreadable: Option<Unreadable>,
+    /// The shape's consent template.
+    pub consent: Option<String>,
+    /// The whole request is covered ([`RequestShape::covers_whole`]).
+    pub whole: bool,
+    /// The paths its `scope` lists.
+    pub listed: Vec<ReadPath>,
+    /// The paths its `consent` reads.
+    pub consent_reads: Vec<ReadPath>,
+    /// Its `encoded` declarations.
+    pub encoded: std::collections::BTreeMap<String, Encoded>,
 }
 
-impl RequestScope {
-    /// The digest of the bound values — the grant-identity extension.
-    pub fn digest(&self) -> String {
-        scope_digest(&self.bound)
-    }
-}
-
-/// A bound value larger than this is bound by digest, not verbatim, so the op
-/// that carries it (through the approval relay) stays small. 8 KiB keeps a
-/// normal email/JSON field verbatim (the console renders it legibly) while a
-/// message with a big attachment degrades to a summary instead of 413-ing.
+/// How much of a GraphQL request's calls `request.graphql.calls` shows
+/// (graphql.rs `calls_var`).
 pub(crate) const BOUND_VALUE_CAP: usize = 8 * 1024;
-
-/// Cap a bound value: verbatim if small, else `sha256:<hex>#<len>` — applied
-/// identically at op-create AND at redeem, so the grant identity is stable; the
-/// console shows the marker when it can't render the (absent) full value.
-fn cap_bound_value(v: &str) -> String {
-    if v.len() <= BOUND_VALUE_CAP {
-        v.to_string()
-    } else {
-        use sha2::{Digest, Sha256};
-        format!("sha256:{:x}#{}", Sha256::digest(v.as_bytes()), v.len())
-    }
-}
-
-/// A stable digest over the sorted `(var, value)` pairs a shape binds. `""` when
-/// nothing is bound, so a request with no shape / empty scope collapses to the
-/// Phase-1 `(conn, method, host, path)` key (no field binding). The approve
-/// write and the redeem read compute this identically over the same pairs, so a
-/// tampered field value yields a different key → a miss → a fresh prompt.
-pub fn scope_digest(bound: &[(String, String)]) -> String {
-    if bound.is_empty() {
-        return String::new();
-    }
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    // Length-prefix each field so `(ab, c)` and `(a, bc)` can't collide.
-    for (k, v) in bound {
-        h.update((k.len() as u64).to_le_bytes());
-        h.update(k.as_bytes());
-        h.update((v.len() as u64).to_le_bytes());
-        h.update(v.as_bytes());
-    }
-    format!("{:x}", h.finalize())
-}
 
 // ── Vault-custom definitions ──────────────────────────────────────────────────
 
@@ -1464,6 +1227,7 @@ pub fn user_services_dir() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
     use crate::core::policy::AccessLevel;
+    use crate::core::request::RequestInput;
 
     fn reg(services: HashMap<String, ServiceDef>) -> ServiceRegistry {
         ServiceRegistry { services }
@@ -1498,26 +1262,14 @@ level = "ask"
         assert_eq!(sl.read, Some(AccessLevel::Deny));
         assert_eq!(sl.write, Some(AccessLevel::AskAlways));
         assert_eq!(p.rules.len(), 1);
-        assert_eq!(
-            p.rules[0].match_patterns,
-            vec!["delete /v1/things".to_string()]
-        );
+        assert_eq!(p.rules[0].select.display(), ["DELETE /v1/things"]);
         assert_eq!(p.rules[0].level, Some(AccessLevel::Ask));
         // A lowercase method word is a method at this rule source too.
         let mut services = HashMap::new();
         services.insert("acme".to_string(), d);
         let r = reg(services);
         let rules = r.default_policy_rules("acme").unwrap().to_vec();
-        let access = crate::core::policy::evaluate(
-            "DELETE",
-            "/v1/things",
-            None,
-            &crate::core::policy::VarMap::new(),
-            Some(&rules),
-            r.default_policy_levels("acme").as_ref(),
-            &crate::core::policy::Policy::default(),
-            &[],
-        );
+        let access = crate::core::policy::evaluate(&crate::core::request::Request::bare("DELETE", "/v1/things"), Some(&rules), r.default_policy_levels("acme").as_ref(), &crate::core::policy::Policy::default(), &[]).unwrap();
         assert_eq!(access, AccessLevel::Ask);
     }
 
@@ -1617,7 +1369,7 @@ level = "allow"
         assert!(rules.iter().any(|r| r.id.as_deref() == Some("delete-repo")));
         // An override whose own policy.toml is given uses it instead.
         let own =
-            "[[rule]]\nid = \"only\"\nlabel = \"Only\"\nmatch = \"DELETE /x\"\nlevel = \"deny\"\n";
+            "[[rule]]\nid = \"only\"\nlabel = \"Only\"\nmethod = \"DELETE\"\npath = \"/x\"\nlevel = \"deny\"\n";
         assert!(ServiceRegistry::admit_dir(
             ("github".into(), Ok(svc.clone()), Some(Ok(own.to_string()))),
             &mut services,
@@ -1628,7 +1380,7 @@ level = "allow"
         let mut services = compiled.services.clone();
         let mut texts: HashMap<String, String> = [(
             "github".to_string(),
-            "[[rule]]\nid = \"w\"\nlabel = \"W\"\nmatch = \"POST /x\"\nwhen = \"vars.amount > 1\"\nlevel = \"deny\"\n".to_string(),
+            "[[rule]]\nid = \"w\"\nlabel = \"W\"\nmethod = \"POST\"\npath = \"/x\"\nwhen = \"vars.amount > 1\"\nlevel = \"deny\"\n".to_string(),
         )]
         .into_iter()
         .collect();
@@ -1650,16 +1402,7 @@ level = "allow"
         let r = ServiceRegistry::compiled_only();
         let rules = r.default_policy_rules("circleci").unwrap().to_vec();
         let eval = |m: &str, p: &str| {
-            evaluate(
-                m,
-                p,
-                None,
-                &crate::core::policy::VarMap::new(),
-                Some(&rules),
-                r.default_policy_levels("circleci").as_ref(),
-                &Policy::default(),
-                &["dev".into()],
-            )
+            evaluate(&crate::core::request::Request::bare(m, p), Some(&rules), r.default_policy_levels("circleci").as_ref(), &Policy::default(), &["dev".into()]).unwrap()
         };
         for slug in [
             "gh%2Forg%2Frepo",
@@ -2200,45 +1943,6 @@ secrets = ["GITHUB_TOKEN"]
     }
 
     #[test]
-    fn compiled_gmail_policy_resolves_risk_tiers() {
-        use crate::core::policy::{evaluate, AccessLevel, Policy};
-        let r = ServiceRegistry::load();
-        let rules = r
-            .default_policy_rules("gmail")
-            .expect("gmail policy.toml must parse and yield rules")
-            .to_vec();
-        let policy = Policy::default();
-        let eval = |m: &str, p: &str| {
-            evaluate(
-                m,
-                p,
-                None,
-                &crate::core::policy::VarMap::new(),
-                Some(&rules),
-                None,
-                &policy,
-                &["app".into()],
-            )
-        };
-        assert_eq!(
-            eval("GET", "/gmail/v1/users/me/messages"),
-            AccessLevel::Allow
-        );
-        assert_eq!(
-            eval("GET", "/gmail/v1/users/me/messages/abc123"),
-            AccessLevel::Ask
-        );
-        assert_eq!(
-            eval("POST", "/gmail/v1/users/me/messages/send"),
-            AccessLevel::AskAlways
-        );
-        assert_eq!(
-            eval("DELETE", "/gmail/v1/users/me/messages/abc123"),
-            AccessLevel::AskAlways
-        );
-    }
-
-    #[test]
     fn compiled_cratesio_policy_gates_publish_surface() {
         use crate::core::policy::{evaluate, AccessLevel, Policy};
         let r = ServiceRegistry::load();
@@ -2248,16 +1952,7 @@ secrets = ["GITHUB_TOKEN"]
             .to_vec();
         let policy = Policy::default();
         let eval = |m: &str, p: &str| {
-            evaluate(
-                m,
-                p,
-                None,
-                &crate::core::policy::VarMap::new(),
-                Some(&rules),
-                None,
-                &policy,
-                &["app".into()],
-            )
+            evaluate(&crate::core::request::Request::bare(m, p), Some(&rules), None, &policy, &["app".into()]).unwrap()
         };
         // Routine traffic rides the allow floor.
         assert_eq!(eval("GET", "/api/v1/me"), AccessLevel::Allow);
@@ -2317,21 +2012,13 @@ secrets = ["GITHUB_TOKEN"]
         let def = r.get("railway").expect("railway service");
         let eval = |body: &str| {
             // The whole API is one POST endpoint; the mutation name lives in the
-            // body and reaches policy as `vars.fields` through [requests.graphql].
-            let rs = def
-                .extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
-                .expect("the graphql shape covers every POST");
-            assert!(rs.unreadable.is_none(), "unreadable: {body}");
-            evaluate(
-                "POST",
-                "/graphql/v2",
-                Some(body),
-                &rs.vars,
-                Some(&rules),
-                None,
-                &policy,
-                &["app".into()],
-            )
+            // body and reaches policy as `request.graphql.fields` through
+            // [requests.graphql].
+            let read = def
+                .read_request(input("POST", "/graphql/v2", body))
+                .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"));
+            assert!(read.scope.is_some(), "the graphql shape covers every POST");
+            evaluate(&read.request, Some(&rules), None, &policy, &["app".into()]).unwrap()
         };
         // Routine GraphQL (queries + non-destroy mutations) rides the allow floor.
         assert_eq!(
@@ -2408,21 +2095,107 @@ secrets = ["GITHUB_TOKEN"]
         );
     }
 
-    /// Evaluate a compiled service's default policy on one request, with the
-    /// vars its `[requests]` shape reads.
+    /// A request with a body, no query and no headers.
+    fn input<'a>(method: &'a str, path: &'a str, body: &'a str) -> RequestInput<'a> {
+        RequestInput {
+            method,
+            path,
+            host: "api.example.com",
+            body: Some(body.as_bytes()),
+            ..Default::default()
+        }
+    }
+
+    /// Evaluate a compiled service's default policy on one request (no
+    /// headers), read by the service's `[requests]` shapes.
     fn eval_compiled(service: &str, method: &str, path: &str, body: &str) -> crate::core::policy::AccessLevel {
+        eval_with(service, input(method, path, body))
+    }
+
+    /// [`eval_compiled`] on any request input.
+    fn eval_with(service: &str, input: RequestInput<'_>) -> crate::core::policy::AccessLevel {
         use crate::core::policy::{evaluate, Policy};
         let r = ServiceRegistry::load();
         let rules = r.default_policy_rules(service).expect("policy").to_vec();
         let def = r.get(service).expect("service");
-        let vars = def
-            .extract_request_scope(method, path, None, Some(body.as_bytes()))
-            .map(|rs| {
-                assert!(rs.unreadable.is_none(), "unreadable: {body}");
-                rs.vars
+        let body = String::from_utf8_lossy(input.body.unwrap_or_default()).into_owned();
+        let read = def
+            .read_request(input)
+            .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"));
+        evaluate(&read.request, Some(&rules), None, &Policy::default(), &["dev".into()])
+            .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"))
+    }
+
+    /// A `multipart/mixed` body (boundary `b`) of `application/http` parts,
+    /// one per request line.
+    fn batch_of(requests: &[&str]) -> String {
+        let mut body = String::new();
+        for (i, line) in requests.iter().enumerate() {
+            body.push_str(&format!(
+                "--b\r\nContent-Type: application/http\r\nContent-ID: <{i}>\r\n\r\n{line} HTTP/1.1\r\n\r\n\r\n"
+            ));
+        }
+        body.push_str("--b--\r\n");
+        body
+    }
+
+    /// A compiled service's default policy and floor on a batch `body`
+    /// posted to `path`, decided on all its readings.
+    fn eval_batch(service: &str, path: &str, body: &str) -> crate::core::policy::AccessLevel {
+        use crate::core::policy::{evaluate_decision, Policy};
+        let r = ServiceRegistry::load();
+        let rules = r.default_policy_rules(service).expect("policy").to_vec();
+        let floor = r.default_policy_levels(service);
+        let headers = [("content-type".to_string(), b"multipart/mixed; boundary=b".to_vec())];
+        let input = RequestInput {
+            method: "POST",
+            path,
+            host: "www.googleapis.com",
+            headers: &headers,
+            body: Some(body.as_bytes()),
+            ..Default::default()
+        };
+        let readings = readings::Readings::of(input).unwrap();
+        let decided = readings
+            .decide(r.get(service), |request| {
+                evaluate_decision(request, Some(&rules), floor.as_ref(), &Policy::default(), &[])
             })
-            .unwrap_or_default();
-        evaluate(method, path, Some(body), &vars, Some(&rules), None, &Policy::default(), &["dev".into()])
+            .unwrap();
+        decided.decision.0
+    }
+
+    /// The shape a service's shapes match a request with.
+    fn scope_of(def: &ServiceDef, method: &str, path: &str, body: &str) -> RequestScope {
+        def.read_request(input(method, path, body))
+            .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"))
+            .scope
+            .expect("a shape matches")
+    }
+
+    /// What a single-use approval of a request covers (the shape's scope and
+    /// consent; no rule's condition reads), as the card shows it and as its
+    /// permit identity under a test key.
+    fn covered(
+        def: &ServiceDef,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (Vec<(String, String)>, String) {
+        let read = def
+            .read_request(input(method, path, body))
+            .unwrap_or_else(|e| panic!("unreadable: {body}: {e:?}"));
+        let c = crate::approval::coverage::cover_read(&read, path, &[], true, true).unwrap();
+        let id = crate::approval::coverage::IdentityKey::derive(&[3u8; 32], 0).identity(&c);
+        (c.shown, id.digest)
+    }
+
+    fn shown<'s>(shown: &'s [(String, String)], label: &str) -> Option<&'s str> {
+        shown.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str())
+    }
+
+    /// Why a service's shapes and rules refuse a request (its status).
+    fn refusal(def: &ServiceDef, method: &str, path: &str, body: &str) -> Option<u16> {
+        def.read_request(input(method, path, body)).err().map(|e| e.status)
     }
 
     #[test]
@@ -2453,9 +2226,6 @@ secrets = ["GITHUB_TOKEN"]
             ("gcp", "DELETE", "/storage/v1/b/bkt"),
             ("gcp", "DELETE", "/bkt"),
             ("gcp", "DELETE", "/bkt/"),
-            ("gcp", "POST", "/batch/storage/v1"),
-            ("gcp", "POST", "/batch/compute/v1"),
-            ("gcalendar", "POST", "/batch/calendar/v3"),
             ("github", "POST", "/repos/o/r/rulesets"),
             ("github", "PUT", "/repos/o/r/rulesets/7"),
             ("github", "DELETE", "/repos/o/r/rulesets/7"),
@@ -2518,6 +2288,34 @@ secrets = ["GITHUB_TOKEN"]
             let body = format!(r#"{{"query":"mutation {{ {field}(id: \"x\") }}"}}"#);
             assert_eq!(eval_compiled("railway", "POST", "/graphql/v2", &body), AccessLevel::AskAlways, "{field}");
         }
+        // A Google batch is decided by its requests (DESIGN §7): one gated
+        // request asks, through any batch endpoint; a batch that can't be read
+        // one request at a time asks too.
+        for (service, endpoint, gated) in [
+            ("gcp", "/batch/storage/v1", "DELETE /storage/v1/b/bkt"),
+            ("gcp", "/batch/compute/v1", "DELETE /compute/v1/projects/p/zones/z/instances/vm"),
+            ("gcp", "/batch", "POST /v1/projects/p/serviceAccounts/a/keys"),
+            ("gcalendar", "/batch/calendar/v3", "POST /calendar/v3/calendars/primary/acl"),
+            ("gdrive", "/batch/drive/v3", "DELETE /drive/v3/files/f1"),
+        ] {
+            let body = batch_of(&["GET /storage/v1/b/bkt/o", gated]);
+            assert_eq!(eval_batch(service, endpoint, &body), AccessLevel::AskAlways, "{service} {gated}");
+        }
+        let reads = batch_of(&["GET /storage/v1/b/bkt/o"]);
+        for unreadable in [
+            reads.replace("--b--\r\n", ""),
+            reads.replace("GET /storage/v1/b/bkt/o HTTP/1.1", "GET /storage/v1/b/bkt/o"),
+            reads.replace("GET /storage", "GET https://storage.googleapis.com/storage"),
+            // A request beside a part that is none.
+            reads.replace("--b--", "--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--"),
+        ] {
+            assert_eq!(eval_batch("gcp", "/batch/storage/v1", &unreadable), AccessLevel::AskAlways, "{unreadable}");
+        }
+        let reads = batch_of(&["GET /storage/v1/b/bkt/o", "GET /storage/v1/b/bkt/o/obj?alt=json"]);
+        assert_eq!(eval_batch("gcp", "/batch/storage/v1", &reads), AccessLevel::Allow);
+        // The batch request is decided too, by the floor and the `batch` rule.
+        let reads = batch_of(&["GET /calendar/v3/calendars/primary/events"]);
+        assert_eq!(eval_batch("gcalendar", "/batch/calendar/v3", &reads), AccessLevel::Allow);
         // An assistant on a routine model, and a run without an override, ride the floor.
         assert_eq!(eval_compiled("openai", "POST", "/v1/assistants", r#"{"model": "gpt-4o-mini"}"#), AccessLevel::Allow);
         assert_eq!(eval_compiled("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a"}"#), AccessLevel::Allow);
@@ -2538,37 +2336,21 @@ secrets = ["GITHUB_TOKEN"]
     fn a_body_member_read_through_a_non_object_is_refused() {
         let r = ServiceRegistry::load();
         let gmail = r.get("gmail").expect("gmail service");
-        let send = |body: &str| {
-            gmail
-                .extract_request_scope(
-                    "POST",
-                    "/gmail/v1/users/me/messages/send",
-                    None,
-                    Some(body.as_bytes()),
-                )
-                .expect("the send shape matches")
-        };
-        let refused = |rs: RequestScope| rs.unreadable.map(|u| u.status);
+        let send = "/gmail/v1/users/me/messages/send";
         for body in ["[]", r#"[null,"cmF3"]"#, r#""raw""#, "5", "true"] {
-            assert_eq!(refused(send(body)), Some(422), "{body}");
+            assert_eq!(refusal(gmail, "POST", send, body), Some(422), "{body}");
         }
-        let ok = send(r#"{"raw":"cmF3"}"#);
-        assert!(ok.unreadable.is_none());
-        assert_eq!(ok.bound, vec![("raw".to_string(), "cmF3".to_string())]);
+        let (ok, _) = covered(gmail, "POST", send, r#"{"raw":"cmF3"}"#);
+        assert_eq!(shown(&ok, "request.body.raw"), Some("cmF3"));
         for absent in ["{}", r#"{"raw":null}"#] {
-            let rs = send(absent);
-            assert!(rs.unreadable.is_none() && rs.bound.is_empty(), "{absent}");
+            assert_eq!(refusal(gmail, "POST", send, absent), None, "{absent}");
         }
 
         let snaplii = r.get("snaplii").expect("snaplii service");
-        let buy = |body: &str| {
-            snaplii
-                .extract_request_scope("POST", "/v2/purchase", None, Some(body.as_bytes()))
-                .expect("the purchase shape matches")
-        };
-        assert_eq!(refused(buy(r#"{"orderInfo":"CB_1"}"#)), Some(422));
-        assert_eq!(refused(buy(r#"{"orderInfo":{"item":[1]}}"#)), Some(422));
-        assert_eq!(refused(buy(r#"{"orderInfo":null}"#)), None);
+        let buy = |body: &str| refusal(snaplii, "POST", "/v2/purchase", body);
+        assert_eq!(buy(r#"{"orderInfo":"CB_1"}"#), Some(422));
+        assert_eq!(buy(r#"{"orderInfo":{"item":[1]}}"#), Some(422));
+        assert_eq!(buy(r#"{"orderInfo":null}"#), None);
     }
 
     /// Snaplii's purchase and transfer gates read the fields its OpenAPI spec
@@ -2594,33 +2376,26 @@ secrets = ["GITHUB_TOKEN"]
 
         let r = ServiceRegistry::load();
         let def = r.get("snaplii").expect("snaplii service");
-        let bound = |path: &str, body: &str| {
-            def.extract_request_scope("POST", path, None, Some(body.as_bytes())).unwrap().bound
-        };
-        assert_eq!(
-            bound("/v2/purchase", &purchase(r#""40.00""#)),
-            vec![
-                ("item".to_string(), "CB_1".to_string()),
-                (
-                    "order".to_string(),
-                    r#"{"item":{"itemId":"CB_1","price":"40.00"},"orderType":"GIFT_CARD"}"#.to_string()
-                ),
-                ("price".to_string(), "40.00".to_string()),
-                ("type".to_string(), "GIFT_CARD".to_string()),
-            ]
-        );
+        // A purchase approval covers the whole order (DESIGN §7) and shows
+        // what the consent reads.
+        let body = purchase(r#""40.00""#);
+        let (card, _) = covered(def, "POST", "/v2/purchase", &body);
+        assert_eq!(shown(&card, "request.body"), Some(body.as_str()));
+        assert_eq!(shown(&card, "request.body.orderInfo.item.itemId"), Some("CB_1"));
+        assert_eq!(shown(&card, "request.body.orderInfo.item.price"), Some("40.00"));
+        assert_eq!(shown(&card, "request.body.orderInfo.orderType"), Some("GIFT_CARD"));
         // A gift to someone else, or another payment method, is another approval.
         let mine = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
         let gift = format!(r#"{{"orderInfo": {{"item": {{"itemId": "CB_1", "price": "40.00"}}, "orderContext": {{"giftOrder": "true"}}}}, "delivery": {{"type": "WALLET"}}}}"#);
-        let scope = |body: &str| def.extract_request_scope("POST", "/v2/purchase", None, Some(body.as_bytes())).unwrap();
-        assert_ne!(scope(&mine).digest(), scope(&gift).digest());
-        assert_eq!(
-            bound("/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#),
-            vec![
-                ("amount".to_string(), "12.50".to_string()),
-                ("to_phone".to_string(), "4165550006".to_string()),
-            ]
-        );
+        let identity = |body: &str| covered(def, "POST", "/v2/purchase", body).1;
+        assert_ne!(identity(&mine), identity(&gift));
+        assert_eq!(identity(&mine), identity(&mine.clone()));
+        // A transfer covers its recipient, amount and note.
+        let (card, _) = covered(def, "POST", "/v2/transfers", r#"{"to_phone": "4165550006", "amount": "12.50"}"#);
+        assert_eq!(shown(&card, "request.body.amount"), Some("12.50"));
+        assert_eq!(shown(&card, "request.body.to_phone"), Some("4165550006"));
+        assert_eq!(shown(&card, "request.body.remark"), None);
+        assert_eq!(shown(&card, "request.body"), None, "a narrowed scope shows what it covers");
     }
 
     /// Every Cloudflare change that can remove or re-point traffic is gated,
@@ -2648,19 +2423,112 @@ secrets = ["GITHUB_TOKEN"]
 
         let r = ServiceRegistry::load();
         let def = r.get("cloudflare").expect("cloudflare service");
-        let scope = |path: &str, body: &str| {
-            def.extract_request_scope("PATCH", path, None, Some(body.as_bytes())).unwrap()
-        };
         let path = format!("{z}/dns_records/r1");
-        let rs = scope(&path, r#"{"proxied": true, "comment": "x"}"#);
-        assert_eq!(rs.bound, vec![("proxied".to_string(), "true".to_string())]);
-        // The same approval can't carry a new target.
-        let other = scope(&path, r#"{"proxied": true, "content": "198.51.100.7"}"#);
-        assert_ne!(rs.digest(), other.digest());
-        let batch = def
-            .extract_request_scope("POST", &format!("{z}/dns_records/batch"), None, Some(br#"{"deletes": [{"id": "r1"}]}"#))
-            .unwrap();
-        assert_eq!(batch.bound, vec![("deletes".to_string(), r#"[{"id":"r1"}]"#.to_string())]);
+        let (card, id) = covered(def, "PATCH", &path, r#"{"proxied": true, "comment": "x"}"#);
+        assert_eq!(shown(&card, "request.body.proxied"), Some("true"));
+        assert_eq!(shown(&card, "request.body.comment"), None);
+        // The same approval can't carry a new target; a comment is not covered.
+        let (_, other) = covered(def, "PATCH", &path, r#"{"proxied": true, "content": "198.51.100.7"}"#);
+        assert_ne!(id, other);
+        let (_, commented) = covered(def, "PATCH", &path, r#"{"proxied": true, "comment": "y"}"#);
+        assert_eq!(id, commented);
+        let (batch, _) = covered(def, "POST", &format!("{z}/dns_records/batch"), r#"{"deletes": [{"id": "r1"}]}"#);
+        assert_eq!(shown(&batch, "request.body.deletes"), Some(r#"[{"id":"r1"}]"#));
+    }
+
+    /// Gmail, Drive, Calendar and Creem let normal work through and ask only
+    /// before real harm, in every spelling their API references list. A
+    /// switch at "allow" (Gmail send, Drive share, Creem refund) gates its
+    /// operation once a user turns it on; Creem test mode never asks.
+    #[test]
+    fn compiled_google_and_creem_policies_ask_only_before_real_harm() {
+        use crate::core::policy::{evaluate, AccessLevel::{Allow, AskAlways}, Policy};
+        let raw = r#"{"raw": "cmF3"}"#;
+        for (service, method, path, body) in [
+            ("gmail", "GET", "/gmail/v1/users/me/messages/m1", ""),
+            ("gmail", "POST", "/gmail/v1/users/me/messages/m1/modify", r#"{"addLabelIds": ["TRASH"]}"#),
+            ("gmail", "POST", "/gmail/v1/users/me/messages/send", raw),
+            ("gmail", "POST", "/gmail/v1/users/me/drafts", r#"{"message": {"raw": "cmF3"}}"#),
+            ("gdrive", "POST", "/drive/v3/files/f1/permissions", r#"{"type": "user", "role": "writer", "emailAddress": "a@b.com"}"#),
+            ("gdrive", "DELETE", "/drive/v3/files/f1/permissions/p1", ""),
+            ("gdrive", "PATCH", "/drive/v3/files/f1", r#"{"name": "x"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/revisions/r1", r#"{"published": false}"#),
+            ("gcalendar", "DELETE", "/calendar/v3/calendars/primary/events/e1", ""),
+            ("gcalendar", "POST", "/calendar/v3/calendars/primary/events", r#"{"attendees": [{"email": "x@y.com"}]}"#),
+            ("creem", "POST", "/v1/refunds", r#"{"transaction_id": "t1"}"#),
+            ("creem", "POST", "/v1/subscriptions/s1/cancel", ""),
+            ("creem", "PATCH", "/v1/customers", r#"{"id": "c1", "email": "x@y.com"}"#),
+            ("creem", "PATCH", "/v1/webhooks/w1", r#"{"name": "n"}"#),
+            ("creem", "POST", "/v1/webhooks", r#"{"url": "https://x.dev", "delivery_mode": "cli"}"#),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, body), Allow, "{service} {method} {path}");
+        }
+        for (service, method, path, body) in [
+            ("gmail", "DELETE", "/gmail/v1/users/a@b.com/messages/m1", ""),
+            ("gmail", "DELETE", "/gmail/v1/users/me/threads/t1", ""),
+            ("gdrive", "DELETE", "/drive/v3/files/f1", ""),
+            ("gdrive", "DELETE", "/drive/v3/files/f1/", ""),
+            ("gdrive", "DELETE", "/drive/v2/files/trash", ""),
+            ("gdrive", "POST", "/drive/v3/files/f1/permissions", r#"{"type": "anyone", "role": "reader"}"#),
+            ("gdrive", "POST", "/drive/v2/files/f1/permissions", r#"{"type": "domain", "role": "reader", "value": "x.com"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/permissions/p1", r#"{"role": "owner"}"#),
+            ("gdrive", "PUT", "/drive/v2/files/f1/permissions/p1/", r#"{"role": "owner"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/permissions/p1", r#"{"pendingOwner": true}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/revisions/r1", r#"{"published": true}"#),
+            ("gdrive", "PUT", "/drive/v2/files/f1/revisions/r1", r#"{"publishedOutsideDomain": true}"#),
+            ("gcalendar", "POST", "/calendar/v3/calendars/primary/acl", r#"{"role": "reader", "scope": {"type": "default"}}"#),
+            ("gcalendar", "PATCH", "/calendar/v3/calendars/a%40b.com/acl/user:x@y.com", r#"{"role": "writer"}"#),
+            ("creem", "POST", "/v1/splits", r#"{"percentage": 10}"#),
+            ("creem", "POST", "/v1/webhooks", r#"{"url": "https://x.dev"}"#),
+            ("creem", "PATCH", "/v1/webhooks/w1/", r#"{"url": "https://y.dev"}"#),
+            ("creem", "GET", "/v1/webhooks/w1/secret", ""),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, body), AskAlways, "{service} {method} {path}");
+        }
+        let creem_test = |method: &'static str, path: &'static str, body: &'static str| {
+            let input = RequestInput { method, path, host: "test-api.creem.io", body: Some(body.as_bytes()), ..Default::default() };
+            eval_with("creem", input)
+        };
+        assert_eq!(creem_test("POST", "/v1/splits", r#"{"percentage": 10}"#), Allow);
+        assert_eq!(creem_test("GET", "/v1/webhooks/w1/secret", ""), Allow);
+
+        // A sharing call inside a Drive batch is decided by its own body.
+        let share = "--b\r\nContent-Type: application/http\r\n\r\nPOST /drive/v3/files/f1/permissions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"type\": \"anyone\", \"role\": \"reader\"}\r\n--b--\r\n";
+        assert_eq!(eval_batch("gdrive", "/batch/drive/v3", share), AskAlways);
+        assert_eq!(eval_batch("gdrive", "/batch", share), AskAlways);
+
+        // Switches.
+        let r = ServiceRegistry::load();
+        let switched = |service: &str, id: &str, host: &'static str, method: &'static str, path: &'static str, body: &'static str| {
+            let mut rules = r.default_policy_rules(service).expect("policy").to_vec();
+            let rule = rules.iter_mut().find(|x| x.id.as_deref() == Some(id)).expect("switch rule");
+            rule.level = Some(AskAlways);
+            let input = RequestInput { method, path, host, body: Some(body.as_bytes()), ..Default::default() };
+            let read = r.get(service).expect("service").read_request(input).unwrap();
+            evaluate(&read.request, Some(&rules), None, &Policy::default(), &["app".into()]).unwrap()
+        };
+        let mail = "gmail.googleapis.com";
+        for (id, path, body) in [
+            ("send-email", "/gmail/v1/users/me/messages/send", raw),
+            ("send-email", "/gmail/v1/users/a@b.com/messages/send/", raw),
+            ("send-email", "/upload/gmail/v1/users/me/messages/send", "To: a@b.com\r\n\r\nhi"),
+            ("send-email", "/resumable/upload/gmail/v1/users/me/messages/send", ""),
+            ("send-draft", "/gmail/v1/users/me/drafts/send", r#"{"id": "d1"}"#),
+            ("send-draft", "/upload/gmail/v1/users/me/drafts/send", "To: a@b.com\r\n\r\nhi"),
+        ] {
+            assert_eq!(switched("gmail", id, mail, "POST", path, body), AskAlways, "{path}");
+        }
+        let drive = "www.googleapis.com";
+        for (method, path) in [
+            ("POST", "/drive/v3/files/f1/permissions"),
+            ("PATCH", "/drive/v3/files/f1/permissions/p1"),
+            ("PUT", "/drive/v2/files/f1/permissions/p1"),
+            ("POST", "/drive/v3/files/f1/accessproposals/a1:resolve"),
+        ] {
+            assert_eq!(switched("gdrive", "share-file", drive, method, path, r#"{"role": "reader"}"#), AskAlways, "{method} {path}");
+        }
+        assert_eq!(switched("creem", "refund", "api.creem.io", "POST", "/v1/refunds", "{}"), AskAlways);
+        assert_eq!(switched("creem", "refund", "test-api.creem.io", "POST", "/v1/refunds", "{}"), Allow);
     }
 
     /// Every Railway mutation that deletes, mints a credential or changes who
@@ -2764,25 +2632,20 @@ secrets = ["GITHUB_TOKEN"]
     fn railway_graphql_shape_binds_and_refuses_what_it_cannot_read() {
         let r = ServiceRegistry::load();
         let def = r.get("railway").expect("railway service");
-        let scope = |body: &str| {
-            def.extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
-                .unwrap()
-        };
-        let rs = scope(r#"{"query":"mutation { serviceDelete(id: \"3ec1\") }"}"#);
-        assert!(rs.unreadable.is_none());
+        let body = r#"{"query":"mutation { serviceDelete(id: \"3ec1\") }"}"#;
+        let (card, id) = covered(def, "POST", "/graphql/v2", body);
         let call = r#"[{"args":{"id":"3ec1"},"field":"serviceDelete"}]"#.to_string();
+        assert_eq!(shown(&card, "request.graphql.calls"), Some(call.as_str()));
+        assert_eq!(shown(&card, "request.graphql.fields"), Some(r#"["serviceDelete"]"#));
+        let request = format!(r#"{{"calls":{call}}}"#);
+        assert_eq!(shown(&card, "request.graphql.request"), Some(request.as_str()));
         assert_eq!(
-            rs.bound,
-            vec![
-                ("calls".to_string(), call.clone()),
-                ("fields".to_string(), r#"["serviceDelete"]"#.to_string()),
-                ("request".to_string(), format!(r#"{{"calls":{call}}}"#)),
-            ]
+            scope_of(def, "POST", "/graphql/v2", body).consent.as_deref(),
+            Some("{{ request.graphql.calls | graphql }}")
         );
-        assert_eq!(rs.consent.as_deref(), Some("{{ vars.calls | graphql }}"));
         // A different target is a different approval.
-        let other = scope(r#"{"query":"mutation { serviceDelete(id: \"9999\") }"}"#);
-        assert_ne!(rs.digest(), other.digest());
+        let (_, other) = covered(def, "POST", "/graphql/v2", r#"{"query":"mutation { serviceDelete(id: \"9999\") }"}"#);
+        assert_ne!(id, other);
         // A request a server would refuse is refused with the server's status.
         for (body, status) in [
             (r#"[{"query":"mutation { serviceDelete(id: \"s\") }"}]"#, 400),
@@ -2791,10 +2654,10 @@ secrets = ["GITHUB_TOKEN"]
             (r#"{"query":"query { me { id } }","query":"mutation { serviceDelete(id: \"s\") }"}"#, 400),
             (r#"{"query":"mutation { ...Missing }"}"#, 422),
         ] {
-            assert_eq!(scope(body).unreadable.map(|u| u.status), Some(status), "{body}");
+            assert_eq!(refusal(def, "POST", "/graphql/v2", body), Some(status), "{body}");
         }
-        // An empty body has nothing to read: no vars, not a refusal.
-        assert!(scope("").unreadable.is_none());
+        // An empty body makes no call: not a refusal.
+        assert_eq!(refusal(def, "POST", "/graphql/v2", ""), None);
     }
 
     #[test]
@@ -2807,16 +2670,7 @@ secrets = ["GITHUB_TOKEN"]
             .to_vec();
         let policy = Policy::default();
         let eval = |m: &str, p: &str| {
-            evaluate(
-                m,
-                p,
-                None,
-                &crate::core::policy::VarMap::new(),
-                Some(&rules),
-                None,
-                &policy,
-                &["app".into()],
-            )
+            evaluate(&crate::core::request::Request::bare(m, p), Some(&rules), None, &policy, &["app".into()]).unwrap()
         };
         // Routine developer work — incl. arbitrary SQL — rides the allow floor.
         assert_eq!(eval("GET", "/v1/projects"), AccessLevel::Allow);
@@ -2900,174 +2754,373 @@ secrets = ["SNAPLII_API_KEY"]
 [auth]
 type = "snaplii"
 [requests.purchase]
-match = "POST /v2/purchase"
-vars.amount   = "/amount"
-vars.merchant = "/merchant_id"
-vars.force    = { in = "query", at = "force" }
-scope   = ["amount", "merchant"]
-consent = "Buy from {{ vars.merchant }} for {{ vars.amount }}"
+method = "POST"
+path = "/v2/purchase"
+scope   = ["request.body.amount", "request.query.force"]
+consent = "Buy from {{ request.body.merchant_id }} for {{ request.body.amount }}"
 "#,
         )
         .unwrap()
     }
 
     #[test]
-    fn extract_resolves_body_and_query_vars() {
+    fn a_shape_binds_its_scope_and_what_its_consent_reads() {
         let def = snaplii_def();
         let body = r#"{"amount": 80, "merchant_id": "m_1", "nonce": "xyz"}"#;
-        let rs = def
-            .extract_request_scope("POST", "/v2/purchase", Some("force=true"), Some(body.as_bytes()))
-            .expect("purchase shape matches");
-        // Bare + qualified names both present, values stringified.
-        assert_eq!(rs.vars.get("amount"), Some(&serde_json::json!(80)));
+        let read = def
+            .read_request(RequestInput {
+                query: Some("force=true"),
+                ..input("POST", "/v2/purchase", body)
+            })
+            .unwrap();
+        let c = crate::approval::coverage::cover_read(&read, "/v2/purchase", &[], true, true).unwrap();
+        // Shown = covered: the scope and the consent's paths; the body
+        // `nonce` is not covered.
+        let mut card = c.shown.clone();
+        card.sort();
         assert_eq!(
-            rs.vars.get("purchase.amount"),
-            Some(&serde_json::json!(80))
-        );
-        assert_eq!(rs.vars.get("merchant"), Some(&serde_json::json!("m_1")));
-        assert_eq!(rs.vars.get("force"), Some(&serde_json::json!("true")));
-        // Bound = the scope subset, sorted; the query `force` and body `nonce`
-        // are NOT bound (not in scope).
-        assert_eq!(
-            rs.bound,
+            card,
             vec![
-                ("amount".to_string(), "80".to_string()),
-                ("merchant".to_string(), "m_1".to_string())
+                ("request.body.amount".to_string(), "80".to_string()),
+                ("request.body.merchant_id".to_string(), "m_1".to_string()),
+                ("request.query.force".to_string(), "true".to_string()),
             ]
         );
+        let rs = read.scope.expect("purchase shape matches");
         assert_eq!(
             rs.consent.as_deref(),
-            Some("Buy from {{ vars.merchant }} for {{ vars.amount }}")
+            Some("Buy from {{ request.body.merchant_id }} for {{ request.body.amount }}")
         );
-        // The matched shape, for the connection-rule check.
         assert_eq!(rs.shape, "purchase");
-        assert_eq!(rs.declared, vec!["amount", "force", "merchant"]);
-        assert_eq!(rs.binds, vec!["amount", "merchant"]);
+        // No shape matches a GET; an absent value is covered as absent.
+        assert!(def.read_request(input("GET", "/v2/balance", "")).unwrap().scope.is_none());
+        let (card, _) = covered(&def, "POST", "/v2/purchase", r#"{"amount": 5}"#);
+        assert_eq!(card, vec![("request.body.amount".to_string(), "5".to_string())]);
+        // A read value given twice refuses the request; one nothing reads
+        // doesn't.
+        let twice = def.read_request(RequestInput {
+            query: Some("force=1&force=2"),
+            ..input("POST", "/v2/purchase", "{}")
+        });
+        assert_eq!(twice.err().map(|e| e.status), Some(400));
+        assert!(def
+            .read_request(RequestInput {
+                query: Some("other=1&other=2"),
+                ..input("POST", "/v2/purchase", "{}")
+            })
+            .is_ok());
     }
 
     #[test]
-    fn extract_none_on_no_match_and_undefined_vars_omitted() {
-        let def = snaplii_def();
-        // No shape matches a GET → None (Phase-1 path-only grant).
-        assert!(def
-            .extract_request_scope("GET", "/v2/balance", None, None)
-            .is_none());
-        // Missing body field → that var is simply absent (not an error).
-        let rs = def
-            .extract_request_scope("POST", "/v2/purchase", None, Some(br#"{"amount": 5}"#))
-            .unwrap();
-        assert_eq!(rs.vars.get("amount"), Some(&serde_json::json!(5)));
-        assert!(rs.vars.get("merchant").is_none());
-        // Only the resolved scope var is bound.
-        assert_eq!(rs.bound, vec![("amount".to_string(), "5".to_string())]);
+    fn a_shape_condition_selects_and_an_error_does_not() {
+        let def = gate::admit_toml(
+            r#"
+[service]
+id = "pay"
+name = "Pay"
+hosts = ["api.pay.com"]
+[requests.big]
+method = "POST"
+path = "/pay"
+condition = "request.body.amount > 100"
+scope = ["request.body.amount"]
+[requests.small]
+method = "POST"
+path = "/pay"
+scope = ["request.body.memo"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(scope_of(&def, "POST", "/pay", r#"{"amount": 500}"#).shape, "big");
+        assert_eq!(scope_of(&def, "POST", "/pay", r#"{"amount": 5}"#).shape, "small");
+        // An erroring condition (an absent amount) doesn't select.
+        assert_eq!(scope_of(&def, "POST", "/pay", "{}").shape, "small");
+        // Shapes are tried in declaration order, and an erroring condition
+        // with no shape matched makes the approval single-use.
+        assert_eq!(def.request_order, ["big", "small"]);
+        let only_big = gate::admit_toml(
+            "[service]\nid = \"pay\"\nname = \"Pay\"\nhosts = [\"api.pay.com\"]\n[requests.z]\nmethod = \"POST\"\npath = \"/pay\"\ncondition = \"request.body.amount > 100\"\n[requests.a]\nmethod = \"POST\"\npath = \"/other\"\n",
+        )
+        .unwrap();
+        assert_eq!(only_big.request_order, ["z", "a"]);
+        let read = only_big.read_request(input("POST", "/pay", "{}")).unwrap();
+        assert!(read.scope.is_none() && read.errored);
+        let read = only_big.read_request(input("POST", "/pay", r#"{"amount": 5}"#)).unwrap();
+        assert!(read.scope.is_none() && !read.errored, "false is not an error");
     }
 
     #[test]
     fn consent_is_one_template_with_pipe_filters() {
-        // Plain interpolation: `{{ vars.x }}` → the referenced var names.
-        let def = snaplii_def();
-        let purchase = &def.requests["purchase"];
         assert_eq!(
-            purchase.consent.as_deref(),
-            Some("Buy from {{ vars.merchant }} for {{ vars.amount }}")
-        );
-        assert_eq!(
-            consent_tokens(purchase.consent.as_deref().unwrap()),
-            vec!["merchant", "amount"]
+            consent_refs("Buy from {{ request.body.merchant }} for {{request.body.amount}}").unwrap(),
+            vec![
+                ConsentRef {
+                    path: "request.body.merchant".into(),
+                    filter: None
+                },
+                ConsentRef {
+                    path: "request.body.amount".into(),
+                    filter: None
+                },
+            ]
         );
         // A rich renderer is a FILTER in the same one template field — same
         // `{{ x | filter }}` grammar as git's `{{ secret.X | basic }}`.
-        let refs = consent_refs("{{ vars.raw | email }}");
         assert_eq!(
-            refs,
+            consent_refs("{{ request.body.raw | email }}").unwrap(),
             vec![ConsentRef {
-                var: "raw".into(),
+                path: "request.body.raw".into(),
                 filter: Some("email".into())
             }]
         );
-        // A filter still counts its var for show ⊆ bind.
-        assert_eq!(consent_tokens("{{ vars.raw | email }}"), vec!["raw"]);
-        // A token without the `vars.` prefix is ignored (left literal).
-        assert!(consent_tokens("hello {{ merchant }}").is_empty());
-    }
-
-    #[test]
-    fn scope_digest_stable_and_tamper_sensitive() {
-        // The $80/$180 guarantee at the digest level: same bound values → same
-        // digest (order-independent); a changed value → a different digest; a
-        // field NOT in scope (a nonce) never affects it.
-        let d80 = scope_digest(&[
-            ("amount".into(), "80".into()),
-            ("merchant".into(), "m_1".into()),
-        ]);
-        let d80_reordered = scope_digest(&[
-            ("merchant".into(), "m_1".into()),
-            ("amount".into(), "80".into()),
-        ]);
-        let d180 = scope_digest(&[
-            ("amount".into(), "180".into()),
-            ("merchant".into(), "m_1".into()),
-        ]);
-        // digest() sorts, so reordering the input pairs is irrelevant once sorted;
-        // here we compare the raw fn on already-sorted inputs.
-        assert_eq!(d80, d80);
-        assert_ne!(d80, d180);
-        assert_ne!(d80, d80_reordered); // raw fn is order-sensitive…
-                                        // …which is why extract_request_scope always sorts before hashing:
-        let def = snaplii_def();
-        let a = def
-            .extract_request_scope(
-                "POST",
-                "/v2/purchase",
-                None,
-                Some(br#"{"amount":80,"merchant_id":"m_1"}"#),
-            )
-            .unwrap();
-        let b = def
-            .extract_request_scope(
-                "POST",
-                "/v2/purchase",
-                Some("force=1"),
-                Some(br#"{"merchant_id":"m_1","amount":80,"nonce":"Q"}"#),
-            )
-            .unwrap();
+        // A `|` in a header name is part of the path.
         assert_eq!(
-            a.digest(),
-            b.digest(),
-            "same bound values (nonce/query ignored) → same digest"
+            consent_refs("{{ request.headers['a|b'] }}").unwrap()[0].path,
+            "request.headers['a|b']"
         );
-        let c = def
-            .extract_request_scope(
-                "POST",
-                "/v2/purchase",
-                None,
-                Some(br#"{"amount":180,"merchant_id":"m_1"}"#),
-            )
-            .unwrap();
-        assert_ne!(
-            a.digest(),
-            c.digest(),
-            "changed amount → different digest → re-prompt"
-        );
-        // Empty scope collapses to "" (the Phase-1 key).
-        assert_eq!(scope_digest(&[]), "");
+        assert!(consent_refs("{{ request.body.raw").is_err());
+    }
+
+    /// DESIGN §7: a GitHub secret's sealed value is fresh on every run, so an
+    /// approval covers the secret's path, the key it is sealed to, its
+    /// visibility and its repositories; Gmail's sends are covered whole, with
+    /// the email by its content, on any `users/:user`.
+    #[test]
+    fn compiled_scopes_follow_the_built_in_rule_sets() {
+        let r = ServiceRegistry::load();
+        let gh = r.get("github").unwrap();
+        let secret = "/repos/o/r/actions/secrets/TOKEN";
+        let id = |body: &str| covered(gh, "PUT", secret, body).1;
+        let a = id(r#"{"encrypted_value":"c2VhbGVkLTE=","key_id":"k1"}"#);
+        assert_eq!(a, id(r#"{"encrypted_value":"c2VhbGVkLTI=","key_id":"k1"}"#));
+        assert_ne!(a, id(r#"{"encrypted_value":"c2VhbGVkLTI=","key_id":"k2"}"#));
+        assert_ne!(a, covered(gh, "PUT", "/repos/o/r/actions/secrets/OTHER", r#"{"encrypted_value":"x","key_id":"k1"}"#).1);
+        let org = "/orgs/acme/actions/secrets/TOKEN";
+        let vis = |v: &str| covered(gh, "PUT", org, &format!(r#"{{"encrypted_value":"x","key_id":"k1","visibility":"{v}"}}"#)).1;
+        assert_ne!(vis("private"), vis("all"));
+        // The repository settings shape covers the whole request.
+        let repo = |body: &str| covered(gh, "PATCH", "/repos/o/r", body).1;
+        assert_ne!(repo(r#"{"private":false}"#), repo(r#"{"private":false,"description":"x"}"#));
+
+        let gmail = r.get("gmail").unwrap();
+        let email = |date: &str, b: &str| {
+            format!("Content-Type: multipart/alternative; boundary=\"{b}\"\nTo: b@y.com\nSubject: Hi\nDate: {date}\n\n--{b}\nContent-Type: text/plain\n\nhello\n--{b}--\n")
+        };
+        let raw = |e: &str| {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE.encode(e.as_bytes())
+        };
+        for (path, field) in [
+            ("/gmail/v1/users/me/messages/send", "raw"),
+            ("/gmail/v1/users/a@x.com/messages/send", "raw"),
+            ("/gmail/v1/users/me/drafts/send", "message"),
+        ] {
+            let body = |e: &str| match field {
+                "raw" => format!(r#"{{"raw":"{}"}}"#, raw(e)),
+                _ => format!(r#"{{"message":{{"raw":"{}"}}}}"#, raw(e)),
+            };
+            let send = |e: &str| covered(gmail, "POST", path, &body(e)).1;
+            assert_eq!(send(&email("Mon", "b1")), send(&email("Tue", "b2")), "{path}");
+            assert_ne!(send(&email("Mon", "b1")), send(&email("Mon", "b1").replace("hello", "bye")), "{path}");
+        }
+    }
+
+    /// Every rule id the 2.0 rule sets had (v2.0.5) is still there: a user's
+    /// override names it, and an override of an id that is gone is refused
+    /// when it tightens (DESIGN §2). `batch` stays as a rule at allow,
+    /// although a batch is decided by its requests (DESIGN §7).
+    #[test]
+    fn every_2_0_rule_id_is_kept() {
+        const V2_0: &[(&str, &[&str])] = &[
+            ("circleci", &["trigger-pipeline", "job-ssh", "schedule-pipeline", "pipeline-definition", "approve-job", "rollback-project", "create-env-var", "add-project-key", "project-settings", "oidc-claims", "remove-context-restriction"]),
+            ("cloudflare", &["delete-dns-record", "overwrite-dns-record", "patch-dns-record", "batch-dns-records", "delete-zone"]),
+            ("cratesio", &["publish", "yank", "unyank", "update-version", "add-owner", "remove-owner", "add-trusted-publishing", "remove-trusted-publishing", "crate-settings", "revoke-token", "revoke-current-token"]),
+            ("gcalendar", &["list-events", "delete-event", "delete-calendar", "batch"]),
+            ("gcp", &["delete-project", "delete-instance", "delete-bucket", "mint-sa-key", "batch"]),
+            ("gdrive", &["list-files", "delete-file"]),
+            ("github", &["delete-repo", "transfer-repo", "make-public", "add-collaborator", "remove-collaborator", "set-branch-protection", "remove-branch-protection", "change-ruleset", "change-org-access", "add-deploy-key", "add-webhook", "edit-webhook", "set-actions-secret", "set-org-actions-secret", "dispatch-workflow", "repo-dispatch", "register-runner", "delete-branch", "delete-release", "graphql-gated-mutations"]),
+            ("gmail", &["list-emails", "list-labels", "read-email", "send-email", "modify-email", "delete-email"]),
+            ("googletasks", &["delete-tasklist", "clear-tasks"]),
+            ("neon", &["delete-project", "delete-branch", "delete-database", "delete-role", "mint-api-key"]),
+            ("openai", &["expensive-model", "batch-run"]),
+            ("railway", &["delete-infra", "delete-via-config", "mint-token", "change-access"]),
+            ("snaplii", &["purchase", "purchase-large", "transfer"]),
+            ("supabase", &["read-secrets", "delete-project", "mint-api-key", "open-network", "transfer-ownership"]),
+            ("vercel", &["delete-project", "delete-deployment", "delete-domain", "remove-member", "change-member", "create-webhook", "delete-integration"]),
+        ];
+        let r = ServiceRegistry::load();
+        for (service, ids) in V2_0 {
+            let have: std::collections::HashSet<&str> = r
+                .default_policy_rules(service)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|rule| rule.id.as_deref())
+                .collect();
+            for id in *ids {
+                assert!(have.contains(id), "{service} {id}");
+            }
+        }
+    }
+
+    /// A Gmail `drafts/send` that names only a draft id reads as its own
+    /// shape, whose card names the draft; one carrying the message reads as
+    /// the send of that message.
+    #[test]
+    fn a_draft_sent_by_its_id_shows_the_id() {
+        let r = ServiceRegistry::load();
+        let gmail = r.get("gmail").expect("gmail service");
+        let path = "/gmail/v1/users/a@x.com/drafts/send";
+        for body in [r#"{"id":"r-5"}"#, r#"{"id":"r-5","threadId":"t"}"#] {
+            let scope = scope_of(gmail, "POST", path, body);
+            assert_eq!(scope.shape, "draft_send_by_id", "{body}");
+            assert_eq!(scope.consent.as_deref(), Some("Send draft {{ request.body.id }}"));
+            let (card, _) = covered(gmail, "POST", path, body);
+            assert_eq!(shown(&card, "request.body.id"), Some("r-5"));
+        }
+        let with_message = scope_of(gmail, "POST", path, r#"{"id":"r-5","message":{"raw":"cmF3"}}"#);
+        assert_eq!(with_message.shape, "draft_send");
     }
 
     #[test]
-    fn large_bound_value_is_digested_not_verbatim() {
-        // A big field (a whole email) binds by digest so the op stays small —
-        // and the digest is still deterministic and tamper-sensitive.
-        let big = "x".repeat(BOUND_VALUE_CAP + 100);
-        let capped = cap_bound_value(&big);
-        assert!(
-            capped.starts_with("sha256:"),
-            "large value → digest marker, got {capped}"
+    fn a_narrowed_identity_is_stable_and_tamper_sensitive() {
+        // The $80/$180 guarantee: the same covered values → the same
+        // identity whatever the member order; a field not covered (a nonce)
+        // never affects it; a changed value does.
+        let def = snaplii_def();
+        let id = |body: &str| covered(&def, "POST", "/v2/purchase", body).1;
+        let a = id(r#"{"amount":80,"merchant_id":"m_1"}"#);
+        assert_eq!(a, id(r#"{"merchant_id":"m_1","amount":80,"nonce":"Q"}"#));
+        assert_ne!(a, id(r#"{"amount":180,"merchant_id":"m_1"}"#));
+        assert_ne!(a, id(r#"{"amount":"80","merchant_id":"m_1"}"#), "JCS keeps the type");
+        assert_ne!(id(r#"{"merchant_id":"m_1"}"#), id(r#"{"amount":null,"merchant_id":"m_1"}"#), "absent is not null");
+    }
+
+    /// Body format (DESIGN §9): GitHub's make-public is read from a JSON body
+    /// sent as `text/plain` and from a form body too.
+    #[test]
+    fn compiled_github_make_public_reads_every_body_reading() {
+        use crate::core::policy::AccessLevel;
+        let eval = |content_type: Option<&str>, body: &str| {
+            let headers: Vec<(String, Vec<u8>)> = content_type
+                .map(|c| vec![("content-type".to_string(), c.as_bytes().to_vec())])
+                .unwrap_or_default();
+            eval_with(
+                "github",
+                RequestInput {
+                    headers: &headers,
+                    ..input("PATCH", "/repos/o/r", body)
+                },
+            )
+        };
+        for (ct, body) in [
+            (Some("text/plain"), r#"{"private":false}"#),
+            (Some("application/json"), r#"{"private":false}"#),
+            (None, "private=false"),
+            (Some("application/x-www-form-urlencoded"), "private=false"),
+            (None, r#"{"visibility":"public"}"#),
+        ] {
+            assert_eq!(eval(ct, body), AccessLevel::AskAlways, "{ct:?} {body}");
+        }
+        for (ct, body) in [
+            (Some("application/json"), r#"{"private":true}"#),
+            (None, "private=true"),
+            (Some("application/json"), r#"{"description":"x"}"#),
+        ] {
+            assert_eq!(eval(ct, body), AccessLevel::Allow, "{ct:?} {body}");
+        }
+    }
+
+    /// Every shipped condition evaluates on its service's routine requests
+    /// without an error (an error would decide by "never loosen", not by the
+    /// condition).
+    #[test]
+    fn every_shipped_condition_reads_its_routine_requests_cleanly() {
+        let r = ServiceRegistry::load();
+        let routine: &[(&str, &str, &str, &str)] = &[
+            ("github", "PATCH", "/repos/o/r", r#"{"description": "docs"}"#),
+            ("github", "PATCH", "/repos/o/r", r#"{"private": true}"#),
+            ("github", "PATCH", "/repositories/1", r#"{"has_issues": false}"#),
+            ("github", "POST", "/repos/o/r", r#"{"name": "r2"}"#),
+            ("github", "POST", "/graphql", r#"{"query":"query { viewer { login } }"}"#),
+            ("github", "POST", "/graphql", r#"{"query":"mutation { addComment(input: {subjectId: \"I\", body: \"hi\"}) { clientMutationId } }"}"#),
+            ("openai", "POST", "/v1/chat/completions", r#"{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}"#),
+            ("openai", "POST", "/v1/responses", r#"{"model": "gpt-4o", "input": "hi"}"#),
+            ("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a"}"#),
+            ("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a", "model": null}"#),
+            ("railway", "POST", "/graphql/v2", r#"{"query":"query { me { name } }"}"#),
+            ("railway", "POST", "/graphql/v2", r#"{"query":"mutation { serviceInstanceRedeploy(serviceId: \"s\") }"}"#),
+            ("snaplii", "POST", "/v2/purchase", r#"{"orderInfo": {"orderType": "GIFT_CARD", "item": {"itemId": "CB_1", "price": "40.00"}}}"#),
+            ("snaplii", "POST", "/v2/purchase", r#"{"orderInfo": {"orderType": "GIFT_CARD", "item": {"itemId": "CB_1", "price": "250.00"}}, "delivery": {"type": "WALLET"}}"#),
+            ("gdrive", "POST", "/drive/v3/files/f1/permissions", r#"{"type": "user", "role": "writer", "emailAddress": "a@b.com"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/permissions/p1", r#"{"role": "reader"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/revisions/r1", r#"{"keepForever": true}"#),
+            ("creem", "POST", "/v1/refunds", r#"{"transaction_id": "t1"}"#),
+            ("creem", "POST", "/v1/splits", r#"{"percentage": 10}"#),
+            ("creem", "PATCH", "/v1/webhooks/w1", r#"{"name": "n"}"#),
+            ("creem", "POST", "/v1/webhooks", r#"{"url": "https://x.dev", "delivery_mode": "cli"}"#),
+            ("creem", "GET", "/v1/webhooks/w1/secret", ""),
+        ];
+        let mut evaluated = std::collections::BTreeSet::new();
+        for (service, method, path, body) in routine {
+            let def = r.get(service).expect("service");
+            let request = def.read_request(input(method, path, body)).expect("readable").request;
+            for rule in r.default_policy_rules(service).unwrap_or_default() {
+                let Some(c) = &rule.condition else { continue };
+                if rule.select.exec(method, path).is_none() {
+                    continue;
+                }
+                let got = c.eval(&request).expect("readable");
+                assert!(got.is_some(), "{service} {}: errors on {method} {path} {body}", c.as_str());
+                evaluated.insert(format!("{service}/{}", rule.id.clone().unwrap_or_default()));
+            }
+        }
+        // Every shipped condition was reached.
+        let mut shipped = std::collections::BTreeSet::new();
+        for (id, def) in r.iter_sorted() {
+            for rule in def.policy.iter().flat_map(|p| p.rules.iter()) {
+                if rule.condition.is_some() {
+                    shipped.insert(format!("{id}/{}", rule.id.clone().unwrap_or_default()));
+                }
+            }
+        }
+        assert_eq!(shipped.len(), 14, "{shipped:?}");
+        assert_eq!(evaluated, shipped);
+    }
+
+    #[test]
+    fn compiled_openai_lets_a_null_model_ride_the_floor() {
+        use crate::core::policy::AccessLevel;
+        for path in ["/v1/chat/completions", "/v1/threads/t1/runs"] {
+            assert_eq!(eval_compiled("openai", "POST", path, r#"{"model": null}"#), AccessLevel::Allow);
+        }
+        // A chat body whose tool schema has both `ID` and `id` is not refused.
+        let tools = r#"{"model": "gpt-4o", "tools": [{"type": "function", "function": {"name": "f", "parameters": {"properties": {"ID": {}, "id": {}}}}}]}"#;
+        assert_eq!(eval_compiled("openai", "POST", "/v1/chat/completions", tools), AccessLevel::Allow);
+        // A JSON chat body sent as JSON whose text holds a form spelling of
+        // the model is read as JSON only.
+        let headers = vec![("content-type".to_string(), b"application/json".to_vec())];
+        let chat = r#"{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "a&model=o3"}]}"#;
+        assert_eq!(
+            eval_with(
+                "openai",
+                RequestInput {
+                    headers: &headers,
+                    ..input("POST", "/v1/chat/completions", chat)
+                }
+            ),
+            AccessLevel::Allow
         );
-        assert!(capped.len() < 100, "marker is small, not the whole value");
-        // Small values stay verbatim.
-        assert_eq!(cap_bound_value("hello"), "hello");
-        // Same big value → same marker (stable identity); a changed one differs.
-        assert_eq!(cap_bound_value(&big), capped);
-        assert_ne!(cap_bound_value(&"y".repeat(BOUND_VALUE_CAP + 100)), capped);
+        // `{"Model": …}` beside the model a rule reads is refused.
+        let r = ServiceRegistry::load();
+        let def = r.get("openai").unwrap();
+        let rules = r.default_policy_rules("openai").unwrap().to_vec();
+        let body = r#"{"model": "gpt-4o-mini", "Model": "o3"}"#;
+        let refused = def
+            .read_request(input("POST", "/v1/chat/completions", body))
+            .and_then(|read| {
+                let req = read.request;
+                crate::core::policy::evaluate(&req, Some(&rules), None, &crate::core::policy::Policy::default(), &[])
+            });
+        assert_eq!(refused.unwrap_err().status, 422);
     }
 }

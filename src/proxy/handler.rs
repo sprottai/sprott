@@ -311,13 +311,6 @@ impl BrokerHandler {
             Some(Ok(d)) => Some(d),
             _ => body_bytes.as_deref(),
         };
-        // One lossy view serves BOTH the phantom scan and policy below, so a
-        // binary(ish) body is not a blind spot: rules evaluate against what is
-        // actually there. Forwarding still uses the untouched raw bytes.
-        // The body view feeds POLICY only (`[requests]` var extraction below).
-        // It is deliberately NOT scanned for phantoms: the body is not an
-        // injection site, so a phantom there is left inert (see the forward path).
-        let body_text: Option<String> = readable.map(|b| String::from_utf8_lossy(b).into_owned());
 
         // No phantom anywhere → forward untouched (rebuild body if we buffered).
         if phantoms.is_empty() {
@@ -648,121 +641,165 @@ impl BrokerHandler {
             }
         }
 
-        // ── 3. request scope + policy (Phase 2, design/request-scope.md) ─────
-        // Resolve the matching `[requests]` shape and extract its vars from the
-        // SAME buffered body (unified boundary) + the URL query. Feeds three
-        // consumers: the policy `when` predicate (`vars`), the request-bound
-        // permit identity (`scope_digest`), and the approval consent (via
-        // `req_scope` → captive_portal). Absent shape ⇒ empty vars + `""`
-        // digest = the Phase-1 path-only key, unchanged. A request that can't
-        // be read the standard way is refused here, before policy.
-        //
-        // Policy `body` rules see the body text plus its decoded JSON form
-        // (policy_body_view). Pure policy, from the snapshot's inputs: no
-        // approval is consulted here (step 6 is).
-        let policy_view = body_text
-            .as_deref()
-            .map(crate::core::policy::policy_body_view);
+        // ── 3. the request object + policy (request-model design §1) ────────
+        // The request as its definition reads it: the `[requests]` shape whose
+        // method, path and condition select it gives the body format and what
+        // an approval binds (its scope and what its consent reads); every
+        // rule's condition reads the same object. A value something reads
+        // that can't be read refuses the request here, before any decision,
+        // with the status a server would give it. Pure policy, from the
+        // snapshot's inputs: no approval is consulted here (step 6 is).
         let agent_prefix = self.agent_attribution().unwrap_or_default();
-        type Decided = (
-            Option<crate::service::RequestScope>,
-            (
-                crate::core::policy::AccessLevel,
-                crate::core::policy::DecidedBy,
-                Option<u64>,
-            ),
-        );
-        let decide = |p: &str| -> Result<Decided, Response<Body>> {
-            // A shape reads the body only decoded: one that can't be is refused.
-            // A body that isn't valid in its own coding is refused whatever
-            // reads it: a decoder that stops early may run what this one can't
-            // see, and no client sends one by mistake.
-            if let Some(Err(e)) = &decoded {
-                if !matches!(e, DecodeError::Unsupported(_))
-                    || shape_def.is_some_and(|d| d.request_shape(&method, p).is_some())
-                {
-                    write_forward_audit(&state, &refused, 0, None, Some(e.code()));
-                    return Err(err_response(e.code(), &e.to_string()));
-                }
-            }
-            let req_scope = shape_def
-                .and_then(|d| d.extract_request_scope(&method, p, parts.uri.query(), readable));
-            if let Some(rs) = req_scope.as_ref() {
-                // A request its shape can't read the standard way is refused
-                // with the status a server would give it: the rules on that
-                // shape would otherwise decide on a guess.
-                if let Some(u) = &rs.unreadable {
-                    let code = if u.status == 422 {
-                        ScCode::RequestInvalid
-                    } else {
-                        ScCode::RequestUnreadable
-                    };
-                    write_forward_audit(&state, &refused, 0, None, Some(code));
-                    return Err(err_response(code, &u.message));
-                }
-                // A connection rule edit that decides on a field an approval on
-                // this path does not bind (an unbound `when` var, or the body)
-                // is refused here, by name, rather than asked under.
-                if let Some(problem) = state.connection_rule_problem(
-                    &snapshot.inputs,
-                    &conn,
-                    &service_id,
-                    &method,
-                    p,
-                    rs,
-                ) {
-                    write_forward_audit(&state, &refused, 0, None, Some(ScCode::PolicyDenied));
-                    return Err(err_response(ScCode::PolicyDenied, &problem));
-                }
-            }
-            let vars: crate::core::policy::VarMap = req_scope
-                .as_ref()
-                .map(|r| r.vars.clone())
-                .unwrap_or_default();
-            let decision = state.evaluate_request_decision(
-                &snapshot.inputs,
-                &conn,
-                &service_id,
-                &method,
-                p,
-                policy_view.as_deref(),
-                &vars,
-            );
-            Ok((req_scope, decision))
+        // `request.host`: with the port when it isn't https's default.
+        let request_host = match parts.uri.port_u16() {
+            Some(port) if port != 443 => format!("{dest_host}:{port}"),
+            _ => dest_host.clone(),
         };
-        // An encoded slash has two readings, and servers differ on which they
-        // take (core/path.rs): decide on both and keep the stricter. The permit
-        // keys, the audit row and the upstream all use the path as normalized.
-        let decided = match crate::core::path::slash_decoded(&path) {
-            Err(e) => {
-                write_forward_audit(&state, &refused, 0, None, Some(ScCode::RequestUnreadable));
-                Err(err_response(ScCode::RequestUnreadable, &e.to_string()))
-            }
-            Ok(others) => decide(&path).and_then(|first| {
-                // The stricter reading wins; on a tie, the one a shape read
-                // (so the approval binds and shows what it can).
-                others.iter().try_fold(first, |kept, alt| {
-                    let next = decide(alt)?;
-                    let (n, k) = (next.1 .0.restrictiveness(), kept.1 .0.restrictiveness());
-                    Ok(if n > k || (n == k && kept.0.is_none() && next.0.is_some()) {
-                        next
-                    } else {
-                        kept
-                    })
-                })
+        // `request.headers`: the set the request is forwarded with.
+        let request_headers = forwarded_headers(&parts.headers);
+        // A body whose coding can't be undone can't be read: a condition that
+        // reads it refuses the request (one a shape selects is refused below
+        // whatever reads it).
+        let body_error = match &decoded {
+            Some(Err(e)) => Some(crate::core::request::Unreadable {
+                status: e.code().status(),
+                message: e.to_string(),
             }),
+            _ => None,
         };
-        let (req_scope, (level, decided_by, ttl)) = match decided {
-            Ok(d) => d,
-            Err(refusal) => return refusal.into(),
+        let refuse = |u: crate::core::request::Unreadable| -> Response<Body> {
+            let code = match u.status {
+                422 => ScCode::RequestInvalid,
+                415 => ScCode::ContentEncodingUnsupported,
+                413 => ScCode::BrokerBodyLimit,
+                _ => ScCode::RequestUnreadable,
+            };
+            write_forward_audit(&state, &refused, 0, None, Some(code));
+            err_response(code, &u.message)
         };
-        let scope_digest = req_scope.as_ref().map(|r| r.digest()).unwrap_or_default();
-
         use crate::core::policy::AccessLevel;
-        // Deny refuses before any value is located, let alone read.
-        if level == AccessLevel::Deny {
-            return deny(ScCode::PolicyDenied, "this request is blocked by policy");
-        }
+        // The decision, and what an approval of this request covers: worked
+        // out here, while the request objects are held, before anything
+        // awaits. A request has readings, and servers differ on which they
+        // take: each is decided and the strictest kept (service/readings.rs).
+        // The permit keys, the audit row and the upstream all use the request
+        // line and the path as normalized.
+        let (level, decided_by, ttl, scoped, shaped, identity, card) = {
+            let input = crate::core::request::RequestInput {
+                method: &method,
+                host: &request_host,
+                path: &path,
+                query: parts.uri.query(),
+                headers: &request_headers,
+                body: readable,
+                body_error: body_error.as_ref(),
+            };
+            let readings = match crate::service::readings::Readings::of(input) {
+                Ok(readings) => readings,
+                Err(why) => {
+                    write_forward_audit(&state, &refused, 0, None, Some(ScCode::RequestUnreadable));
+                    return err_response(ScCode::RequestUnreadable, &why).into();
+                }
+            };
+            // A body that isn't valid in its own coding is refused whatever
+            // reads it: a decoder that stops early may run what this one
+            // can't see, and no client sends one by mistake. One in a coding
+            // this proxy can't undo is refused where a shape selects the
+            // request.
+            if let Some(Err(e)) = &decoded {
+                if !matches!(e, DecodeError::Unsupported(_)) || readings.selected(shape_def) {
+                    write_forward_audit(&state, &refused, 0, None, Some(e.code()));
+                    return err_response(e.code(), &e.to_string()).into();
+                }
+            }
+            let decided = match readings.decide(shape_def, |request| {
+                state.evaluate_request_decision(&snapshot.inputs, &conn, &service_id, request)
+            }) {
+                Ok(decided) => decided,
+                Err(u) => return refuse(u).into(),
+            };
+            let (level, decided_by, ttl) = decided.decision.clone();
+            // Deny refuses before any value is located, let alone read.
+            if level == AccessLevel::Deny {
+                return deny(ScCode::PolicyDenied, "this request is blocked by policy");
+            }
+            let scoped = decided.scoped;
+            let (kept, kept_read, _) = &decided.readings[decided.kept];
+            // What an approval covers, keyed under the vault's current
+            // content-key generation: a daemon that doesn't hold it mints and
+            // redeems nothing until `sprott unlock`.
+            let mut identity = crate::approval::coverage::Identity::default();
+            let mut card = None;
+            if level != AccessLevel::Allow {
+                let key = match permit_identity_key(&state, &vault_id) {
+                    Ok(key) => key,
+                    Err(refusal) => return refusal.into(),
+                };
+                identity = key.unit();
+                let tier = crate::approval::reuse::BoundTier::of(level, &decided_by, scoped, &method);
+                if let Some(tier) = tier {
+                    let compiled_in = shape_def.is_some_and(|d| {
+                        state
+                            .services
+                            .get(&d.service.id)
+                            .is_some_and(|r| std::ptr::eq(r, d))
+                    });
+                    // A batch is covered whole, each of its requests by its
+                    // content, whichever decided it.
+                    let mut covered = if readings.is_batch() || readings.batch_unreadable {
+                        let (_, request, _) = &decided.readings[0];
+                        match crate::approval::coverage::whole_request(&request.request, &path) {
+                            Ok(c) => c,
+                            Err(u) => return refuse(u).into(),
+                        }
+                    } else {
+                        crate::approval::coverage::Covered::default()
+                    };
+                    for &i in &decided.tied {
+                        let (reading, read, _) = &decided.readings[i];
+                        let reads = match snapshot.inputs.matched_reads(
+                            &state.services,
+                            &conn,
+                            &service_id,
+                            &read.request,
+                            level,
+                        ) {
+                            Ok(reads) => reads,
+                            Err(u) => return refuse(u).into(),
+                        };
+                        let at = reading.part.map_or(path.as_str(), |p| readings.part_path(p));
+                        let c = match crate::approval::coverage::cover_read(
+                            read,
+                            at,
+                            &reads,
+                            compiled_in,
+                            tier.single_use(),
+                        ) {
+                            Ok(c) => c,
+                            Err(u) => return refuse(u).into(),
+                        };
+                        covered = covered.union(match reading.part {
+                            Some(p) => c.batch_part(p),
+                            None => c,
+                        });
+                    }
+                    identity = key.identity(&covered);
+                    card = Some(crate::approval::card::Card {
+                        vars: covered.shown,
+                        // A batch request's consent would name values the
+                        // card shows under that request's label.
+                        consent: match kept.part {
+                            Some(_) => None,
+                            None => kept_read.scope.as_ref().and_then(|s| s.consent.clone()),
+                        },
+                    });
+                }
+            }
+            // A body a shape (or a batch's requests) decided on goes upstream
+            // as it was read: decoded.
+            let shaped = kept_read.scope.is_some() || readings.is_batch();
+            (level, decided_by, ttl, scoped, shaped, identity, card)
+        };
 
         // ── 4. values: present and located, none opened ─────────────────────
         // Each KEY is walked through the store order once per snapshot (the
@@ -879,35 +916,34 @@ impl BrokerHandler {
             credentials: credentials.clone(),
             fingerprint: snapshot.fingerprint,
             hold: snapshot.inputs.approval_hold(),
+            scoped,
+            identity: identity.clone(),
+            card,
         };
         let permit = match level {
             AccessLevel::Allow => None,
             _ => match crate::state::PermitKey::of(
                 level,
                 &decided_by,
-                req_scope.is_some(),
+                scoped,
                 &agent_prefix,
                 &conn,
                 &method,
                 &dest_host,
                 &path,
-                &scope_digest,
+                &identity,
                 credentials,
             ) {
                 Some(key) => Some(key),
                 None => {
-                    return self
-                        .captive_portal(&vault_id, &portal, req_scope.as_ref(), ip)
-                        .await;
+                    return self.captive_portal(&vault_id, &portal, ip).await;
                 }
             },
         };
         let auth = match state.authorize(&vault_id, snapshot.clone(), keys, permit) {
             Ok(auth) => auth,
             Err(crate::state::Unauthorized::NoPermit) => {
-                return self
-                    .captive_portal(&vault_id, &portal, req_scope.as_ref(), ip)
-                    .await;
+                return self.captive_portal(&vault_id, &portal, ip).await;
             }
             Err(crate::state::Unauthorized::Refused(e)) => {
                 let (code, msg) = e.code();
@@ -995,7 +1031,7 @@ impl BrokerHandler {
         drop(substitutes);
         // A body a shape decided on goes upstream as it was read: decoded.
         let forward_decoded = match decoded {
-            Some(Ok(d)) if req_scope.is_some() => {
+            Some(Ok(d)) if shaped => {
                 parts.headers.remove(header::CONTENT_ENCODING);
                 parts.headers.insert(header::CONTENT_LENGTH, d.len().into());
                 Some(d)
@@ -1040,9 +1076,7 @@ impl BrokerHandler {
         match state.consume(&vault_id, auth) {
             Ok(true) => {}
             Ok(false) => {
-                return self
-                    .captive_portal(&vault_id, &portal, req_scope.as_ref(), ip)
-                    .await;
+                return self.captive_portal(&vault_id, &portal, ip).await;
             }
             Err(e) => {
                 let (code, msg) = e.code();
@@ -1076,13 +1110,7 @@ impl BrokerHandler {
     /// Build + register the captive-portal (ask) op and return the 401 that
     /// surfaces the approve link through a dumb tool's error output.
     #[allow(clippy::too_many_arguments)]
-    async fn captive_portal(
-        &self,
-        vault_id: &str,
-        p: &Portal,
-        req_scope: Option<&crate::service::RequestScope>,
-        ip: IpAddr,
-    ) -> RequestOrResponse {
+    async fn captive_portal(&self, vault_id: &str, p: &Portal, ip: IpAddr) -> RequestOrResponse {
         use crate::protocol::operation::{Act, ActType, Bind, Operation, Valid};
         let Portal {
             conn,
@@ -1096,6 +1124,9 @@ impl BrokerHandler {
             credentials,
             fingerprint,
             hold,
+            scoped,
+            identity,
+            card: shown,
         } = p;
         let (level, decided_by) = (*level, decided_by.clone());
         let now = now_secs();
@@ -1129,47 +1160,55 @@ impl BrokerHandler {
             scope["agent"] = serde_json::Value::String(prefix);
         }
         // Same inputs the lookup and apply use: what decided the request, and
-        // whether the path is scoped (a `[requests]` shape matched).
-        stamp_signed_level(
-            &mut scope,
-            level,
-            &decided_by,
-            req_scope.is_some(),
-            method,
-            grant_ttl,
-        );
+        // how `[requests]` shapes read it (the signed `scoped` marker: a shape
+        // matched, so approve never records a value-blind window for it; or
+        // `single_use`).
+        stamp_signed_level(&mut scope, level, &decided_by, *scoped, method, grant_ttl);
         // A window (`exact`, `rule`, `floor`) carries the policy fingerprint
         // it was decided under: approve stores no window when the policy
         // changed since.
-        let window = crate::approval::Reuse::of(level, &decided_by, req_scope.is_some(), method)
+        let window = crate::approval::Reuse::of(level, &decided_by, *scoped, method)
             .and_then(|r| r.window(grant_ttl))
             .is_some();
-        // Phase 2: fold the bound `[requests]` scope-field VALUES and the consent
-        // template into the op scope. They are signed into β (the user's passkey
-        // authorizes exactly the fields shown) and re-derived at approve to build
-        // the grant-identity digest. Values are STRINGS — the canonical (JCS)
-        // encoder rejects floats, and it keeps approve/redeem digests byte-equal.
-        if let Some(rs) = req_scope {
-            // Mark this a scoped path (a `[requests]` shape matched), so approve
-            // never records a value-blind coarse-window key for it — even when
-            // NO field values resolved (an empty-body ask). Without this, one
-            // approved blank ask would open a window any later value could ride.
-            scope["scoped"] = serde_json::Value::Bool(true);
-            if !rs.bound.is_empty() {
-                let obj: serde_json::Map<String, serde_json::Value> = rs
-                    .bound
-                    .iter()
-                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                    .collect();
-                scope["scope_vars"] = serde_json::Value::Object(obj);
-            }
-            // Display-only (not in the digest); still signed into β, a string so
-            // JCS is happy. The `{{ vars.x | filter }}` template; the console
-            // interpolates (auto-escaping values) and dispatches filters.
-            if let Some(c) = &rs.consent {
-                scope["consent"] = serde_json::Value::String(c.clone());
+        // What the approval covers, as the card shows it, and the consent
+        // template: sealed to the vault's current content key (`scope.card`,
+        // design §5), never in the clear. Its MAC is what the approver's
+        // signature must cover. The permit identity stays in the
+        // PolicyContext, never in the op.
+        let mut card = None;
+        if let Some(plain) = shown.clone().filter(|c| !c.is_empty()) {
+            match seal_card(&self.state, vault_id, plain) {
+                Ok(sealed) => {
+                    scope["card"] = sealed.scope_value();
+                    card = Some(sealed);
+                }
+                Err(refusal) => return refusal.into(),
             }
         }
+        // A re-run that misses an approval this agent holds for the same
+        // request line is told which covered components differ, never their
+        // values (so it can re-send what a vendor generated per run).
+        let differs = (!identity.digest.is_empty())
+            .then(|| {
+                let line = crate::state::OpGrantKey::new(
+                    &self.agent_attribution().unwrap_or_default(),
+                    conn,
+                    method,
+                    host,
+                    path,
+                    "",
+                    &crate::approval::reuse::BoundTier::AskAlways,
+                );
+                self.state.approved_request(vault_id, &line, identity.generation)
+            })
+            .flatten()
+            .map(|approved| {
+                (
+                    approved.at,
+                    crate::approval::coverage::differing(&approved.components, &identity.components),
+                )
+            })
+            .filter(|(_, names)| !names.is_empty());
         let op = Operation {
             act: Act {
                 kind: ActType::Use,
@@ -1189,6 +1228,8 @@ impl BrokerHandler {
             host: Some(host.to_string()),
             credentials: Some(credentials.clone()),
             policy_fp: window.then_some(*fingerprint),
+            card,
+            identity: Some(identity.clone()),
         };
 
         match crate::server::broker_flow::register_pending_use(
@@ -1213,20 +1254,33 @@ impl BrokerHandler {
                     "http://127.0.0.1:{}/op/{}",
                     self.state.config.proxy_port, op_id
                 );
+                let mut tail = json!({
+                    "status": "pending",
+                    "op_id": op_id,
+                    "approve_url": approve_url,
+                    "poll_url": poll_url,
+                    "expires_at": expires_at,
+                });
+                let differs_line = match &differs {
+                    Some((at, names)) => {
+                        tail["differs"] = json!({ "approved_at": at, "components": names });
+                        format!(
+                            "This request differs from the request approved at {} in: {}. If a value there is one your client makes up per run, send the approved one.\n",
+                            utc_clock(*at),
+                            names.join(", ")
+                        )
+                    }
+                    None => String::new(),
+                };
                 let body = format!(
                     "Sprott approval needed to use this credential.\n\
-                     Approve with your passkey:\n  {}\n\
+                     {}Approve with your passkey:\n  {}\n\
                      {}Then re-run the same command.\n\n\
                      {}\n",
+                    differs_line,
                     approve_url,
                     wait_hint(&approve_url, &op_id),
-                    json!({
-                        "status": "pending",
-                        "op_id": op_id,
-                        "approve_url": approve_url,
-                        "poll_url": poll_url,
-                        "expires_at": expires_at,
-                    })
+                    tail
                 );
                 let mut b = Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
@@ -1356,21 +1410,128 @@ fn unknown_connection_refusal(key_changed: bool, conn: &str) -> (ScCode, String)
 
 /// Stamp what approving a Use op grants into its (signed) scope, so what the
 /// approver reads is what apply does (design/approvals-inbox.md D1): `level`,
-/// then the reuse fields and `window_s` from [`crate::approval::Reuse`] (the
-/// SAME classifier apply and the approve-time assertion use). `scoped` = the
-/// path has a `[requests]` shape.
+/// the scoping marker ([`crate::approval::reuse::Scoped::stamp`]), then the
+/// reuse fields and `window_s` from [`crate::approval::Reuse`] (the SAME
+/// classifier apply and the approve-time assertion use).
 pub(crate) fn stamp_signed_level(
     scope: &mut serde_json::Value,
     level: crate::core::policy::AccessLevel,
     decided_by: &crate::core::policy::DecidedBy,
-    scoped: bool,
+    scoped: impl Into<crate::approval::reuse::Scoped>,
     method: &str,
     grant_ttl: u64,
 ) {
+    let scoped = scoped.into();
     scope["level"] = serde_json::Value::String(level.to_string());
+    scoped.stamp(scope);
     if let Some(reuse) = crate::approval::Reuse::of(level, decided_by, scoped, method) {
         reuse.stamp(scope, grant_ttl);
     }
+}
+
+/// `HH:MM UTC` of a Unix time.
+fn utc_clock(at: u64) -> String {
+    let day = at % 86_400;
+    format!("{:02}:{:02} UTC", day / 3600, (day % 3600) / 60)
+}
+
+/// The key the permit identity is computed under: from the vault's
+/// current-generation content key. Refused with the unlock text when the
+/// vault is locked, or when the key this session holds is not the current
+/// generation's (another member re-keyed since this machine unlocked).
+fn permit_identity_key(
+    state: &crate::state::AppState,
+    vault_id: &str,
+) -> std::result::Result<crate::approval::coverage::IdentityKey, Response<Body>> {
+    let locked = || err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG);
+    let material = state.cloned_state_key(vault_id).ok_or_else(locked)?;
+    let keys = crate::storage::item::VaultKeys::from_material(&material);
+    let gen = session_generation(state, vault_id, keys).ok_or_else(locked)?;
+    Ok(crate::approval::coverage::IdentityKey::derive(keys.content, gen))
+}
+
+/// The keyset generation this session's keys seal under (`None`: an earlier
+/// generation's); 0 for a vault with no keyset or no store on disk. The vault
+/// file is read again only once it has changed (another file in its place,
+/// another length or modification time) or for another key: a busy window
+/// reads it once.
+fn session_generation(
+    state: &crate::state::AppState,
+    vault_id: &str,
+    keys: crate::storage::item::VaultKeys<'_>,
+) -> Option<u64> {
+    use std::sync::{Mutex, OnceLock};
+    /// A file as last read: what it was then, the key's commitment, and the
+    /// answer.
+    type Seen = (FileStamp, [u8; 32], Option<u64>);
+    static SEEN: OnceLock<Mutex<HashMap<std::path::PathBuf, Seen>>> = OnceLock::new();
+    let Ok(path) = state.vaults.per_item_path(vault_id) else {
+        return Some(0);
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Some(0);
+    };
+    let stamp = FileStamp::of(&meta);
+    let key = crate::storage::sealed_vault::rekey_commitment(keys.content);
+    let seen = SEEN.get_or_init(Default::default);
+    let lock = || seen.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((s, k, generation)) = lock().get(&path) {
+        if Some(*s) == stamp && *k == key {
+            return *generation;
+        }
+    }
+    let generation = match crate::storage::sealed_vault::read_per_item(&path) {
+        Ok(Some(pv)) => pv.seal_generation(keys),
+        Ok(None) => Some(0),
+        // Unreadable now: answered as before, and read again next time.
+        Err(_) => return Some(0),
+    };
+    if let Some(stamp) = stamp {
+        lock().insert(path, (stamp, key, generation));
+    }
+    generation
+}
+
+/// What a file on disk is now: a write that replaces it (a new inode) or
+/// changes its length or modification time changes this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    inode: u64,
+}
+
+impl FileStamp {
+    /// `None` where the platform keeps no modification time.
+    fn of(meta: &std::fs::Metadata) -> Option<FileStamp> {
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Some(FileStamp {
+            len: meta.len(),
+            modified: meta.modified().ok()?,
+            inode,
+        })
+    }
+}
+
+/// Seal an approval card to the vault's current-generation content key
+/// (design §5). Refused with the unlock text when the vault is locked, or when
+/// the key this session holds is not the current generation's (another member
+/// re-keyed since this machine unlocked): a card sealed to an old key is one a
+/// removed member could open.
+fn seal_card(
+    state: &crate::state::AppState,
+    vault_id: &str,
+    card: crate::approval::card::Card,
+) -> std::result::Result<crate::approval::card::SealedCard, Response<Body>> {
+    let locked = || err_response(ScCode::VaultLocked, crate::error::VAULT_LOCKED_MSG);
+    let material = state.cloned_state_key(vault_id).ok_or_else(locked)?;
+    let keys = crate::storage::item::VaultKeys::from_material(&material);
+    let gen = session_generation(state, vault_id, keys).ok_or_else(locked)?;
+    crate::approval::card::seal(card, keys.content, vault_id, gen)
+        .map_err(|e| err_response(ScCode::ApprovalRegister, &e.to_string()))
 }
 
 /// The waiter line for pending-approval bodies — only when the approve link
@@ -1400,6 +1561,12 @@ struct Portal {
     fingerprint: [u8; 32],
     /// How long the op waits for its approval, under that snapshot's policy.
     hold: u64,
+    /// How `[requests]` shapes read it ([`crate::approval::reuse::Scoped`]).
+    scoped: crate::approval::reuse::Scoped,
+    /// Its permit identity (`crate::approval::coverage`).
+    identity: crate::approval::coverage::Identity,
+    /// What the approval covers, as the card shows it, and the consent.
+    card: Option<crate::approval::card::Card>,
 }
 
 /// What a phantom injects: a KEY's value, or the token minted from a minted
@@ -1648,18 +1815,78 @@ fn content_length(headers: &HeaderMap) -> Option<u64> {
         .ok()
 }
 
+/// The header names a request's `Connection` header lists (RFC 9110 §7.6.1):
+/// hop-by-hop for this connection, so never forwarded.
+fn connection_named(headers: &HeaderMap) -> std::collections::HashSet<String> {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Whether an `Authorization` value is forwarded ([`rewrite_headers`]): only
+/// one that carries a phantom (in Basic, inside the decoded pair); the
+/// agent's own is stripped.
+fn authorization_forwarded(value: &str) -> bool {
+    match value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))
+    {
+        Some(b64) => base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .ok()
+            .and_then(|d| String::from_utf8(d).ok())
+            .is_some_and(|text| resolver::contains_phantom(&text)),
+        None => resolver::contains_phantom(value),
+    }
+}
+
+/// The headers a brokered request is forwarded with, as `request.headers`
+/// reads them: lowercase names, in order, phantoms intact; without the
+/// hop-by-hop headers, those `Connection` names, `Proxy-Authorization`, and
+/// an `Authorization` that carries no phantom ([`rewrite_headers`] drops the
+/// same set).
+fn forwarded_headers(headers: &HeaderMap) -> Vec<(String, Vec<u8>)> {
+    let named = connection_named(headers);
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let lname = name.as_str().to_ascii_lowercase();
+            if lname == "proxy-authorization"
+                || crate::server::broker_flow::is_hop_by_hop(&lname)
+                || named.contains(&lname)
+            {
+                return None;
+            }
+            if lname == "authorization" && !value.to_str().is_ok_and(authorization_forwarded) {
+                return None;
+            }
+            Some((lname, value.as_bytes().to_vec()))
+        })
+        .collect()
+}
+
 /// Rebuild the header map: substitute phantom values, decode/re-encode Basic,
 /// strip Proxy-Authorization + any agent Authorization the injected cred
-/// replaces, drop hop-by-hop, and drop content-length when the body was rewritten.
+/// replaces, drop hop-by-hop and the headers `Connection` names, and drop
+/// content-length when the body was rewritten.
 fn rewrite_headers(
     headers: &HeaderMap,
     values: &PhantomValues,
     body_rewritten: bool,
 ) -> HeaderMap {
     let mut out = HeaderMap::new();
+    let named = connection_named(headers);
     for (name, value) in headers.iter() {
         let lname = name.as_str().to_ascii_lowercase();
-        if lname == "proxy-authorization" || crate::server::broker_flow::is_hop_by_hop(&lname) {
+        if lname == "proxy-authorization"
+            || crate::server::broker_flow::is_hop_by_hop(&lname)
+            || named.contains(&lname)
+        {
             continue;
         }
         if body_rewritten && lname == "content-length" {
@@ -1767,9 +1994,9 @@ fn plain(status: StatusCode, msg: &str) -> Response<Body> {
 /// The definition whose `[requests]` shapes read a request: the one whose
 /// rules decide it. Policy resolves built-in rules by `service_id`, which for
 /// a raw connection is the connection id, so a raw connection named like a
-/// service gets that service's rules; its shapes must come from the same
-/// place, or a rule's `when` never has the vars its shape declares and the
-/// rule silently never fires. Custom first, as everywhere.
+/// service gets that service's rules; its shapes (and so the body format its
+/// rules' conditions read) must come from the same place. Custom first, as
+/// everywhere.
 fn shape_definition<'a>(
     inputs: &'a crate::snapshot::PolicyInputs,
     services: &'a crate::service::ServiceRegistry,
@@ -2210,11 +2437,15 @@ mod tests {
             .expect("the registry's railway");
         let rules = state.services.default_policy_rules("railway").unwrap().to_vec();
         let decide = |body: &str| {
-            let rs = def
-                .extract_request_scope("POST", "/graphql/v2", None, Some(body.as_bytes()))
-                .expect("shape");
-            assert!(rs.unreadable.is_none());
-            evaluate("POST", "/graphql/v2", Some(body), &rs.vars, Some(&rules), None, &Policy::default(), &["dev".into()])
+            let input = crate::core::request::RequestInput {
+                method: "POST",
+                path: "/graphql/v2",
+                body: Some(body.as_bytes()),
+                ..Default::default()
+            };
+            let read = crate::service::read_request(Some(def), input).expect("readable");
+            assert!(read.scope.is_some(), "shape");
+            evaluate(&read.request, Some(&rules), None, &Policy::default(), &["dev".into()]).unwrap()
         };
         assert_eq!(
             decide(r#"{"query":"mutation Del($id: String!) { x: serviceDelete(id: $id) }","variables":{"id":"svc"}}"#),
@@ -2235,6 +2466,33 @@ mod tests {
         h.insert("authorization", "Bearer __sprott__railway__".parse().unwrap());
         let out = rewrite_headers(&h, &PhantomValues::default(), false);
         assert!(!out.contains_key("upgrade") && !out.contains_key("connection"));
+    }
+
+    /// `request.headers` is the set the request is forwarded with: a header
+    /// `Connection` names is dropped from both (RFC 9110 §7.6.1), and so is
+    /// an `Authorization` that carries no phantom.
+    #[test]
+    fn request_headers_are_the_forwarded_set() {
+        let mut h = HeaderMap::new();
+        h.insert("connection", "x-trace".parse().unwrap());
+        h.insert("x-trace", "1".parse().unwrap());
+        h.insert("x-account", "prod".parse().unwrap());
+        h.append("x-account", "dev".parse().unwrap());
+        h.insert("authorization", "Bearer agent-own".parse().unwrap());
+        let names: Vec<String> = forwarded_headers(&h).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(names, ["x-account", "x-account"]);
+        let out = rewrite_headers(&h, &PhantomValues::default(), false);
+        assert!(!out.contains_key("x-trace") && !out.contains_key("authorization"));
+        assert_eq!(out.get_all("x-account").iter().count(), 2);
+        h.insert("authorization", "Bearer __sprott__railway__".parse().unwrap());
+        let kept = forwarded_headers(&h);
+        assert!(kept.contains(&("authorization".to_string(), b"Bearer __sprott__railway__".to_vec())));
+        let basic = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("x:__sprott__railway__")
+        );
+        assert!(authorization_forwarded(&basic));
+        assert!(!authorization_forwarded("Basic eDp5"));
     }
 
     #[test]

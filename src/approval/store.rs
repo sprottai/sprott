@@ -110,6 +110,17 @@ pub struct PolicyContext {
     /// fingerprint of the snapshot the op was minted from. Approve stores the
     /// window only while the served snapshot has the same one.
     pub policy_fp: Option<[u8; 32]>,
+    /// The approval card this op carries sealed in `scope.card`: its
+    /// plaintext (whose `vars` key the permit an approval stores), the MAC the
+    /// approver's identity signature must cover, and the digest that stands
+    /// for it in the intent key. `None` when there is nothing to show.
+    pub card: Option<crate::approval::card::SealedCard>,
+    /// The permit identity of the request, computed at mint from what the
+    /// approval covers (`crate::approval::coverage`) under the content-key
+    /// generation it was minted in: approve keys the permit by it. Kept here
+    /// only, never in the op the relay carries. `None` for an op minted
+    /// without one (nothing request-bound redeems it).
+    pub identity: Option<crate::approval::coverage::Identity>,
 }
 
 impl ApprovalRecord {
@@ -155,6 +166,12 @@ pub fn intent_key(op: &Operation, pc: &PolicyContext) -> Option<[u8; 32]> {
         "level": pc.level.to_string(),
         "ttl": pc.ttl_seconds,
     });
+    // A sealed card is fresh on every mint: its content's digest stands for it,
+    // so retries of one request still chain.
+    if let Some(card) = &pc.card {
+        let hex: String = card.digest.iter().map(|b| format!("{:02x}", b)).collect();
+        v["act"]["scope"]["card"] = serde_json::Value::String(hex);
+    }
     if let Some(fp) = pc.policy_fp {
         let hex: String = fp.iter().map(|b| format!("{:02x}", b)).collect();
         v["policy"] = serde_json::Value::String(hex);
@@ -624,6 +641,8 @@ mod tests {
             host: Some("api.github.com".into()),
             credentials: None,
             policy_fp: None,
+            card: None,
+            identity: None,
         }
     }
 

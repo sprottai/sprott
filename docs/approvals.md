@@ -35,8 +35,8 @@ any rule, set a connection's floors ("Everything else"), and set the vault
 defaults by service type.
 
 Out of the box the floors are `allow`, so a key you add works right away.
-A service's rules tighten the actions it names, such as sending email or
-deleting a repository. A custom connection has no rules until you add some
+A service's rules tighten the actions it names, such as making a file
+public or deleting a repository. A custom connection has no rules until you add some
 or set its floors. `deny` is never a default.
 
 There are no risk scores. A rule says what an action is; the level is your

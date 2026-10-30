@@ -3,7 +3,8 @@
 //! 1. The cryptographic domain strings are frozen. They are inputs to HKDF,
 //!    signatures, the WebAuthn PRF and SPAKE2; one changed byte makes existing
 //!    vaults, passkey-derived keys, signatures and pairings unreadable. Every
-//!    such byte-string literal in `src/` must be exactly the list below.
+//!    such byte-string literal in `src/` and `crates/` must be exactly the list
+//!    below.
 //! 2. Shipped text names no pre-2.0 name (`safeclaw`, `__sc__`, `x-sc-device`)
 //!    outside the KEEP list: the frozen strings, the OAuth loopback redirect,
 //!    the `safeclaw` command link, lines marked `rename:keep`, and the files
@@ -13,6 +14,23 @@ use std::path::{Path, PathBuf};
 
 /// (file, literal as written in the source). Duplicates are real uses.
 const FROZEN: &[(&str, &str)] = &[
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/agent-proxy-pop"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/config-sig"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/contact-token"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/delegation-event"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/device-req"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/grant-id"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/membership-commit"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/principal-event"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/principal-head"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/rekey"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/role-grant"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/root-succession"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/server-envelope"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/uik-succession"),
+    ("crates/sprott-trust/src/identity.rs", "safeclaw/v1/vault-tombstone"),
+    ("crates/sprott-trust/src/identity.rs", "sudp/v1/item-sig"),
+    ("crates/sprott-trust/src/keyset.rs", "safeclaw/v1/rekey-kc"),
     ("src/approval/store.rs", "safeclaw/v1/intent"),
     ("src/approval/store.rs", "safeclaw/v1/intent"),
     ("src/cli/webauthn.rs", "safeclaw-prf-v1"),
@@ -29,30 +47,13 @@ const FROZEN: &[(&str, &str)] = &[
     ("src/crypto/vault_key.rs", "safeclaw/v1/uik-identity"),
     ("src/crypto/vault_key.rs", "safeclaw/v1/uik-kseal"),
     ("src/identity.rs", "safeclaw/v1/agent-identity"),
-    ("src/identity.rs", "safeclaw/v1/agent-proxy-pop"),
-    ("src/identity.rs", "safeclaw/v1/config-sig"),
-    ("src/identity.rs", "safeclaw/v1/contact-token"),
-    ("src/identity.rs", "safeclaw/v1/delegation-event"),
-    ("src/identity.rs", "safeclaw/v1/device-req"),
-    ("src/identity.rs", "safeclaw/v1/grant-id"),
-    ("src/identity.rs", "safeclaw/v1/membership-commit"),
-    ("src/identity.rs", "safeclaw/v1/principal-event"),
-    ("src/identity.rs", "safeclaw/v1/principal-head"),
-    ("src/identity.rs", "safeclaw/v1/rekey"),
-    ("src/identity.rs", "safeclaw/v1/role-grant"),
-    ("src/identity.rs", "safeclaw/v1/root-succession"),
-    ("src/identity.rs", "safeclaw/v1/server-envelope"),
-    ("src/identity.rs", "safeclaw/v1/uik-succession"),
-    ("src/identity.rs", "safeclaw/v1/vault-tombstone"),
     ("src/identity.rs", "sc/agent-bearer"),
-    ("src/identity.rs", "sudp/v1/item-sig"),
     ("src/pairing.rs", "safeclaw/v1/pair"),
     ("src/pairing.rs", "safeclaw/v1/pair/keys"),
     ("src/pairing.rs", "safeclaw/v1/pair/keys-set"),
     ("src/pairing.rs", "safeclaw/v1/pair/owner"),
     ("src/state.rs", "safeclaw/v1/op-payload"),
     ("src/storage/item.rs", "safeclaw/item-id/v1"),
-    ("src/storage/sealed_vault.rs", "safeclaw/v1/rekey-kc"),
 ];
 
 /// The OAuth loopback redirect registered at providers and stored inside
@@ -86,6 +87,7 @@ fn crypto_domain_strings_are_frozen() {
     let lit = regex::Regex::new(r#"b"((?:safeclaw[-/]|sc/agent-bearer|sudp/v1/)[^"]*)""#).unwrap();
     let mut files = Vec::new();
     walk(&root().join("src"), &mut files);
+    walk(&root().join("crates"), &mut files);
     let mut found: Vec<(String, String)> = Vec::new();
     for f in files
         .iter()
@@ -186,7 +188,7 @@ fn shipped_files() -> Vec<PathBuf> {
     let r = root();
     let mut out = Vec::new();
     for dir in [
-        "src", "services", "skills", "docs", "static", "demo", "examples", "fuzz",
+        "src", "crates", "services", "skills", "docs", "static", "demo", "examples", "fuzz",
     ] {
         walk(&r.join(dir), &mut out);
     }

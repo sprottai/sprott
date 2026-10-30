@@ -1,6 +1,6 @@
 [package]
 name = "sprott"
-version = "2.0.5"
+version = "2.1.0"
 edition = "2021"
 description = "Sprott daemon — multi-vault passkey-gated credential vault for AI agents"
 # Functional Source License 1.1 (Apache-2.0 future). FSL is not an SPDX id,
@@ -17,7 +17,17 @@ repository = "https://github.com/sprottai/sprott"
 name = "sprott"
 path = "src/main.rs"
 
+# The root package stays the daemon. `crates/sprott-trust` holds the membership
+# and signature rules, pure so the console can run them as wasm;
+# `crates/sprott-trust-wasm` is that wasm build.
+[workspace]
+members = ["crates/sprott-trust", "crates/sprott-trust-wasm"]
+
 [dependencies]
+# Membership and signature rules (keyset types, role fold, row honoring,
+# signing inputs). Pure; re-exported at their old paths in this crate.
+sprott-trust = { path = "crates/sprott-trust" }
+
 # HTTP
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
@@ -101,6 +111,19 @@ url = "2"
 # (core/path.rs). Already in the tree via tower-http.
 iri-string = "0.7"
 percent-encoding = "2"
+# The media type of a Content-Type source (request.body readings,
+# core/request.rs). Already in the tree via reqwest.
+mime = "0.3"
+# What an approval covers (approval/coverage.rs): MIME header fields of a
+# multipart part or an email (field lines kept as sent), embedded HTTP
+# requests of a batch, and the dash-boundary search. httparse and memchr are
+# already in the tree.
+mailparse = "0.18"
+httparse = "1"
+memchr = "2"
+# Rule and `[requests]` paths are WHATWG URL Pattern pathnames, matched by the
+# crate Deno's `URLPattern` is built on (the console uses the browser's).
+urlpattern = "0.6"
 # Policy `when` conditions are CEL (Common Expression Language, the rule
 # language of Kubernetes admission policies, Envoy RBAC and Google IAM), via
 # cel-rust.

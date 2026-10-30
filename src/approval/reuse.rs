@@ -101,6 +101,43 @@ impl GrantUnit {
     }
 }
 
+/// How a request's `[requests]` shapes read it, which decides how an `ask`
+/// approval of it is reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scoped {
+    /// No shape matched: an `ask` is reused by its unit (rule or floor).
+    No,
+    /// A shape matched: an `ask` is reused only for the same covered values
+    /// (`exact`).
+    Yes,
+    /// Single-use whatever decided it: a shape's method and path matched but
+    /// its condition errored (a window would be the whole rule's, which is
+    /// looser), or tied path readings decided by different units.
+    Once,
+}
+
+impl From<bool> for Scoped {
+    fn from(scoped: bool) -> Scoped {
+        if scoped {
+            Scoped::Yes
+        } else {
+            Scoped::No
+        }
+    }
+}
+
+impl Scoped {
+    /// Stamp the signed marker into an op scope: `scoped` for a shape that
+    /// matched, `single_use` for a forced single-use approval.
+    pub fn stamp(self, scope: &mut serde_json::Value) {
+        match self {
+            Scoped::No => {}
+            Scoped::Yes => scope["scoped"] = serde_json::Value::Bool(true),
+            Scoped::Once => scope["single_use"] = serde_json::Value::Bool(true),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reuse {
     None,
@@ -117,23 +154,25 @@ pub enum Reuse {
 
 impl Reuse {
     /// The reuse an approval of a Use op minted under `level` grants.
-    /// `decided_by` = what decided it; `scoped` = the service declares a
-    /// `[requests]` shape for the path (the signed `scoped` marker); `method`
-    /// = the request's method. `None` for `allow` and `deny`, which never
-    /// mint an op.
+    /// `decided_by` = what decided it; `scoped` = how `[requests]` shapes
+    /// read the request (the signed `scoped` / `single_use` markers,
+    /// [`Scoped`]); `method` = the request's method. `None` for `allow` and
+    /// `deny`, which never mint an op.
     pub fn of(
         level: AccessLevel,
         decided_by: &DecidedBy,
-        scoped: bool,
+        scoped: impl Into<Scoped>,
         method: &str,
     ) -> Option<Reuse> {
+        let scoped = scoped.into();
         match level {
             AccessLevel::Deny | AccessLevel::Allow => None,
             AccessLevel::AskAlways => Some(Reuse::None),
             AccessLevel::Ask => Some(match GrantUnit::of(decided_by, method) {
                 // A rule with no id has no unit: single-use, scoped or not.
                 None => Reuse::None,
-                Some(_) if scoped => Reuse::Exact,
+                Some(_) if scoped == Scoped::Once => Reuse::None,
+                Some(_) if scoped == Scoped::Yes => Reuse::Exact,
                 Some(GrantUnit::Rule(id, class)) => Reuse::Rule {
                     id,
                     label: match decided_by {
@@ -284,10 +323,10 @@ impl BoundTier {
     pub fn of(
         level: AccessLevel,
         decided_by: &DecidedBy,
-        scoped: bool,
+        scoped: impl Into<Scoped>,
         method: &str,
     ) -> Option<BoundTier> {
-        match (level, Reuse::of(level, decided_by, scoped, method)?) {
+        match (level, Reuse::of(level, decided_by, scoped.into(), method)?) {
             (AccessLevel::AskAlways, _) => Some(BoundTier::AskAlways),
             (AccessLevel::Ask, Reuse::None) => Some(BoundTier::AskOnce),
             (AccessLevel::Ask, Reuse::Exact) => {
@@ -304,31 +343,16 @@ impl BoundTier {
     }
 }
 
-/// The signed `scoped` marker: the service declares a `[requests]` shape for
-/// this request's path.
-pub fn is_scoped(scope: &serde_json::Value) -> bool {
-    scope
-        .get("scoped")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-/// The `[requests]` values a Use op's signed scope binds (`scope.scope_vars`),
-/// as sorted `(name, value)` pairs — the exact input of
-/// [`crate::service::scope_digest`]. Non-string entries are ignored (the proxy
-/// only ever stamps strings). Empty when the scope binds nothing.
-pub fn bound_values(scope: &serde_json::Value) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = scope
-        .get("scope_vars")
-        .and_then(|v| v.as_object())
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    pairs
+/// The signed scoping markers of a Use op ([`Scoped::stamp`]).
+pub fn scoped(scope: &serde_json::Value) -> Scoped {
+    let marked = |k: &str| scope.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    if marked("single_use") {
+        Scoped::Once
+    } else if marked("scoped") {
+        Scoped::Yes
+    } else {
+        Scoped::No
+    }
 }
 
 #[cfg(test)]
@@ -502,13 +526,19 @@ mod tests {
         );
     }
 
+    /// A forced single-use approval is single-use whatever decided it, and
+    /// its signed marker reads back.
     #[test]
-    fn bound_values_sorted_strings_only() {
-        let s = json!({ "scope_vars": { "b": "2", "a": "1", "n": 3 } });
-        assert_eq!(
-            bound_values(&s),
-            vec![("a".into(), "1".into()), ("b".into(), "2".into())]
-        );
-        assert!(bound_values(&json!({ "method": "GET" })).is_empty());
+    fn a_forced_single_use_is_single_use() {
+        use AccessLevel::*;
+        let send = rule(Some("send"), None);
+        assert_eq!(Reuse::of(Ask, &send, Scoped::Once, "POST"), Some(Reuse::None));
+        assert_eq!(Reuse::of(Ask, &DecidedBy::Floor, Scoped::Once, "GET"), Some(Reuse::None));
+        assert_eq!(BoundTier::of(Ask, &send, Scoped::Once, "POST"), Some(BoundTier::AskOnce));
+        for s in [Scoped::No, Scoped::Yes, Scoped::Once] {
+            let mut scope = json!({});
+            s.stamp(&mut scope);
+            assert_eq!(scoped(&scope), s);
+        }
     }
 }

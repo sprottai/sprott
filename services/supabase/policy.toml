@@ -36,26 +36,28 @@ write = "allow"
 [[rule]]
 id = "read-secrets"
 label = "Read project secrets (API keys, JWT secret, database password, encryption root key)"
-match = [
-  "GET /v1/projects/*/api-keys",
-  "GET /v1/projects/*/api-keys/*",
-  "GET /v1/projects/*/postgrest",
-  "GET /v1/projects/*/pgsodium",
-  "GET /v1/branches/*",
+method = "GET"
+path = [
+  "/v1/projects/:ref/api-keys",
+  "/v1/projects/:ref/api-keys/:id",
+  "/v1/projects/:ref/postgrest",
+  "/v1/projects/:ref/pgsodium",
+  "/v1/branches/:branch",
   # The pgbouncer config's connection_string isn't documented as carrying the
   # placeholder the pooler's does: gated until shown masked.
-  "GET /v1/projects/*/config/database/pgbouncer",
+  "/v1/projects/:ref/config/database/pgbouncer",
 ]
 level = "ask-always"
 
 # ── Destroy / lose work (irreversible) ───────────────────────────────────────
-# Only the project-level DELETE — the match is exactly one segment after
+# Only the project-level DELETE — the path is exactly one segment after
 # `projects`, so sub-resource deletes (a function, a secret, a branch) stay on
 # the floor (recoverable).
 [[rule]]
 id = "delete-project"
 label = "Delete a project (destroys its database and all data)"
-match = "DELETE /v1/projects/*"
+method = "DELETE"
+path = "/v1/projects/:ref"
 level = "ask-always"
 
 # ── Mint a durable credential (escapes the broker) ───────────────────────────
@@ -66,20 +68,22 @@ level = "ask-always"
 [[rule]]
 id = "mint-api-key"
 label = "Create a project API key"
-match = "POST /v1/projects/*/api-keys"
+method = "POST"
+path = "/v1/projects/:ref/api-keys"
 level = "ask-always"
 
 # ── Change who can reach the database (security posture) ─────────────────────
 # Applying network restrictions can open the project to 0.0.0.0/0 (the whole
 # internet), like making a repo public. Supabase exposes the same operation at
-# two endpoints (Beta apply + Alpha patch); the match list is an OR so ONE rule
+# two endpoints (Beta apply + Alpha patch); the path list is an OR so ONE rule
 # (one console toggle) covers both — neither is a bypass.
 [[rule]]
 id = "open-network"
 label = "Change network restrictions (who can reach the database)"
-match = [
-  "POST /v1/projects/*/network-restrictions/apply",
-  "PATCH /v1/projects/*/network-restrictions",
+method = ["POST", "PATCH"]
+path = [
+  "/v1/projects/:ref/network-restrictions/apply",
+  "/v1/projects/:ref/network-restrictions",
 ]
 level = "ask-always"
 
@@ -89,5 +93,6 @@ level = "ask-always"
 [[rule]]
 id = "transfer-ownership"
 label = "Create a claim token (hand the project to another owner)"
-match = "POST /v1/projects/*/claim-token"
+method = "POST"
+path = "/v1/projects/:ref/claim-token"
 level = "ask-always"

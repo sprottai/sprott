@@ -280,11 +280,15 @@ every layer:
 - `categories` — per-category floor (e.g. `llm`, `channel`); beats `default`.
 - `connections.<connection_id>` — per-**connection** user policy
   (`ConnectionPolicy { default?, rules }`). The built-in rule set comes from the
-  connection's *service* recipe (`policy.toml`); `rules` is a sparse map keyed by
-  rule id where each `RuleConfig { match?, label?, body?, level?, ttl? }` either
-  **overrides** a built-in rule by id (set `level`/`ttl`), or (if it carries
-  `match`) **adds** a new rule. Connections are addressed by `connection_id`, NOT
-  per-service — see [connection-schema.md](connection-schema.md).
+  connection's *service* recipe (`policy.toml`); `rules` is an ordered list whose
+  entries either **override** a built-in rule's `level`/`ttl` by id
+  (`{"override": "<id>", "level"?, "ttl"?}`) or **add** a rule under a stable id
+  (`{"id": "<id>", "label"?, "method"?, "path"?, "condition"?, "level"?, "ttl"?}`).
+  A 2.0 record's sparse map keyed by rule id is read as such a list in id order
+  and written back as a map. Refused and vanished entries: `UserRules` in
+  `src/core/policy.rs` and [policy.md](../docs/reference/policy.md). Connections
+  are addressed by `connection_id`, NOT per-service; see
+  [connection-schema.md](connection-schema.md).
 
 ### 7.2 What's removed from v2/dev
 

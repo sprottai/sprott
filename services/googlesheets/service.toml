@@ -13,7 +13,6 @@ type = "oauth2"
 provider = "google"
 scopes = [
   "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 refresh_token = "GOOGLE_SHEETS_REFRESH_TOKEN"
 

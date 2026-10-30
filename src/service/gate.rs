@@ -10,11 +10,15 @@
 //!
 //! The gate recognizes the whole definition or rejects the whole definition
 //! (CWE-636, no failing open): an unknown field anywhere, an unknown level, a
-//! `body` regex that does not compile, a `when` that does not parse, a
-//! consent filter the console does not implement, a duplicate rule id, an
-//! empty label, a string carrying a control or bidi character, or anything
-//! over a limit ([`crate::service::limits`]) rejects it with a precise
-//! message. No rule is ever dropped on the way through.
+//! 2.0 `match`, glob, `when`, `vars` or `body` regex, a method that is not a
+//! token, a path that is not a URL Pattern pathname, a `condition` that is not
+//! CEL over the request, a request path that names nothing, a consent filter
+//! the console does not implement, a duplicate rule id, an empty label, a
+//! string carrying a control or bidi character, or anything over a limit
+//! ([`crate::service::limits`]) rejects it with a precise message. No rule is
+//! ever dropped on the way through. Every selector is compiled here, once.
+//! What is worth saying about an admitted definition (a condition's member
+//! read without a presence guard) comes back as its warnings.
 //!
 //! Pure and synchronous: no DNS, no network. Hosts and URLs are read with the
 //! HTTP client's own URL parser and judged by the address floor in
@@ -25,15 +29,16 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 
 use crate::core::egress::{check_host_entry, check_url};
-use crate::core::policy::{
-    match_pattern_problem, patterns_overlap, AccessLevel, BodyPattern, Condition, Levels,
-    PolicyRule,
+use crate::core::policy::{AccessLevel, Condition, Levels, PolicyRule};
+use crate::core::request::{BodyFormat, Field, ReadPath, Step};
+use crate::core::selector::{
+    is_method_token, literal_pattern, path_problem, OneOrMany, PathPattern, Select,
 };
 use crate::service::limits::*;
-use crate::service::{AuthDef, RequestShape, ServiceDef, ServiceMeta, ServicePolicy, VarDef};
+use crate::service::{AuthDef, Encoded, RequestShape, ServiceDef, ServiceMeta, ServicePolicy};
 
 /// The filters the console implements for a consent template
-/// (`{{ vars.<name> | <filter> }}`): `email` renders the bound value as a
+/// (`{{ request.<path> | <filter> }}`): `email` renders the bound value as a
 /// decoded message card, `graphql` renders a GraphQL request's calls as
 /// actions in words (the approval view in the console). A filter outside
 /// this set would show the approver nothing, so a definition naming one is
@@ -89,7 +94,44 @@ struct RawService {
     #[serde(default)]
     policy: Option<RawInlinePolicy>,
     #[serde(default)]
-    requests: HashMap<String, RequestShape>,
+    requests: HashMap<String, toml::Spanned<RawRequestShape>>,
+}
+
+/// A `[requests.<name>]` shape as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRequestShape {
+    /// The 2.0 `"METHOD /path"` and `vars`: named so they are refused with
+    /// the replacement spelled out, not as unknown fields.
+    #[serde(default, rename = "match")]
+    match_pattern: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    vars: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    method: Option<OneOrMany>,
+    #[serde(default)]
+    path: Option<OneOrMany>,
+    #[serde(default)]
+    condition: Option<String>,
+    /// The body format: `json`, `form`, `graphql` or `text`.
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    scope: Option<Vec<String>>,
+    #[serde(default)]
+    consent: Option<String>,
+    #[serde(default)]
+    encoded: Option<std::collections::BTreeMap<String, RawEncoded>>,
+}
+
+/// One `encoded."<request path>"` entry: JSON Schema's content keywords.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEncoded {
+    #[serde(default, rename = "contentEncoding")]
+    content_encoding: Option<String>,
+    #[serde(default, rename = "contentMediaType")]
+    content_media_type: Option<String>,
 }
 
 /// The inline `[policy]` of a service.toml (`[policy.levels]` +
@@ -146,15 +188,22 @@ struct RawPolicyFile {
 struct RawRule {
     id: String,
     label: String,
-    #[serde(
-        rename = "match",
-        deserialize_with = "crate::core::policy::match_spec::deserialize"
-    )]
-    match_pattern: Vec<String>,
+    /// The 2.0 `"METHOD /path"`: named so it is refused with the replacement
+    /// spelled out, not as an unknown field.
+    #[serde(default, rename = "match")]
+    match_pattern: Option<serde::de::IgnoredAny>,
     #[serde(default)]
-    body: Option<String>,
+    method: Option<OneOrMany>,
     #[serde(default)]
-    when: Option<String>,
+    path: Option<OneOrMany>,
+    #[serde(default)]
+    condition: Option<String>,
+    /// The 2.0 `body` regex and `when`: named so they are refused with the
+    /// replacement spelled out.
+    #[serde(default)]
+    body: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    when: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     level: Option<String>,
     #[serde(default)]
@@ -229,7 +278,8 @@ fn admit_inner(
     };
 
     check_service(key, &raw, &mut errs);
-    check_requests(&raw.requests, &mut errs);
+    let mut warnings = Vec::new();
+    let (requests, request_order) = check_requests(raw.requests, &mut errs, &mut warnings);
     let policy = match (raw_policy, raw.policy.as_ref()) {
         (Some(_), Some(_)) => {
             errs.push(
@@ -238,18 +288,12 @@ fn admit_inner(
             );
             None
         }
-        (Some(file), None) => Some(policy_from_file(file, &mut errs)),
+        (Some(file), None) => Some(policy_from_file(file, &mut errs, &mut warnings)),
         (None, Some(inline)) => Some(policy_from_inline(inline, &mut errs)),
         (None, None) => None,
     };
-    // Cross-checks only over parts that passed on their own: a list over its
-    // limit never reaches the pairwise work below.
-    if !errs.is_empty() {
-        return Err(errs);
-    }
-    if let Some(p) = &policy {
-        check_rules_against_requests(&p.rules, &raw.requests, &mut errs);
-    }
+    // The rules-against-shapes cross-check (a `when` var a shape had to
+    // bind) went with `when`: step 3 covers what a condition reads instead.
     if !errs.is_empty() {
         return Err(errs);
     }
@@ -258,7 +302,12 @@ fn admit_inner(
         auth: raw.auth,
         setup: raw.setup,
         policy,
-        requests: raw.requests,
+        requests,
+        request_order,
+        warnings: warnings
+            .into_iter()
+            .map(|w| crate::util::terminal_safe(&w).into_owned())
+            .collect(),
         _gate: (),
     })
 }
@@ -438,7 +487,7 @@ fn is_valid_role(s: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// A name the console's consent grammar and `when` can address: `[A-Za-z0-9_]+`.
+/// A `[requests]` shape name: `[A-Za-z0-9_]+`.
 fn is_ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
@@ -866,155 +915,364 @@ fn redirect_uri_problem(uri: &str) -> Option<&'static str> {
 
 // ── [requests] ───────────────────────────────────────────────────────────────
 
-fn check_match_list(what: &str, patterns: &[String], errs: &mut Vec<String>) {
-    if !check_count(
-        &format!("{} match", what),
-        patterns.len(),
-        MAX_MATCH_PATTERNS,
-        errs,
-    ) {
-        return;
+/// The refusal of a 2.0 `match`, with its replacement spelled out.
+const MATCH_REPLACEMENT: &str = "`match` is not read; use method = \"DELETE\" and path = \"/v1/x/:id\" (a URL Pattern pathname: `:name` is one segment, a final `/*` the rest of the path)";
+
+/// The refusal of a 2.0 `when`, with its replacement spelled out.
+const WHEN_REPLACEMENT: &str = "`when` is not read; use condition = \"request.body.amount > 80\" (CEL over the request; guard a value a request may leave out with has(request.body.amount) && …)";
+
+/// The refusal of a 2.0 rule `body` regex, with its replacement spelled out.
+const BODY_REPLACEMENT: &str = "`body` (a regex) is not read; use condition = \"request.body.amount > 80\" (CEL over the request)";
+
+/// The refusal of a 2.0 `vars`, with its replacement spelled out.
+const VARS_REPLACEMENT: &str = "`vars` is not read; name each value by its request path in `scope`, `consent` and `condition` (\"request.body.amount\", \"request.query.force\", \"request.graphql.fields\"), and set the body format with body = \"json\" | \"form\" | \"graphql\" | \"text\"";
+
+/// The `contentEncoding` values a definition may declare (JSON Schema
+/// 2020-12 §8.3: RFC 4648's encodings and RFC 2045's).
+const CONTENT_ENCODINGS: &[&str] = &[
+    "base16",
+    "base32",
+    "base32hex",
+    "base64",
+    "base64url",
+    "quoted-printable",
+    "7bit",
+    "8bit",
+    "binary",
+];
+
+/// A rule's or a shape's `method` and `path` as written, checked and compiled.
+/// `None` when it has a problem (recorded). A 2.0 `match` is refused with the
+/// replacement spelled out. The count limit applies to the method × path
+/// pairs and is checked before anything is compiled.
+fn check_selector(
+    what: &str,
+    legacy: bool,
+    method: Option<OneOrMany>,
+    path: Option<OneOrMany>,
+    errs: &mut Vec<String>,
+) -> Option<Select> {
+    if legacy {
+        errs.push(format!("{}: {}", what, MATCH_REPLACEMENT));
+        return None;
     }
-    for p in patterns {
-        if let Some(problem) = match_pattern_problem(p) {
-            errs.push(format!("{}: {}", what, problem));
+    let methods = method.map(OneOrMany::into_vec);
+    let paths = path.map(OneOrMany::into_vec);
+    let pairs = methods
+        .as_ref()
+        .map_or(1, |m| m.len().max(1))
+        .saturating_mul(paths.as_ref().map_or(1, |p| p.len().max(1)));
+    if pairs > MAX_MATCH_PATTERNS {
+        errs.push(format!(
+            "{} has {} method × path pairs; the limit is {}",
+            what, pairs, MAX_MATCH_PATTERNS
+        ));
+        return None;
+    }
+    let mut ok = true;
+    if methods.as_ref().is_some_and(Vec::is_empty) {
+        errs.push(format!(
+            "{}: `method = []` lists no method; omit `method` for any method",
+            what
+        ));
+        ok = false;
+    }
+    if paths.as_ref().is_some_and(Vec::is_empty) {
+        errs.push(format!(
+            "{}: `path = []` lists no path; omit `path` for any path",
+            what
+        ));
+        ok = false;
+    }
+    for m in methods.iter().flatten().filter(|m| !is_method_token(m)) {
+        errs.push(format!(
+            "{}: method '{}' is not an HTTP method token (RFC 9110)",
+            what, m
+        ));
+        ok = false;
+    }
+    let mut compiled = Vec::new();
+    for p in paths.iter().flatten() {
+        if let Some(problem) = path_problem(p) {
+            errs.push(format!("{}: path '{}' {}", what, p, problem));
+            ok = false;
+            continue;
+        }
+        match PathPattern::compile(p) {
+            Ok(c) => compiled.push(c),
+            Err(e) => {
+                errs.push(format!("{}: path '{}' {}", what, p, e));
+                ok = false;
+            }
+        }
+    }
+    ok.then(|| Select::new(methods.unwrap_or_default(), compiled))
+}
+
+/// Whose condition is checked, for the warning that says what an unguarded
+/// read means.
+enum Decides {
+    /// A rule at this level.
+    Rule(Option<AccessLevel>),
+    /// A `[requests]` shape.
+    Shape,
+}
+
+/// Compile a `condition`, recording why it is refused, and a warning for each
+/// member read no presence test guards (what a request without the value
+/// gets, and the guard to write).
+fn check_condition(
+    what: &str,
+    source: &str,
+    decides: Decides,
+    errs: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Option<Condition> {
+    let condition = match Condition::compile(source) {
+        Ok(c) => c,
+        Err(why) => {
+            errs.push(format!(
+                "{}: condition = \"{}\" is not valid: {}",
+                what, source, why
+            ));
+            return None;
+        }
+    };
+    if matches!(decides, Decides::Shape)
+        && condition.reads().iter().any(|r| r.path.field == Field::Graphql)
+    {
+        errs.push(format!(
+            "{}: a [requests] condition can't read request.graphql (it is read once a shape has matched); read request.body",
+            what
+        ));
+        return None;
+    }
+    for path in condition.unguarded() {
+        let means = match &decides {
+            Decides::Shape => "a request without it doesn't match this shape".to_string(),
+            Decides::Rule(Some(AccessLevel::Allow) | None) => {
+                "this rule doesn't allow a request without it".to_string()
+            }
+            Decides::Rule(Some(AccessLevel::Deny)) => {
+                "a request without it is denied by this rule too".to_string()
+            }
+            Decides::Rule(Some(level)) => {
+                format!("a request without it is decided {} by this rule too", level)
+            }
+        };
+        warnings.push(format!(
+            "{}: the condition reads {} with no presence test: {}; guard it with {} && …",
+            what,
+            path,
+            means,
+            path.guard()
+        ));
+    }
+    Some(condition)
+}
+
+/// A request path a shape reads (`scope`, `consent`, an `encoded` key): a
+/// path into `request` with at least one field, `request.graphql` only in
+/// the `graphql` body format.
+fn check_path(what: &str, text: &str, format: BodyFormat, errs: &mut Vec<String>) -> Option<ReadPath> {
+    match ReadPath::parse(text) {
+        Ok(p) if p.field == Field::Graphql && format != BodyFormat::Graphql => {
+            errs.push(format!(
+                "{}: {} is read only with body = \"graphql\"",
+                what, p
+            ));
+            None
+        }
+        Ok(p) => Some(p),
+        Err(e) => {
+            errs.push(format!("{}: {}", what, e));
+            None
         }
     }
 }
 
-fn check_requests(requests: &HashMap<String, RequestShape>, errs: &mut Vec<String>) {
+/// Check every `[requests]` shape and compile it. The shapes that pass, and
+/// their names in declaration order (the order they are tried in); every
+/// problem is recorded.
+fn check_requests(
+    requests: HashMap<String, toml::Spanned<RawRequestShape>>,
+    errs: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> (HashMap<String, RequestShape>, Vec<String>) {
+    let mut out = HashMap::new();
     if !check_count("[requests]", requests.len(), MAX_REQUESTS, errs) {
-        return;
+        return (out, Vec::new());
     }
-    let mut names: Vec<&String> = requests.keys().collect();
-    names.sort();
-    for name in names {
-        let shape = &requests[name];
+    let mut shapes: Vec<(String, usize, RawRequestShape)> = requests
+        .into_iter()
+        .map(|(name, s)| {
+            let at = s.span().start;
+            (name, at, s.into_inner())
+        })
+        .collect();
+    shapes.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    let order: Vec<String> = shapes.iter().map(|(n, _, _)| n.clone()).collect();
+    for (name, _, shape) in shapes {
         let what = format!("[requests.{}]", name);
-        if !is_ident(name) {
+        let before = errs.len();
+        if !is_ident(&name) {
             errs.push(format!(
                 "{} is not a valid request name ([A-Za-z0-9_])",
                 what
             ));
         }
-        if shape.match_pattern.is_empty() {
-            errs.push(format!("{} declares no `match`", what));
+        if shape.vars.is_some() {
+            errs.push(format!("{}: {}", what, VARS_REPLACEMENT));
         }
-        check_match_list(&what, &shape.match_pattern, errs);
+        let select = check_selector(
+            &what,
+            shape.match_pattern.is_some(),
+            shape.method,
+            shape.path,
+            errs,
+        );
+        if select.as_ref().is_some_and(Select::is_every) {
+            errs.push(format!(
+                "{} selects every request; declare its `method` and `path`",
+                what
+            ));
+        }
+        let format = match shape.body.as_deref() {
+            None => BodyFormat::Json,
+            Some(f) => BodyFormat::parse(f).unwrap_or_else(|| {
+                errs.push(format!(
+                    "{}: body = \"{}\" is not a body format ({})",
+                    what,
+                    f,
+                    BodyFormat::NAMES.join(", ")
+                ));
+                BodyFormat::Json
+            }),
+        };
+        let condition = shape
+            .condition
+            .as_deref()
+            .and_then(|c| check_condition(&what, c, Decides::Shape, errs, warnings));
 
-        let vars_ok = check_count(&format!("{} vars", what), shape.vars.len(), MAX_VARS, errs);
-        let mut vars: Vec<&String> = shape.vars.keys().filter(|_| vars_ok).collect();
-        vars.sort();
-        for var in vars {
-            if !is_ident(var) {
-                errs.push(format!(
-                    "{} var '{}' is not a valid name ([A-Za-z0-9_])",
-                    what, var
-                ));
+        // scope: request paths, each once, and the token `request` for the
+        // whole request.
+        let scope_whole = shape
+            .scope
+            .iter()
+            .flatten()
+            .any(|e| e.trim() == "request");
+        let scope = shape.scope.map(|entries| {
+            if !check_count(&format!("{} scope", what), entries.len(), MAX_SCOPE, errs) {
+                return Vec::new();
             }
-            // `vars.<shape>.<name>` reads one shape's var, so a var named
-            // like a shape would be shadowed by it in a `when`.
-            if requests.contains_key(var) {
-                errs.push(format!(
-                    "{} var '{}' has the name of a [requests] shape; rename one",
-                    what, var
-                ));
-            }
-            // A body address is an RFC 6901 pointer (leading '/'); a query
-            // `at` is non-empty.
-            match &shape.vars[var] {
-                VarDef::BodyPointer(p) => check_pointer(&what, var, p, errs),
-                VarDef::Located(at) => match at.location {
-                    crate::service::VarLoc::Body => check_pointer(&what, var, &at.at, errs),
-                    crate::service::VarLoc::Query => {
-                        if at.at.is_empty() {
-                            errs.push(format!("{} var '{}' query `at` is empty", what, var));
-                        }
+            let mut paths: Vec<ReadPath> = Vec::new();
+            for entry in entries.iter().filter(|e| e.trim() != "request") {
+                if let Some(p) = check_path(&format!("{} scope", what), entry, format, errs) {
+                    if paths.contains(&p) {
+                        errs.push(format!("{} scope lists {} more than once", what, p));
+                    } else {
+                        paths.push(p);
                     }
-                    crate::service::VarLoc::Graphql => {
-                        if !crate::service::GRAPHQL_AT.contains(&at.at.as_str()) {
+                }
+            }
+            paths
+        });
+
+        let consent_reads = match &shape.consent {
+            Some(consent) => check_consent(&what, consent, format, errs),
+            None => Vec::new(),
+        };
+
+        let mut encoded = std::collections::BTreeMap::new();
+        if let Some(entries) = shape.encoded {
+            if check_count(&format!("{} encoded", what), entries.len(), MAX_SCOPE, errs) {
+                for (key, e) in entries {
+                    let at = format!("{} encoded.\"{}\"", what, key);
+                    let Some(path) = check_path(&format!("{} encoded", what), &key, format, errs)
+                    else {
+                        continue;
+                    };
+                    if path.steps.is_empty() && path.field != Field::Body {
+                        errs.push(format!("{}: names no value that carries media", at));
+                    }
+                    if e.content_encoding.is_none() && e.content_media_type.is_none() {
+                        errs.push(format!(
+                            "{}: declares neither contentEncoding nor contentMediaType",
+                            at
+                        ));
+                    }
+                    if let Some(enc) = &e.content_encoding {
+                        if !CONTENT_ENCODINGS.contains(&enc.as_str()) {
                             errs.push(format!(
-                                "{} var '{}' graphql `at` must be one of {}",
-                                what,
-                                var,
-                                crate::service::GRAPHQL_AT.join(", ")
+                                "{}: contentEncoding \"{}\" is unknown ({})",
+                                at,
+                                enc,
+                                CONTENT_ENCODINGS.join(", ")
                             ));
                         }
                     }
-                },
-            }
-        }
-
-        // scope ⊆ vars: only a declared field can be bound. No duplicates: a
-        // repeated entry makes the approve digest (object, deduped) and the
-        // redeem digest (vec) disagree.
-        let scope_ok = check_count(
-            &format!("{} scope", what),
-            shape.scope.len(),
-            MAX_SCOPE,
-            errs,
-        );
-        let mut seen_scope = HashSet::new();
-        for k in shape.scope.iter().filter(|_| scope_ok) {
-            if !shape.vars.contains_key(k) {
-                errs.push(format!(
-                    "{} scope names '{}', which is not a declared var",
-                    what, k
-                ));
-            }
-            if !seen_scope.insert(k) {
-                errs.push(format!("{} scope lists '{}' more than once", what, k));
-            }
-        }
-
-        if let Some(consent) = &shape.consent {
-            check_consent(&what, consent, shape, errs);
-        }
-    }
-}
-
-fn check_pointer(what: &str, var: &str, p: &str, errs: &mut Vec<String>) {
-    if !p.starts_with('/') {
-        errs.push(format!(
-            "{} var '{}' body address '{}' must be a JSON Pointer (start with '/')",
-            what, var, p
-        ));
-    }
-}
-
-/// A consent template is literal text and `{{ vars.<name> }}` or
-/// `{{ vars.<name> | <filter> }}` tokens, nothing else. Every referenced var
-/// must be in `scope` (P4 show ⊆ bind) and every filter one the console
-/// implements ([`CONSENT_FILTERS`]).
-fn check_consent(what: &str, template: &str, shape: &RequestShape, errs: &mut Vec<String>) {
-    let scope = &shape.scope;
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        let after = &rest[start + 2..];
-        let Some(end) = after.find("}}") else {
-            errs.push(format!("{} consent has an unclosed '{{{{'", what));
-            return;
-        };
-        let inner = after[..end].trim();
-        let (expr, filter) = match inner.split_once('|') {
-            Some((e, f)) => (e.trim(), Some(f.trim())),
-            None => (inner, None),
-        };
-        match expr.strip_prefix("vars.") {
-            Some(var) if is_ident(var) => {
-                if !scope.iter().any(|k| k == var) {
-                    errs.push(format!(
-                        "{} consent references '{{{}}}', which is not in `scope` (show ⊆ bind)",
-                        what, var
-                    ));
+                    if let Some(media) = &e.content_media_type {
+                        if media.parse::<mime::Mime>().is_err() {
+                            errs.push(format!(
+                                "{}: contentMediaType \"{}\" is not a media type",
+                                at, media
+                            ));
+                        }
+                    }
+                    encoded.insert(
+                        path.to_string(),
+                        Encoded {
+                            content_encoding: e.content_encoding,
+                            content_media_type: e.content_media_type,
+                        },
+                    );
                 }
             }
-            _ => errs.push(format!(
-                "{} consent token '{{{{ {} }}}}' must be {{{{ vars.<name> }}}} or {{{{ vars.<name> | <filter> }}}}",
-                what, inner
-            )),
         }
-        if let Some(f) = filter {
+
+        if let (Some(select), true) = (select, errs.len() == before) {
+            out.insert(
+                name,
+                RequestShape {
+                    select,
+                    condition,
+                    format,
+                    scope,
+                    scope_whole,
+                    consent: shape.consent,
+                    consent_reads,
+                    encoded,
+                },
+            );
+        }
+    }
+    (out, order)
+}
+
+/// A consent template is literal text and `{{ request.<path> }}` or
+/// `{{ request.<path> | <filter> }}` tokens, nothing else. Every filter is one
+/// the console implements ([`CONSENT_FILTERS`]); `graphql` reads only
+/// `request.graphql.calls`. The paths it reads, which an approval binds.
+fn check_consent(
+    what: &str,
+    template: &str,
+    format: BodyFormat,
+    errs: &mut Vec<String>,
+) -> Vec<ReadPath> {
+    let refs = match crate::service::consent_refs(template) {
+        Ok(refs) => refs,
+        Err(e) => {
+            errs.push(format!("{} consent has {}", what, e));
+            return Vec::new();
+        }
+    };
+    let calls = ReadPath::new(Field::Graphql, vec![Step::Key("calls".into())]);
+    let mut paths = Vec::new();
+    for r in refs {
+        let Some(path) = check_path(&format!("{} consent", what), &r.path, format, errs) else {
+            continue;
+        };
+        if let Some(f) = r.filter.as_deref() {
             if !CONSENT_FILTERS.contains(&f) {
                 errs.push(format!(
                     "{} consent filter '{}' is unknown (known: {})",
@@ -1025,24 +1283,18 @@ fn check_consent(what: &str, template: &str, shape: &RequestShape, errs: &mut Ve
             }
             // `graphql` shows a list of calls, so it reads only the calls a
             // GraphQL request makes, never a field the agent writes freely.
-            let is_calls = |var: &str| {
-                matches!(
-                    shape.vars.get(var),
-                    Some(crate::service::VarDef::Located(crate::service::VarAt {
-                        location: crate::service::VarLoc::Graphql,
-                        at,
-                    })) if at == "calls"
-                )
-            };
-            if f == "graphql" && !expr.strip_prefix("vars.").is_some_and(is_calls) {
+            if f == "graphql" && path != calls {
                 errs.push(format!(
-                    "{} consent filter 'graphql' reads only a `{{ in = \"graphql\", at = \"calls\" }}` var",
-                    what
+                    "{} consent filter 'graphql' reads only {}",
+                    what, calls
                 ));
             }
         }
-        rest = &after[end + 2..];
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
     }
+    paths
 }
 
 // ── Policy ───────────────────────────────────────────────────────────────────
@@ -1091,7 +1343,11 @@ fn is_valid_rule_id(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-fn policy_from_file(file: RawPolicyFile, errs: &mut Vec<String>) -> ServicePolicy {
+fn policy_from_file(
+    file: RawPolicyFile,
+    errs: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> ServicePolicy {
     let defaults = file
         .default
         .as_ref()
@@ -1102,15 +1358,6 @@ fn policy_from_file(file: RawPolicyFile, errs: &mut Vec<String>) -> ServicePolic
             rules: Vec::new(),
         };
     }
-    // Body rules are capped on their own: each is a regex compiled at load
-    // and matched against every request body the rule's paths see.
-    let body_rules = file.rule.iter().filter(|r| r.body.is_some()).count();
-    let bodies_ok = check_count(
-        "policy.toml rules with a body",
-        body_rules,
-        MAX_BODY_RULES,
-        errs,
-    );
     let mut seen_ids = HashSet::new();
     let mut rules = Vec::with_capacity(file.rule.len());
     for r in file.rule {
@@ -1124,10 +1371,22 @@ fn policy_from_file(file: RawPolicyFile, errs: &mut Vec<String>) -> ServicePolic
         if r.label.trim().is_empty() {
             errs.push(format!("{}: the label must not be empty", what));
         }
-        check_match_list(&what, &r.match_pattern, errs);
-        if r.match_pattern.is_empty() && r.body.is_none() && r.when.is_none() {
+        let select = check_selector(
+            &what,
+            r.match_pattern.is_some(),
+            r.method,
+            r.path,
+            errs,
+        );
+        if r.when.is_some() {
+            errs.push(format!("{}: {}", what, WHEN_REPLACEMENT));
+        }
+        if r.body.is_some() {
+            errs.push(format!("{}: {}", what, BODY_REPLACEMENT));
+        }
+        if select.as_ref().is_some_and(Select::is_every) && r.condition.is_none() {
             errs.push(format!(
-                "{}: `match = []` with no body or when matches every request; list what it matches (a level for every request is [default])",
+                "{}: with no `method`, `path` or `condition`, it matches every request; list what it matches (a level for every request is [default])",
                 what
             ));
         }
@@ -1142,31 +1401,15 @@ fn policy_from_file(file: RawPolicyFile, errs: &mut Vec<String>) -> ServicePolic
                 None
             }
         };
-        let body =
-            r.body
-                .as_deref()
-                .filter(|_| bodies_ok)
-                .and_then(|b| match BodyPattern::compile(b) {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        errs.push(format!("{}: body regex {}", what, e));
-                        None
-                    }
-                });
-        if let Some(w) = &r.when {
-            if let Err(why) = Condition::compile(w) {
-                errs.push(format!(
-                    "{}: `when = \"{}\"` is not a valid CEL condition: {}",
-                    what, w, why
-                ));
-            }
-        }
+        let condition = r
+            .condition
+            .as_deref()
+            .and_then(|c| check_condition(&what, c, Decides::Rule(level), errs, warnings));
         rules.push(PolicyRule {
             id: Some(r.id),
             label: Some(r.label),
-            match_patterns: r.match_pattern,
-            body,
-            when: r.when,
+            select: select.unwrap_or_default(),
+            condition,
             level,
             ttl: r.ttl,
         });
@@ -1198,154 +1441,36 @@ fn policy_from_inline(inline: &RawInlinePolicy, errs: &mut Vec<String>) -> Servi
             errs.push(format!("{}: declares no path_exact", what));
             continue;
         };
-        let path = path.trim_end_matches('/');
-        let pattern = match &r.method {
-            Some(m) => format!("{} {}", m, path),
-            None => path.to_string(),
-        };
         if r.method
             .as_deref()
             .is_some_and(|m| m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphabetic()))
         {
             errs.push(format!("{}: method must be letters (e.g. DELETE)", what));
         }
-        if let Some(problem) = match_pattern_problem(&pattern) {
-            errs.push(format!("{}: {}", what, problem));
-        }
+        // `path_exact` is that one path: a literal pattern, without the
+        // trailing `/` no request path keeps.
+        let exact = match path.trim_end_matches('/') {
+            "" => "/",
+            trimmed => trimmed,
+        };
+        let select = match PathPattern::compile(&literal_pattern(exact)) {
+            Ok(p) => Select::new(r.method.iter().cloned().collect(), vec![p]),
+            Err(e) => {
+                errs.push(format!("{}: path_exact '{}' {}", what, path, e));
+                Select::every()
+            }
+        };
         let level = parse_level(&what, &r.level, errs);
         rules.push(PolicyRule {
             id: None,
             label: None,
-            match_patterns: vec![pattern],
-            body: None,
-            when: None,
+            select,
+            condition: None,
             level,
             ttl: None,
         });
     }
     ServicePolicy { defaults, rules }
-}
-
-/// Cross-checks of the policy against the paired `[requests]` shapes, the
-/// invariant that a field deciding an approval must be bound by it. A shape
-/// covers a rule when their `match` patterns overlap (a rule with no `match`
-/// overlaps every shape); a request the rule matches resolves its vars from
-/// one of the covering shapes.
-///   - A `when` on `vars.<name>`: at least one shape covers the rule, and
-///     every covering shape declares `<name>` and lists it in `scope`, so the
-///     var resolves, and is held fixed by the approval, whichever covering
-///     shape a request resolves to (else an ask-always approved at one value
-///     could be redeemed at another).
-///   - A `when` on `vars.<shape>.<name>`: that shape covers the rule,
-///     declares `<name>` and lists it in `scope`.
-///   - No `ask` / `ask-always` rule decides on the `body` on a path a shape
-///     covers (an approval there binds only the shape's `scope` fields).
-fn check_rules_against_requests(
-    rules: &[PolicyRule],
-    requests: &HashMap<String, RequestShape>,
-    errs: &mut Vec<String>,
-) {
-    let mut shapes: Vec<(&String, &RequestShape)> = requests.iter().collect();
-    shapes.sort_by_key(|(n, _)| *n);
-    for (i, rule) in rules.iter().enumerate() {
-        let what = match &rule.id {
-            Some(id) => format!("rule '{}'", id),
-            None => format!("[[policy.rules]] #{}", i + 1),
-        };
-        let covering: Vec<(&String, &RequestShape)> = shapes
-            .iter()
-            .copied()
-            .filter(|(_, shape)| shape_covers_rule(shape, rule))
-            .collect();
-        if let Some(cond) = rule.when.as_deref().and_then(Condition::parse) {
-            for var in cond.var_names() {
-                check_when_var(&what, var, requests, &covering, errs);
-            }
-        }
-        if rule.body.is_some()
-            && matches!(rule.level, Some(AccessLevel::Ask | AccessLevel::AskAlways))
-        {
-            for (name, _) in &covering {
-                errs.push(format!(
-                    "{}: decides an ask on the request body on a path [requests.{}] covers, where an approval binds only the shape's `scope` fields; gate it with `when` on a bound field instead",
-                    what, name
-                ));
-            }
-        }
-    }
-}
-
-/// Could a request match both `rule` and `shape`? A rule with no `match`
-/// applies to every path.
-fn shape_covers_rule(shape: &RequestShape, rule: &PolicyRule) -> bool {
-    rule.match_patterns.is_empty()
-        || rule.match_patterns.iter().any(|rp| {
-            shape
-                .match_pattern
-                .iter()
-                .any(|sp| patterns_overlap(rp, sp))
-        })
-}
-
-/// The `when` var rules of [`check_rules_against_requests`]. `covering` is
-/// the shapes that cover the rule, sorted by name.
-fn check_when_var(
-    what: &str,
-    var: &str,
-    requests: &HashMap<String, RequestShape>,
-    covering: &[(&String, &RequestShape)],
-    errs: &mut Vec<String>,
-) {
-    let binds = |s: &RequestShape, name: &str| s.scope.iter().any(|k| k == name);
-    match var.split_once('.') {
-        // `vars.<shape>.<name>`: that shape covers the rule, declares and
-        // binds the var.
-        Some((shape, name)) => match requests.get(shape) {
-            _ if !is_ident(shape) || !is_ident(name) => errs.push(format!(
-                "{}: `when` var '{}' must be `vars.<name>` or `vars.<shape>.<name>`",
-                what, var
-            )),
-            None => errs.push(format!(
-                "{}: `when` names shape '{}', which is not a [requests] shape",
-                what, shape
-            )),
-            Some(s) if !s.vars.contains_key(name) => errs.push(format!(
-                "{}: `when` references var '{}', which [requests.{}] does not declare",
-                what, name, shape
-            )),
-            Some(s) if !binds(s, name) => errs.push(format!(
-                "{}: `when` gates on var '{}', which [requests.{}] does not bind; a deciding field must be bound (add it to scope)",
-                what, name, shape
-            )),
-            Some(_) if !covering.iter().any(|(n, _)| n.as_str() == shape) => {
-                errs.push(format!(
-                    "{}: `when` gates on `vars.{}`, but [requests.{}] does not cover the rule's `match`, so the var never resolves there",
-                    what, var, shape
-                ))
-            }
-            Some(_) => {}
-        },
-        // `vars.<name>`: every covering shape declares and binds it.
-        None if covering.is_empty() => errs.push(format!(
-            "{}: `when` gates on var '{}', but no [requests] shape covers the rule's `match`, so no request it matches carries vars; declare a shape for these paths or drop the `when`",
-            what, var
-        )),
-        None => {
-            for (n, s) in covering {
-                if !s.vars.contains_key(var) {
-                    errs.push(format!(
-                        "{}: `when` references var '{}', which [requests.{}] does not declare; every shape covering the rule's `match` must declare and bind it",
-                        what, var, n
-                    ));
-                } else if !binds(s, var) {
-                    errs.push(format!(
-                        "{}: `when` gates on var '{}', which [requests.{}] does not bind; every shape covering the rule's `match` must bind a deciding field (add it to scope)",
-                        what, var, n
-                    ));
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

@@ -21,15 +21,16 @@ write = "allow"
 # Small-value convenience, big-value confirmation — the contactless-payment
 # social norm (no-verification ceilings: US ~$100, EU €50, UK £100). A purchase
 # at or under the threshold is `ask` (approve once, then a reuse window), and
-# it is BOUND to its exact order, payment and delivery (service.toml
-# `[requests.purchase]`), so approving a $40 gift card can't be ridden by a
-# $75 bill payment or a gift to someone else (a different value re-prompts). Over the threshold
+# it covers the whole request (service.toml `[requests.purchase]`), so
+# approving a $40 gift card can't be ridden by a $75 bill payment or a gift
+# to someone else (a different value re-prompts). Over the threshold
 # escalates to `ask-always` (every spend confirmed, single-use). To make even
 # small purchases frictionless (no tap at all), set this base to `allow`.
 [[rule]]
 id = "purchase"
 label = "Buy a gift card or pay a bill (spends wallet balance)"
-match = "POST /v2/purchase"
+method = "POST"
+path = "/v2/purchase"
 level = "ask"
 
 # Over the small-value ceiling, confirm every spend. Composes by most-
@@ -40,8 +41,9 @@ level = "ask"
 [[rule]]
 id = "purchase-large"
 label = "Confirm a purchase over $100"
-match = "POST /v2/purchase"
-when = "!has(vars.price) || type(vars.price) != string || !vars.price.matches('^[0-9]{1,8}([.][0-9]{1,2})?$') || double(vars.price) > 100.0"
+method = "POST"
+path = "/v2/purchase"
+condition = "!has(request.body.orderInfo) || !has(request.body.orderInfo.item) || !has(request.body.orderInfo.item.price) || type(request.body.orderInfo.item.price) != string || !request.body.orderInfo.item.price.matches('^[0-9]{1,8}([.][0-9]{1,2})?$') || double(request.body.orderInfo.item.price) > 100.0"
 level = "ask-always"
 
 # A P2P transfer sends wallet balance to a phone number: confirm every one,
@@ -49,5 +51,6 @@ level = "ask-always"
 [[rule]]
 id = "transfer"
 label = "Send money to a phone number"
-match = "POST /v2/transfers"
+method = "POST"
+path = "/v2/transfers"
 level = "ask-always"

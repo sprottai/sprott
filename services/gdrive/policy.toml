@@ -1,15 +1,58 @@
+# Google Drive policy. Creating, editing, moving, copying, trashing and
+# sharing files with named people go through. Asks before a file goes public,
+# to anyone with the link or a whole domain, changes owner, is published to
+# the web, or is deleted for good. `share-file` is a switch at "allow": set it
+# to "ask-always" to approve every share. See docs/POLICY.md.
+
 [default]
-read = "ask"
-write = "ask-always"
+read = "allow"
+write = "allow"
 
 [[rule]]
 id = "list-files"
 label = "List files"
-match = "GET /drive/v3/files"
+method = "GET"
+path = ["/drive/v3/files", "/drive/v2/files"]
+level = "allow"
+
+# `:file` also matches `trash`, so emptying the trash asks too.
+[[rule]]
+id = "delete-file"
+label = "Delete a file permanently (skips Trash) or empty the trash"
+method = "DELETE"
+path = ["/drive/v3/files/:file", "/drive/v2/files/:file"]
+level = "ask-always"
+
+[[rule]]
+id = "share-file"
+label = "Share a file with a person or group, or change someone's access"
+method = ["POST", "PUT", "PATCH"]
+path = [
+  "/drive/v3/files/:file/permissions",
+  "/drive/v3/files/:file/permissions/:permission",
+  "/drive/v2/files/:file/permissions",
+  "/drive/v2/files/:file/permissions/:permission",
+  "/drive/v3/files/:file/accessproposals/*",
+]
 level = "allow"
 
 [[rule]]
-id = "delete-file"
-label = "Delete file"
-match = "DELETE /drive/v3/files/*"
+id = "share-public"
+label = "Make a file public, open to anyone with the link or a whole domain, or hand over ownership"
+method = ["POST", "PUT", "PATCH"]
+path = [
+  "/drive/v3/files/:file/permissions",
+  "/drive/v3/files/:file/permissions/:permission",
+  "/drive/v2/files/:file/permissions",
+  "/drive/v2/files/:file/permissions/:permission",
+]
+condition = "has(request.body.type) && (string(request.body.type) == 'anyone' || string(request.body.type) == 'domain') || has(request.body.role) && string(request.body.role) == 'owner' || has(request.body.pendingOwner) && string(request.body.pendingOwner) == 'true'"
+level = "ask-always"
+
+[[rule]]
+id = "publish-to-web"
+label = "Publish a Google Doc to the web"
+method = ["PATCH", "PUT"]
+path = ["/drive/v3/files/:file/revisions/:revision", "/drive/v2/files/:file/revisions/:revision"]
+condition = "has(request.body.published) && string(request.body.published) == 'true' || has(request.body.publishedOutsideDomain) && string(request.body.publishedOutsideDomain) == 'true'"
 level = "ask-always"

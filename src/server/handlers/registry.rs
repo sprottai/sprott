@@ -195,6 +195,11 @@ pub struct RegistryConnection {
     /// agent-facing proxy surface; the console never sees it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// The user rules on this connection the daemon refuses (the connection
+    /// asks every time; a refused `deny` denies it) or doesn't apply, and
+    /// why (DESIGN §2). Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rule_notes: Vec<crate::core::policy::RuleNote>,
 }
 
 #[derive(Debug, Serialize)]
@@ -219,19 +224,30 @@ pub struct RegistryPolicyDefaults {
 pub struct RegistryPolicyRule {
     pub id: String,
     pub label: String,
-    /// Single pattern serializes as a bare string (registry.json stays stable for
-    /// one-match rules); a list serializes as a list (OR — see core `PolicyRule`).
+    /// Which requests the rule decides: `method` AND `path` (a URL Pattern
+    /// pathname), each a bare string when it holds one, a list (any of) when
+    /// several, omitted when absent (any).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "crate::core::selector::serialize_one_or_many"
+    )]
+    pub method: Vec<String>,
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "crate::core::selector::serialize_one_or_many"
+    )]
+    pub path: Vec<String>,
+    /// Display only, for consoles that read the 2.0 `match`: each method ×
+    /// path as `"METHOD path"`, a bare string when one, else a list.
     #[serde(
         rename = "match",
-        serialize_with = "crate::core::policy::match_spec::serialize"
+        serialize_with = "crate::core::selector::serialize_one_or_many"
     )]
     pub match_pattern: Vec<String>,
+    /// The rule's condition, CEL over the request
+    /// (`"has(request.body.amount) && request.body.amount > 80"`), as written.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    /// Structured field condition (`"vars.amount > 80"`) — surfaced so the
-    /// console can show it beside the rule and offer it as an override.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub when: Option<String>,
+    pub condition: Option<String>,
     /// The built-in access decision (`allow` | `ask` | `ask-always` | `deny`)
     /// the recipe declares for this action. The console shows it and lets the
     /// user override it per-connection.
@@ -303,9 +319,10 @@ fn policy_for(def: &ServiceDef, include_rules: bool) -> Option<RegistryServicePo
             .map(|r| RegistryPolicyRule {
                 id: r.id.clone().unwrap_or_default(),
                 label: r.label.clone().unwrap_or_default(),
-                match_pattern: r.match_patterns.clone(),
-                body: r.body.as_ref().map(|b| b.as_str().to_string()),
-                when: r.when.clone(),
+                method: r.select.methods().to_vec(),
+                path: r.select.paths(),
+                match_pattern: r.select.display(),
+                condition: r.condition.as_ref().map(|c| c.as_str().to_string()),
                 level: level(r.level),
                 ttl: r.ttl,
             })
@@ -442,6 +459,7 @@ fn build_connection(
         phantoms: if summary { Vec::new() } else { phantoms },
         needs_reauth: None,
         locked: None,
+        rule_notes: Vec::new(),
     }
 }
 
@@ -527,12 +545,13 @@ pub fn vault_registry_value(
     // Snapshot native_keys + connections + custom services + lock state under the
     // mutex, then drop it before rendering.
     #[allow(clippy::type_complexity)]
-    let (native_keys, external_keys, custom_services, connections, locked): (
+    let (native_keys, external_keys, custom_services, connections, locked, mut notes): (
         HashSet<String>,
         HashSet<String>,
         Vec<(String, ServiceDef)>,
         std::collections::HashMap<String, Connection>,
         bool,
+        std::collections::HashMap<String, Vec<crate::core::policy::RuleNote>>,
     ) = {
         if let Some(gone) = state.vault_gone_error(vault_id) {
             return Err(gone);
@@ -547,12 +566,23 @@ pub fn vault_registry_value(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 custom.sort_by(|a, b| a.0.cmp(&b.0));
+                let notes = snapshot
+                    .connections
+                    .iter()
+                    .map(|(id, c)| {
+                        let service = c.service.as_deref().unwrap_or(id);
+                        let notes = snapshot.inputs.rule_notes(&state.services, id, service);
+                        (id.clone(), notes)
+                    })
+                    .filter(|(_, n)| !n.is_empty())
+                    .collect();
                 (
                     snapshot.native_names().cloned().collect(),
                     state.external_key_names(vault_id),
                     custom,
                     snapshot.connections.clone(),
                     false,
+                    notes,
                 )
             }
             None => (
@@ -561,6 +591,7 @@ pub fn vault_registry_value(
                 Vec::new(),
                 std::collections::HashMap::new(),
                 true,
+                std::collections::HashMap::new(),
             ),
         }
     };
@@ -631,6 +662,7 @@ pub fn vault_registry_value(
             if row.connected && state.oauth_needs_reauth(vault_id, conn_id) {
                 row.needs_reauth = Some(true);
             }
+            row.rule_notes = notes.remove(conn_id).unwrap_or_default();
             conn_rows.push(row);
         }
         conn_rows.sort_by(|a, b| a.id.cmp(&b.id));
@@ -649,6 +681,7 @@ pub fn vault_registry_value(
                         row.secrets = None;
                         row.phantoms.clear();
                         row.needs_reauth = None;
+                        row.rule_notes.clear();
                         row.connected = false;
                         row.locked = Some(true);
                     }
@@ -725,6 +758,38 @@ refresh_token = "REFRESH_TOKEN"
         assert_eq!(d.client_id, "acme-public");
         // The descriptor mirrors the def 1:1 — token_url rides too.
         assert_eq!(d.token_url.as_deref(), Some("https://auth.acme.dev/token"));
+    }
+
+    /// A catalog rule carries `method` and `path`, and the `match` text the
+    /// current console renders: each method × path as `"METHOD path"`.
+    #[test]
+    fn catalog_rules_carry_method_path_and_a_display_match() {
+        let services = crate::service::ServiceRegistry::load();
+        let github = services.get("github").expect("github");
+        let policy = policy_for(github, true).expect("policy");
+        let rules = serde_json::to_value(policy.rules.expect("rules")).unwrap();
+        let rule = |id: &str| {
+            rules
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        let delete = rule("delete-repo");
+        assert_eq!(delete["method"], serde_json::json!("DELETE"));
+        assert_eq!(
+            delete["path"],
+            serde_json::json!(["/repos/:owner/:repo", "/repositories/:repository_id"])
+        );
+        assert_eq!(
+            delete["match"],
+            serde_json::json!(["DELETE /repos/:owner/:repo", "DELETE /repositories/:repository_id"])
+        );
+        let graphql = rule("graphql-gated-mutations");
+        assert_eq!(graphql["path"], serde_json::json!("/graphql"));
+        assert_eq!(graphql["match"], serde_json::json!("POST /graphql"));
     }
 
     #[test]

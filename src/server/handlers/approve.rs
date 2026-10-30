@@ -225,7 +225,7 @@ fn assert_signed_level(
     let expected = crate::approval::Reuse::of(
         pc.level,
         &pc.decided_by,
-        crate::approval::reuse::is_scoped(scope),
+        crate::approval::reuse::scoped(scope),
         method,
     )
     .ok_or("a deny-level op has nothing to approve")?;
@@ -669,6 +669,7 @@ fn verify_grant_identity(
     grant: &Grant,
     stored_op: &crate::protocol::operation::Operation,
     stored_r: &str,
+    card_mac: Option<&[u8; 32]>,
 ) -> Result<String> {
     let invalid = |m: &str| AppError::GrantIdInvalid(m.to_string());
     let id = grant
@@ -706,8 +707,14 @@ fn verify_grant_identity(
         &serde_json::to_value(stored_op)?,
     )?;
     let sc_pk = state.sc.pk_bytes();
-    let input =
+    let mut input =
         crate::identity::grant_id_input(vault_id, op_id, &beta, &cid, &k_enc, &k_ct, &sc_pk, id);
+    // An op with a sealed approval card: the signature must cover the card as
+    // the approver opened it (design §5), so a console that never opened it,
+    // or opened another, can't approve.
+    if let Some(mac) = card_mac {
+        input = crate::identity::with_card_binding(input, mac);
+    }
     let certifies =
         |pk: &[u8; 32]| crate::identity::derive_id(crate::identity::IdKind::User, pk) == id;
     let sig_pub = paired_account_pub()
@@ -1023,6 +1030,7 @@ pub async fn approve_op(
         &grant,
         &approval_op,
         &stored_r,
+        stored_pc.as_ref().and_then(|pc| pc.card.as_ref()).map(|c| &c.mac),
     )
     .map_err(refuse)?;
     check_approval_authority(existing_per_item.as_ref(), &vault_id, &signer).map_err(refuse)?;
@@ -2267,8 +2275,8 @@ pub async fn approve_op(
 ///     permit for the approved request and its tier, redeemable for
 ///     [`crate::state::ASK_ALWAYS_REPLAY_WINDOW_SECS`] (the replay deadline,
 ///     not a reuse window).
-///   - `exact` (scoped ask): a window for the request, its bound values and
-///     unit, for the policy window.
+///   - `exact` (scoped ask): a window for the request, what its approval
+///     covers and its unit, for the policy window.
 ///   - `rule` / `floor`: a window for the approving agent, connection, host
 ///     and unit, for the policy window.
 ///
@@ -2304,21 +2312,21 @@ pub(crate) fn plan_use_grant(
     if conn.is_empty() || host.is_empty() {
         return None;
     }
-    // Phase 2: the bound `[requests]` values the proxy stamped into
-    // `scope.scope_vars` (and the passkey signed) fold into the permit
-    // identity, rebuilt as the SAME sorted pairs the replay re-extracts from
-    // the live request. Empty (no requests shape, or none resolved) ⇒ `""`.
-    let scope_digest = crate::service::scope_digest(&crate::approval::reuse::bound_values(scope));
+    // The permit identity the daemon computed at mint from what the
+    // approval covers, kept in the record (never in the op the relay
+    // carries); the replay recomputes it from the live request. An op minted
+    // without one keys nothing a request redeems.
+    let identity = p.identity.clone().unwrap_or_default();
     let key = crate::state::PermitKey::of(
         p.level,
         &p.decided_by,
-        crate::approval::reuse::is_scoped(scope),
+        crate::approval::reuse::scoped(scope),
         agent,
         conn,
         method,
         &host,
         path,
-        &scope_digest,
+        &identity,
         credentials,
     )?;
     // A request-bound permit is keyed by the exact request the user saw:
@@ -2333,11 +2341,16 @@ pub(crate) fn plan_use_grant(
     } else {
         p.ttl_seconds
     };
+    let approved = key.single_use().then(|| crate::state::Approved {
+        at: now,
+        components: identity.components.clone(),
+    });
     Some(DeferredGrant {
         vault_id: vault_id.to_string(),
         window_fp: if key.single_use() { None } else { p.policy_fp },
         key,
         expires_at: now + window,
+        approved,
     })
 }
 
@@ -2349,11 +2362,19 @@ pub(crate) struct DeferredGrant {
     expires_at: u64,
     /// For a window: the policy fingerprint the op was minted under.
     window_fp: Option<[u8; 32]>,
+    /// For a single-use permit: the request it was approved for.
+    approved: Option<crate::state::Approved>,
 }
 
 impl DeferredGrant {
     fn write(self, state: &AppState) {
-        let stored = state.permit_insert(&self.vault_id, self.key, self.expires_at, self.window_fp);
+        let stored = state.permit_insert_approved(
+            &self.vault_id,
+            self.key,
+            self.expires_at,
+            self.window_fp,
+            self.approved,
+        );
         if !stored {
             tracing::info!(vault = %self.vault_id, "use approved: no permit stored (the vault is locked, or its policy changed since the request); the replay asks again");
         }
@@ -3256,6 +3277,8 @@ mod tests {
             host: Some("api.github.com".into()),
             credentials: None,
             policy_fp: None,
+            card: None,
+            identity: None,
         }
     }
 
@@ -3641,10 +3664,9 @@ mod tests {
     fn reuse_policy() -> crate::core::policy::Policy {
         use crate::core::policy::{AccessLevel, ConnectionPolicy, Levels, Policy, RuleConfig};
         let rule = |pat: &str, level: AccessLevel, ttl: Option<u64>| RuleConfig {
-            match_pattern: Some(pat.to_string()),
             level: Some(level),
             ttl,
-            ..Default::default()
+            ..RuleConfig::selecting(pat)
         };
         let mut rules = std::collections::HashMap::new();
         rules.insert(
@@ -3683,7 +3705,7 @@ mod tests {
                     write: Some(AccessLevel::Ask),
                     ttl: Some(300),
                 }),
-                rules,
+                rules: rules.into(),
             },
         );
         p
@@ -3715,15 +3737,9 @@ mod tests {
         u64,
     ) {
         let inputs = state.snapshot(RV).expect("unlocked").inputs.clone();
-        let (l, by, t) = state.evaluate_request_decision(
-            &inputs,
-            RC,
-            RC,
-            method,
-            path,
-            None,
-            &crate::core::policy::VarMap::new(),
-        );
+        let (l, by, t) = state
+            .evaluate_request_decision(&inputs, RC, RC, &crate::core::request::Request::bare(method, path))
+            .unwrap();
         (l, by, t.unwrap_or(900))
     }
 
@@ -3754,13 +3770,6 @@ mod tests {
         );
         if scope_shape {
             scope["scoped"] = json!(true);
-            if !bound.is_empty() {
-                let m: serde_json::Map<String, Value> = bound
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), json!(v)))
-                    .collect();
-                scope["scope_vars"] = Value::Object(m);
-            }
         }
         let window = crate::approval::Reuse::of(level, &decided_by, scope_shape, method)
             .and_then(|r| r.window(ttl))
@@ -3773,6 +3782,8 @@ mod tests {
             host: Some(RH.into()),
             credentials: Some(creds()),
             policy_fp: if window { fingerprint } else { None },
+            card: None,
+            identity: Some(identity_of(bound)),
         };
         assert_signed_level(&scope, Some(&pc)).expect("stamp passes the apply assertion");
         (scope, pc)
@@ -3829,11 +3840,7 @@ mod tests {
         if level == AccessLevel::Deny {
             return false;
         }
-        let pairs: Vec<(String, String)> = bound
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let digest = crate::service::scope_digest(&pairs);
+        let identity = identity_of(bound);
         let permit = match level {
             AccessLevel::Allow => None,
             _ => Some(
@@ -3846,7 +3853,7 @@ mod tests {
                     method,
                     host,
                     path,
-                    &digest,
+                    &identity,
                     creds(),
                 )
                 .expect("an ask has a permit key"),
@@ -3899,25 +3906,34 @@ mod tests {
         path: &str,
         bound: &[(&str, &str)],
     ) -> Option<u64> {
-        let pairs: Vec<(String, String)> = bound
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let digest = crate::service::scope_digest(&pairs);
+        let digest = identity_of(bound).digest;
         state.permits(RV).into_iter().find_map(|(k, exp)| match k.of {
-            // Whatever tier minted it: the request line + digest identify it.
+            // Whatever tier minted it: the request line + identity identify it.
             crate::state::PermitFor::Request(g)
                 if g.agent == "agA"
                     && g.conn == RC
                     && g.method == method
                     && g.host == RH
                     && g.path == path
-                    && g.scope_digest == digest =>
+                    && g.identity == digest =>
             {
                 Some(exp)
             }
             _ => None,
         })
+    }
+
+    /// The permit identity of a request covering these values (what the
+    /// proxy computes from a live request), under a fixed test key.
+    fn identity_of(bound: &[(&str, &str)]) -> crate::approval::coverage::Identity {
+        let covered = crate::approval::coverage::Covered {
+            components: bound
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
+                .collect(),
+            ..Default::default()
+        };
+        crate::approval::coverage::IdentityKey::derive(&[7u8; 32], 0).identity(&covered)
     }
 
     fn by_rule(id: Option<&str>) -> crate::core::policy::DecidedBy {
@@ -4336,9 +4352,11 @@ mod tests {
                         unit: GrantUnit::Rule("read".into(), Class::Read),
                     },
                     credentials: credentials.clone(),
+                    generation: 0,
                 },
                 expires_at: u64::MAX / 2,
                 window_fp: fp,
+                approved: None,
             },
             DeferredGrant {
                 vault_id: "v1".into(),
@@ -4353,9 +4371,11 @@ mod tests {
                         &exact_read_tier(),
                     )),
                     credentials,
+                    generation: 0,
                 },
                 expires_at: u64::MAX / 2,
                 window_fp: fp,
+                approved: None,
             },
         )
     }
@@ -5315,14 +5335,66 @@ mod tests {
         g.id_sig = Some(URL_SAFE_NO_PAD.encode(me.signing().sign(&input)));
         pin_account_key(me.signing().public_bytes());
         let signer =
-            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r).unwrap();
+            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r, None).unwrap();
         assert_eq!(signer, me.user_id());
         check_approval_authority(None, "v-personal", &signer).unwrap();
         // Another account pinned: the signer's key is unknown here.
         pin_account_key(UikRoot::from_root([0x66u8; 32]).signing().public_bytes());
         let err =
-            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r).unwrap_err();
+            verify_grant_identity(&state, None, "v-personal", "op-1", &g, &op, &r, None).unwrap_err();
         assert!(matches!(err, AppError::GrantIdInvalid(_)), "{err}");
+        pin_account(None);
+    }
+
+    /// An op with a sealed approval card (design §5): the approver's signature
+    /// must cover the card as opened. One signed without the card binding (a
+    /// console that never opened it) or over another card is refused; one
+    /// over this card verifies.
+    #[test]
+    fn a_sealed_card_op_needs_the_signature_to_cover_the_opened_card() {
+        use crate::crypto::vault_key::UikRoot;
+        let state = test_state_in("-v3card");
+        let me = UikRoot::from_root([0x57u8; 32]);
+        let op = team_export_op("v-personal", "FOO");
+        let r = b64r(6);
+        let beta = crate::crypto::binding::binding_for_op(
+            crate::crypto::binding::DOMAIN_STANDARD,
+            &STANDARD.decode(&r).unwrap(),
+            &serde_json::to_value(&op).unwrap(),
+        )
+        .unwrap();
+        let base = || {
+            crate::identity::grant_id_input(
+                "v-personal",
+                "op-1",
+                &beta,
+                b"c",
+                &[1u8; 32],
+                &[2u8; 48],
+                &state.sc.pk_bytes(),
+                &me.user_id(),
+            )
+        };
+        let signed = |input: Vec<u8>| {
+            let mut g = plain_grant(op.clone(), &r);
+            g.credential_id = "Yw".into();
+            g.k_enc = Some(URL_SAFE_NO_PAD.encode([1u8; 32]));
+            g.k_ct = Some(URL_SAFE_NO_PAD.encode([2u8; 48]));
+            g.id = Some(me.user_id());
+            g.id_sig = Some(URL_SAFE_NO_PAD.encode(me.signing().sign(&input)));
+            g
+        };
+        let mac = [9u8; 32];
+        pin_account_key(me.signing().public_bytes());
+        let verify = |g: &Grant| {
+            verify_grant_identity(&state, None, "v-personal", "op-1", g, &op, &r, Some(&mac))
+        };
+        let unopened = signed(base());
+        assert!(matches!(verify(&unopened).unwrap_err(), AppError::GrantIdInvalid(_)));
+        let other = signed(crate::identity::with_card_binding(base(), &[8u8; 32]));
+        assert!(matches!(verify(&other).unwrap_err(), AppError::GrantIdInvalid(_)));
+        let opened = signed(crate::identity::with_card_binding(base(), &mac));
+        assert_eq!(verify(&opened).unwrap(), me.user_id());
         pin_account(None);
     }
 }

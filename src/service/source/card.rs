@@ -35,8 +35,9 @@ pub struct DefSummary {
     /// The `[default]` approval window (seconds), when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u64>,
-    /// `[requests]` name → the variables an approval binds (its `scope`),
-    /// sorted. Requests that bind nothing are left out.
+    /// `[requests]` name → what an approval covers (`request` for the whole
+    /// request, then the paths its `scope` lists and its `consent` reads).
+    /// Requests that cover nothing beyond the request line are left out.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scopes: BTreeMap<String, Vec<String>>,
     /// The OAuth connect flow runs without PKCE (`pkce = false`).
@@ -48,7 +49,7 @@ pub struct DefSummary {
 /// line to show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSummary {
-    /// What the rule matches (method/path patterns, body, when): two rules
+    /// What the rule matches (method/path patterns, condition): two rules
     /// with the same key decide the same requests.
     pub key: String,
     pub level: String,
@@ -65,15 +66,14 @@ pub struct RuleSummary {
 
 fn rule_summary(r: &PolicyRule) -> RuleSummary {
     let level = r.level.map(|l| l.to_string()).unwrap_or_default();
-    let matched = r.match_patterns.join(" | ");
+    let matched = r.select.display().join(" | ");
     let mut key = matched.clone();
-    if let Some(b) = &r.body {
-        key.push_str(" body~");
-        key.push_str(b.as_str());
-    }
-    if let Some(w) = &r.when {
-        key.push_str(" when ");
-        key.push_str(w);
+    if let Some(c) = &r.condition {
+        if !key.is_empty() {
+            key.push(' ');
+        }
+        key.push_str("if ");
+        key.push_str(c.as_str());
     }
     let label = r.label.clone().or_else(|| r.id.clone());
     let name = label.clone().unwrap_or_else(|| {
@@ -204,11 +204,9 @@ pub fn summarize(def: &ServiceDef) -> DefSummary {
         }
     }
     for (name, shape) in &applied.requests {
-        let mut vars: Vec<String> = shape.scope.clone();
-        vars.sort();
-        vars.dedup();
-        if !vars.is_empty() {
-            s.scopes.insert(name.clone(), vars);
+        let paths = shape.covers();
+        if !paths.is_empty() {
+            s.scopes.insert(name.clone(), paths);
         }
     }
     s
@@ -250,7 +248,7 @@ pub struct Diff {
     pub new_destinations: Vec<String>,
     /// What a service in both now lets through more easily: a rule or default
     /// that is gone or decides less strictly, an `ask` approval that lasts
-    /// longer, a request variable an approval no longer binds, PKCE turned
+    /// longer, a request value an approval no longer covers, PKCE turned
     /// off.
     pub loosens: Vec<String>,
 }
@@ -339,10 +337,12 @@ fn loosened(id: &str, o: &DefSummary, n: &DefSummary, out: &mut Vec<String>) {
     }
     for (req, vars) in &o.scopes {
         let now = n.scopes.get(req);
+        // `request` (the whole request) covers every path.
+        let whole = now.is_some_and(|n| n.iter().any(|p| p == "request"));
         for v in vars {
-            if !now.is_some_and(|n| n.contains(v)) {
+            if !whole && !now.is_some_and(|n| n.contains(v)) {
                 out.push(format!(
-                    "{}: request {} no longer binds {} to an approval",
+                    "{}: request {} no longer covers {} in an approval",
                     id, req, v
                 ));
             }
