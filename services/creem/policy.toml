@@ -1,6 +1,46 @@
-# Payments API: reads (list products/customers/subscriptions) flow freely; any
-# write (create a charge/checkout, refund, cancel a subscription) moves money, so
-# it takes a passkey. Per-connection override in the console if you automate it.
+# Creem policy. Reads, checkouts, products, discounts, subscriptions,
+# customers, refunds and credits go through. Asks in live mode before revenue
+# is split with someone, store events go to a new web address, or a webhook
+# signing secret is read. Test mode (test-api.creem.io) never asks. `refund`
+# is a switch at "allow": set it to "ask-always" to approve every live refund.
+# See docs/POLICY.md.
+
 [default]
 read = "allow"
-write = "ask"
+write = "allow"
+
+# Creem refunds the whole payment; the request names only the payment.
+[[rule]]
+id = "refund"
+label = "Refund a payment"
+method = "POST"
+path = "/v1/refunds"
+condition = "request.host != 'test-api.creem.io'"
+level = "allow"
+
+[[rule]]
+id = "revenue-split"
+label = "Send a share of revenue to someone"
+method = "POST"
+path = "/v1/splits"
+condition = "request.host != 'test-api.creem.io'"
+level = "ask-always"
+
+# Every payment and customer event goes to that address. Test-feed (`cli`)
+# endpoints and name or status edits go through.
+[[rule]]
+id = "webhook-url"
+label = "Send store events to a web address"
+method = ["POST", "PATCH"]
+path = ["/v1/webhooks", "/v1/webhooks/:webhook"]
+condition = "request.host != 'test-api.creem.io' && has(request.body.url) && !(has(request.body.delivery_mode) && request.body.delivery_mode == 'cli')"
+level = "ask-always"
+
+# Whoever holds it can forge "payment succeeded" events to the store's server.
+[[rule]]
+id = "webhook-secret"
+label = "Read a webhook signing secret"
+method = "GET"
+path = "/v1/webhooks/:webhook/secret"
+condition = "request.host != 'test-api.creem.io'"
+level = "ask-always"

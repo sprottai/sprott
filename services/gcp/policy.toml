@@ -57,3 +57,12 @@ label = "Create a service-account key (a durable credential outside the broker)"
 method = "POST"
 path = "/v1/projects/:project/serviceAccounts/:account/keys"
 level = "ask-always"
+
+# A batch is decided by the calls inside it; this rule lets a connection ask
+# for every batch.
+[[rule]]
+id = "batch"
+label = "Send a batch of API calls"
+method = "POST"
+path = ["/batch", "/batch/*"]
+level = "allow"

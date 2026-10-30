@@ -260,31 +260,25 @@ level = "ask-always"
   service's encoded values are covered by their content.
 - `vars` (2.0) rejects the file. Name each value by its request path.
 
-## Example: Gmail
+## Example: Google Drive
 
 ```toml
 [default]
-read  = "ask"
-write = "ask-always"
+read  = "allow"
+write = "allow"
 
 [[rule]]
-id    = "list-emails"
-label = "List emails"
-method = "GET"
-path  = "/gmail/v1/users/me/messages"
-level = "allow"
+id    = "delete-file"
+label = "Delete a file permanently (skips Trash) or empty the trash"
+method = "DELETE"
+path  = "/drive/v3/files/:file"
+level = "ask-always"
 
 [[rule]]
-id    = "read-email"
-label = "Read email content"
-method = "GET"
-path  = "/gmail/v1/users/me/messages/:id"
-level = "ask"
-
-[[rule]]
-id    = "send-email"
-label = "Send email"
-method = "POST"
-path  = "/gmail/v1/users/me/messages/send"
+id    = "share-public"
+label = "Make a file public or open to a whole domain"
+method = ["POST", "PATCH"]
+path  = ["/drive/v3/files/:file/permissions", "/drive/v3/files/:file/permissions/:permission"]
+condition = "has(request.body.type) && (request.body.type == 'anyone' || request.body.type == 'domain')"
 level = "ask-always"
 ```

@@ -1943,36 +1943,6 @@ secrets = ["GITHUB_TOKEN"]
     }
 
     #[test]
-    fn compiled_gmail_policy_resolves_risk_tiers() {
-        use crate::core::policy::{evaluate, AccessLevel, Policy};
-        let r = ServiceRegistry::load();
-        let rules = r
-            .default_policy_rules("gmail")
-            .expect("gmail policy.toml must parse and yield rules")
-            .to_vec();
-        let policy = Policy::default();
-        let eval = |m: &str, p: &str| {
-            evaluate(&crate::core::request::Request::bare(m, p), Some(&rules), None, &policy, &["app".into()]).unwrap()
-        };
-        assert_eq!(
-            eval("GET", "/gmail/v1/users/me/messages"),
-            AccessLevel::Allow
-        );
-        assert_eq!(
-            eval("GET", "/gmail/v1/users/me/messages/abc123"),
-            AccessLevel::Ask
-        );
-        assert_eq!(
-            eval("POST", "/gmail/v1/users/me/messages/send"),
-            AccessLevel::AskAlways
-        );
-        assert_eq!(
-            eval("DELETE", "/gmail/v1/users/me/messages/abc123"),
-            AccessLevel::AskAlways
-        );
-    }
-
-    #[test]
     fn compiled_cratesio_policy_gates_publish_surface() {
         use crate::core::policy::{evaluate, AccessLevel, Policy};
         let r = ServiceRegistry::load();
@@ -2325,7 +2295,8 @@ secrets = ["GITHUB_TOKEN"]
             ("gcp", "/batch/storage/v1", "DELETE /storage/v1/b/bkt"),
             ("gcp", "/batch/compute/v1", "DELETE /compute/v1/projects/p/zones/z/instances/vm"),
             ("gcp", "/batch", "POST /v1/projects/p/serviceAccounts/a/keys"),
-            ("gcalendar", "/batch/calendar/v3", "DELETE /calendar/v3/calendars/primary/events/e1"),
+            ("gcalendar", "/batch/calendar/v3", "POST /calendar/v3/calendars/primary/acl"),
+            ("gdrive", "/batch/drive/v3", "DELETE /drive/v3/files/f1"),
         ] {
             let body = batch_of(&["GET /storage/v1/b/bkt/o", gated]);
             assert_eq!(eval_batch(service, endpoint, &body), AccessLevel::AskAlways, "{service} {gated}");
@@ -2342,10 +2313,9 @@ secrets = ["GITHUB_TOKEN"]
         }
         let reads = batch_of(&["GET /storage/v1/b/bkt/o", "GET /storage/v1/b/bkt/o/obj?alt=json"]);
         assert_eq!(eval_batch("gcp", "/batch/storage/v1", &reads), AccessLevel::Allow);
-        // The batch request is decided too: gcalendar's `write = "ask"` floor
-        // asks for it, as for any other write.
+        // The batch request is decided too, by the floor and the `batch` rule.
         let reads = batch_of(&["GET /calendar/v3/calendars/primary/events"]);
-        assert_eq!(eval_batch("gcalendar", "/batch/calendar/v3", &reads), AccessLevel::Ask);
+        assert_eq!(eval_batch("gcalendar", "/batch/calendar/v3", &reads), AccessLevel::Allow);
         // An assistant on a routine model, and a run without an override, ride the floor.
         assert_eq!(eval_compiled("openai", "POST", "/v1/assistants", r#"{"model": "gpt-4o-mini"}"#), AccessLevel::Allow);
         assert_eq!(eval_compiled("openai", "POST", "/v1/threads/t1/runs", r#"{"assistant_id": "a"}"#), AccessLevel::Allow);
@@ -2464,6 +2434,101 @@ secrets = ["GITHUB_TOKEN"]
         assert_eq!(id, commented);
         let (batch, _) = covered(def, "POST", &format!("{z}/dns_records/batch"), r#"{"deletes": [{"id": "r1"}]}"#);
         assert_eq!(shown(&batch, "request.body.deletes"), Some(r#"[{"id":"r1"}]"#));
+    }
+
+    /// Gmail, Drive, Calendar and Creem let normal work through and ask only
+    /// before real harm, in every spelling their API references list. A
+    /// switch at "allow" (Gmail send, Drive share, Creem refund) gates its
+    /// operation once a user turns it on; Creem test mode never asks.
+    #[test]
+    fn compiled_google_and_creem_policies_ask_only_before_real_harm() {
+        use crate::core::policy::{evaluate, AccessLevel::{Allow, AskAlways}, Policy};
+        let raw = r#"{"raw": "cmF3"}"#;
+        for (service, method, path, body) in [
+            ("gmail", "GET", "/gmail/v1/users/me/messages/m1", ""),
+            ("gmail", "POST", "/gmail/v1/users/me/messages/m1/modify", r#"{"addLabelIds": ["TRASH"]}"#),
+            ("gmail", "POST", "/gmail/v1/users/me/messages/send", raw),
+            ("gmail", "POST", "/gmail/v1/users/me/drafts", r#"{"message": {"raw": "cmF3"}}"#),
+            ("gdrive", "POST", "/drive/v3/files/f1/permissions", r#"{"type": "user", "role": "writer", "emailAddress": "a@b.com"}"#),
+            ("gdrive", "DELETE", "/drive/v3/files/f1/permissions/p1", ""),
+            ("gdrive", "PATCH", "/drive/v3/files/f1", r#"{"name": "x"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/revisions/r1", r#"{"published": false}"#),
+            ("gcalendar", "DELETE", "/calendar/v3/calendars/primary/events/e1", ""),
+            ("gcalendar", "POST", "/calendar/v3/calendars/primary/events", r#"{"attendees": [{"email": "x@y.com"}]}"#),
+            ("creem", "POST", "/v1/refunds", r#"{"transaction_id": "t1"}"#),
+            ("creem", "POST", "/v1/subscriptions/s1/cancel", ""),
+            ("creem", "PATCH", "/v1/customers", r#"{"id": "c1", "email": "x@y.com"}"#),
+            ("creem", "PATCH", "/v1/webhooks/w1", r#"{"name": "n"}"#),
+            ("creem", "POST", "/v1/webhooks", r#"{"url": "https://x.dev", "delivery_mode": "cli"}"#),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, body), Allow, "{service} {method} {path}");
+        }
+        for (service, method, path, body) in [
+            ("gmail", "DELETE", "/gmail/v1/users/a@b.com/messages/m1", ""),
+            ("gmail", "DELETE", "/gmail/v1/users/me/threads/t1", ""),
+            ("gdrive", "DELETE", "/drive/v3/files/f1", ""),
+            ("gdrive", "DELETE", "/drive/v3/files/f1/", ""),
+            ("gdrive", "DELETE", "/drive/v2/files/trash", ""),
+            ("gdrive", "POST", "/drive/v3/files/f1/permissions", r#"{"type": "anyone", "role": "reader"}"#),
+            ("gdrive", "POST", "/drive/v2/files/f1/permissions", r#"{"type": "domain", "role": "reader", "value": "x.com"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/permissions/p1", r#"{"role": "owner"}"#),
+            ("gdrive", "PUT", "/drive/v2/files/f1/permissions/p1/", r#"{"role": "owner"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/permissions/p1", r#"{"pendingOwner": true}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/revisions/r1", r#"{"published": true}"#),
+            ("gdrive", "PUT", "/drive/v2/files/f1/revisions/r1", r#"{"publishedOutsideDomain": true}"#),
+            ("gcalendar", "POST", "/calendar/v3/calendars/primary/acl", r#"{"role": "reader", "scope": {"type": "default"}}"#),
+            ("gcalendar", "PATCH", "/calendar/v3/calendars/a%40b.com/acl/user:x@y.com", r#"{"role": "writer"}"#),
+            ("creem", "POST", "/v1/splits", r#"{"percentage": 10}"#),
+            ("creem", "POST", "/v1/webhooks", r#"{"url": "https://x.dev"}"#),
+            ("creem", "PATCH", "/v1/webhooks/w1/", r#"{"url": "https://y.dev"}"#),
+            ("creem", "GET", "/v1/webhooks/w1/secret", ""),
+        ] {
+            assert_eq!(eval_compiled(service, method, path, body), AskAlways, "{service} {method} {path}");
+        }
+        let creem_test = |method: &'static str, path: &'static str, body: &'static str| {
+            let input = RequestInput { method, path, host: "test-api.creem.io", body: Some(body.as_bytes()), ..Default::default() };
+            eval_with("creem", input)
+        };
+        assert_eq!(creem_test("POST", "/v1/splits", r#"{"percentage": 10}"#), Allow);
+        assert_eq!(creem_test("GET", "/v1/webhooks/w1/secret", ""), Allow);
+
+        // A sharing call inside a Drive batch is decided by its own body.
+        let share = "--b\r\nContent-Type: application/http\r\n\r\nPOST /drive/v3/files/f1/permissions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"type\": \"anyone\", \"role\": \"reader\"}\r\n--b--\r\n";
+        assert_eq!(eval_batch("gdrive", "/batch/drive/v3", share), AskAlways);
+        assert_eq!(eval_batch("gdrive", "/batch", share), AskAlways);
+
+        // Switches.
+        let r = ServiceRegistry::load();
+        let switched = |service: &str, id: &str, host: &'static str, method: &'static str, path: &'static str, body: &'static str| {
+            let mut rules = r.default_policy_rules(service).expect("policy").to_vec();
+            let rule = rules.iter_mut().find(|x| x.id.as_deref() == Some(id)).expect("switch rule");
+            rule.level = Some(AskAlways);
+            let input = RequestInput { method, path, host, body: Some(body.as_bytes()), ..Default::default() };
+            let read = r.get(service).expect("service").read_request(input).unwrap();
+            evaluate(&read.request, Some(&rules), None, &Policy::default(), &["app".into()]).unwrap()
+        };
+        let mail = "gmail.googleapis.com";
+        for (id, path, body) in [
+            ("send-email", "/gmail/v1/users/me/messages/send", raw),
+            ("send-email", "/gmail/v1/users/a@b.com/messages/send/", raw),
+            ("send-email", "/upload/gmail/v1/users/me/messages/send", "To: a@b.com\r\n\r\nhi"),
+            ("send-email", "/resumable/upload/gmail/v1/users/me/messages/send", ""),
+            ("send-draft", "/gmail/v1/users/me/drafts/send", r#"{"id": "d1"}"#),
+            ("send-draft", "/upload/gmail/v1/users/me/drafts/send", "To: a@b.com\r\n\r\nhi"),
+        ] {
+            assert_eq!(switched("gmail", id, mail, "POST", path, body), AskAlways, "{path}");
+        }
+        let drive = "www.googleapis.com";
+        for (method, path) in [
+            ("POST", "/drive/v3/files/f1/permissions"),
+            ("PATCH", "/drive/v3/files/f1/permissions/p1"),
+            ("PUT", "/drive/v2/files/f1/permissions/p1"),
+            ("POST", "/drive/v3/files/f1/accessproposals/a1:resolve"),
+        ] {
+            assert_eq!(switched("gdrive", "share-file", drive, method, path, r#"{"role": "reader"}"#), AskAlways, "{method} {path}");
+        }
+        assert_eq!(switched("creem", "refund", "api.creem.io", "POST", "/v1/refunds", "{}"), AskAlways);
+        assert_eq!(switched("creem", "refund", "test-api.creem.io", "POST", "/v1/refunds", "{}"), Allow);
     }
 
     /// Every Railway mutation that deletes, mints a credential or changes who
@@ -2862,7 +2927,8 @@ scope = ["request.body.memo"]
 
     /// Every rule id the 2.0 rule sets had (v2.0.5) is still there: a user's
     /// override names it, and an override of an id that is gone is refused
-    /// when it tightens (DESIGN §2). Retired ids are listed with why.
+    /// when it tightens (DESIGN §2). `batch` stays as a rule at allow,
+    /// although a batch is decided by its requests (DESIGN §7).
     #[test]
     fn every_2_0_rule_id_is_kept() {
         const V2_0: &[(&str, &[&str])] = &[
@@ -2882,8 +2948,6 @@ scope = ["request.body.memo"]
             ("supabase", &["read-secrets", "delete-project", "mint-api-key", "open-network", "transfer-ownership"]),
             ("vercel", &["delete-project", "delete-deployment", "delete-domain", "remove-member", "change-member", "create-webhook", "delete-integration"]),
         ];
-        // A batch is decided by its requests (DESIGN §7): no batch rule.
-        const RETIRED: &[(&str, &str)] = &[("gcalendar", "batch"), ("gcp", "batch")];
         let r = ServiceRegistry::load();
         for (service, ids) in V2_0 {
             let have: std::collections::HashSet<&str> = r
@@ -2893,8 +2957,7 @@ scope = ["request.body.memo"]
                 .filter_map(|rule| rule.id.as_deref())
                 .collect();
             for id in *ids {
-                let retired = RETIRED.contains(&(*service, *id));
-                assert_eq!(have.contains(id), !retired, "{service} {id}");
+                assert!(have.contains(id), "{service} {id}");
             }
         }
     }
@@ -2988,6 +3051,14 @@ scope = ["request.body.memo"]
             ("railway", "POST", "/graphql/v2", r#"{"query":"mutation { serviceInstanceRedeploy(serviceId: \"s\") }"}"#),
             ("snaplii", "POST", "/v2/purchase", r#"{"orderInfo": {"orderType": "GIFT_CARD", "item": {"itemId": "CB_1", "price": "40.00"}}}"#),
             ("snaplii", "POST", "/v2/purchase", r#"{"orderInfo": {"orderType": "GIFT_CARD", "item": {"itemId": "CB_1", "price": "250.00"}}, "delivery": {"type": "WALLET"}}"#),
+            ("gdrive", "POST", "/drive/v3/files/f1/permissions", r#"{"type": "user", "role": "writer", "emailAddress": "a@b.com"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/permissions/p1", r#"{"role": "reader"}"#),
+            ("gdrive", "PATCH", "/drive/v3/files/f1/revisions/r1", r#"{"keepForever": true}"#),
+            ("creem", "POST", "/v1/refunds", r#"{"transaction_id": "t1"}"#),
+            ("creem", "POST", "/v1/splits", r#"{"percentage": 10}"#),
+            ("creem", "PATCH", "/v1/webhooks/w1", r#"{"name": "n"}"#),
+            ("creem", "POST", "/v1/webhooks", r#"{"url": "https://x.dev", "delivery_mode": "cli"}"#),
+            ("creem", "GET", "/v1/webhooks/w1/secret", ""),
         ];
         let mut evaluated = std::collections::BTreeSet::new();
         for (service, method, path, body) in routine {
@@ -3012,7 +3083,7 @@ scope = ["request.body.memo"]
                 }
             }
         }
-        assert_eq!(shipped.len(), 8, "{shipped:?}");
+        assert_eq!(shipped.len(), 14, "{shipped:?}");
         assert_eq!(evaluated, shipped);
     }
 

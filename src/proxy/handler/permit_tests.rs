@@ -1576,7 +1576,7 @@ async fn external_key_names_follow_the_stores() {
 /// Resident = bound to a connection whose GET floor is allow (implicit
 /// default connections included); every other bound KEY is sealed; a KEY
 /// nothing binds is a name only. A raw connection named like a built-in
-/// takes its recipe (gmail: read asks), a vault definition its stricter
+/// takes its recipe (gmail: reads go through), a vault definition its stricter
 /// defaults. A floor edit moves KEYs at the next build.
 #[tokio::test]
 async fn residency_follows_the_get_floor() {
@@ -1601,7 +1601,7 @@ read = "ask"
         .secret("UNBOUND", "u");
     vault.unlock(&state);
     let snap = state.snapshot(V).unwrap();
-    assert_eq!(snap.holds("MAIL_KEY"), Some("sealed"));
+    assert_eq!(snap.holds("MAIL_KEY"), Some("resident"));
     assert_eq!(snap.holds("CAREFUL_KEY"), Some("sealed"));
     assert_eq!(snap.holds("SVC_TOKEN"), Some("resident"));
     assert_eq!(snap.holds("GITHUB_TOKEN"), Some("resident"), "the implicit default connection");
