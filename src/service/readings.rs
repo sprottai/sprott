@@ -173,7 +173,7 @@ impl<'a> Readings<'a> {
         let mut decision = readings[kept].2.clone();
         if self.batch_unreadable {
             let label = Some(UNREADABLE_BATCH.to_string());
-            let forced = (AccessLevel::AskAlways, DecidedBy::Rule { id: None, label }, None);
+            let forced = (AccessLevel::AskAlways, DecidedBy::Rule { id: None, label, label_zh: None, consent: None }, None);
             decision = stricter(decision, forced);
         }
         let tied: Vec<usize> = (0..readings.len())

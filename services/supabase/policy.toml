@@ -36,6 +36,9 @@ write = "allow"
 [[rule]]
 id = "read-secrets"
 label = "Read project secrets (API keys, JWT secret, database password, encryption root key)"
+label_zh = "读取项目密钥（API key、JWT 密钥、数据库密码、加密根密钥）"
+consent = "Read this project's secret values in plain text, such as API keys, the JWT secret or the database password."
+consent_zh = "以明文读取这个项目的密钥，比如 API key、JWT 密钥或数据库密码。"
 method = "GET"
 path = [
   "/v1/projects/:ref/api-keys",
@@ -56,6 +59,9 @@ level = "ask-always"
 [[rule]]
 id = "delete-project"
 label = "Delete a project (destroys its database and all data)"
+label_zh = "删除项目（销毁其数据库和全部数据）"
+consent = "Delete this Supabase project with its database and all data."
+consent_zh = "删除这个 Supabase 项目，连同其中的数据库和全部数据。"
 method = "DELETE"
 path = "/v1/projects/:ref"
 level = "ask-always"
@@ -68,6 +74,9 @@ level = "ask-always"
 [[rule]]
 id = "mint-api-key"
 label = "Create a project API key"
+label_zh = "创建项目 API key"
+consent = "Create {{ request.body.type }} API key {{ request.body.name }} for this project. A secret key bypasses row-level security."
+consent_zh = "为这个项目创建 {{ request.body.type }} API key {{ request.body.name }}。类型为 secret 的 key 可以绕过行级安全（RLS）。"
 method = "POST"
 path = "/v1/projects/:ref/api-keys"
 level = "ask-always"
@@ -80,6 +89,9 @@ level = "ask-always"
 [[rule]]
 id = "open-network"
 label = "Change network restrictions (who can reach the database)"
+label_zh = "修改网络限制（谁能连接数据库）"
+consent = "Change which IP addresses can reach this project's database."
+consent_zh = "修改哪些 IP 地址可以连接这个项目的数据库。"
 method = ["POST", "PATCH"]
 path = [
   "/v1/projects/:ref/network-restrictions/apply",
@@ -93,6 +105,9 @@ level = "ask-always"
 [[rule]]
 id = "transfer-ownership"
 label = "Create a claim token (hand the project to another owner)"
+label_zh = "创建认领 token（把项目交给另一个所有者）"
+consent = "Create a claim token. Whoever has it can move this project into their own organization."
+consent_zh = "创建一个认领 token，拿到它的人可以把这个项目转到自己的组织下。"
 method = "POST"
 path = "/v1/projects/:ref/claim-token"
 level = "ask-always"

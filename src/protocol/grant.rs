@@ -317,8 +317,8 @@ pub fn validate_grant(
 /// Validate a BATCH grant (design/batch-approve.md). The caller (the approve
 /// handler) has already rebuilt the Merkle root from the daemon's OWN stored
 /// ops and derived `expected_challenge` = SHA-256(tag ‖ root); this arm
-/// resolves the credential (standard lookup only — batches are Use-only, so
-/// no Enroll special cases) and runs the same shared core as the plain arm:
+/// resolves the credential (standard lookup only: a batch never carries an
+/// Enroll, see approve.rs `batchable`) and runs the same shared core as the plain arm:
 /// ONE validator, different challenge source, sudp untouched.
 pub fn validate_batch_grant(
     grant: &Grant,

@@ -22,6 +22,9 @@ write = "allow"
 [[rule]]
 id = "delete-repo"
 label = "Delete repository"
+label_zh = "删除仓库"
+consent = "Delete this repository with its code, issues and pull requests."
+consent_zh = "删除这个仓库，连同其中的代码、issue 和 pull request。"
 method = "DELETE"
 path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
 level = "ask-always"
@@ -29,6 +32,9 @@ level = "ask-always"
 [[rule]]
 id = "transfer-repo"
 label = "Transfer repository to a new owner"
+label_zh = "把仓库转移给新所有者"
+consent = "Transfer this repository to {{ request.body.new_owner }}."
+consent_zh = "把这个仓库转移给 {{ request.body.new_owner }}。"
 method = "POST"
 path = ["/repos/:owner/:repo/transfer", "/repositories/:repository_id/transfer"]
 level = "ask-always"
@@ -37,6 +43,9 @@ level = "ask-always"
 [[rule]]
 id = "make-public"
 label = "Make repository public"
+label_zh = "把仓库设为公开"
+consent = "Make this repository public so anyone can see its code."
+consent_zh = "把这个仓库设为公开，任何人都能看到其中的代码。"
 method = ["PATCH", "POST"]
 path = ["/repos/:owner/:repo", "/repositories/:repository_id"]
 # GitHub reads `"private": "false"` and a form body too: the comparison is
@@ -47,6 +56,9 @@ level = "ask-always"
 [[rule]]
 id = "add-collaborator"
 label = "Add or change a collaborator"
+label_zh = "添加协作者或修改协作者权限"
+consent = "Give this user {{ request.body.permission }} access to the repository."
+consent_zh = "授予这位用户这个仓库的 {{ request.body.permission }} 权限。"
 method = "PUT"
 path = [
   "/repos/:owner/:repo/collaborators/:username",
@@ -57,6 +69,9 @@ level = "ask-always"
 [[rule]]
 id = "remove-collaborator"
 label = "Remove a collaborator"
+label_zh = "移除协作者"
+consent = "Remove this user's access to the repository."
+consent_zh = "移除这位用户对这个仓库的访问权限。"
 method = "DELETE"
 path = [
   "/repos/:owner/:repo/collaborators/:username",
@@ -67,6 +82,9 @@ level = "ask-always"
 [[rule]]
 id = "set-branch-protection"
 label = "Change branch protection (or rename a branch)"
+label_zh = "修改分支保护（或重命名分支）"
+consent = "Change this branch's protection rules, or rename the branch."
+consent_zh = "修改这个分支的保护规则，或重命名这个分支。"
 # Protection settings take PUT, PATCH and POST on sub-resources
 # (required_pull_request_reviews, restrictions/users, enforce_admins, …);
 # POST also renames a branch (…/rename), which this gates too.
@@ -77,6 +95,9 @@ level = "ask-always"
 [[rule]]
 id = "remove-branch-protection"
 label = "Remove branch protection"
+label_zh = "移除分支保护"
+consent = "Remove protection rules from this branch."
+consent_zh = "移除这个分支的保护规则。"
 method = "DELETE"
 path = ["/repos/:owner/:repo/branches/*", "/repositories/:repository_id/branches/*"]
 level = "ask-always"
@@ -84,6 +105,9 @@ level = "ask-always"
 [[rule]]
 id = "change-ruleset"
 label = "Create, change or delete a ruleset"
+label_zh = "创建、修改或删除规则集"
+consent = "Create, change or delete a ruleset, which sets the rules for pushing to branches and tags."
+consent_zh = "创建、修改或删除规则集（分支和标签的推送规则）。"
 method = ["POST", "PUT", "DELETE"]
 path = [
   "/repos/:owner/:repo/rulesets", "/repos/:owner/:repo/rulesets/:ruleset_id",
@@ -96,6 +120,9 @@ level = "ask-always"
 [[rule]]
 id = "change-org-access"
 label = "Change who is in an organization or a team, or a team's access to a repository"
+label_zh = "修改组织或团队的成员，或团队对仓库的访问权限"
+consent = "Change who is in this organization or team, or what a team can do in a repository."
+consent_zh = "修改这个组织或团队的成员，或某个团队在仓库里的权限。"
 method = ["PUT", "DELETE", "POST"]
 path = [
   "/orgs/:org/:collection(memberships|members|outside_collaborators)/:username",
@@ -113,6 +140,9 @@ level = "ask-always"
 [[rule]]
 id = "add-deploy-key"
 label = "Add a deploy key"
+label_zh = "添加 deploy key"
+consent = "Add a deploy key. Whoever holds its private key can read this repository, and push to it unless the key is read-only."
+consent_zh = "添加一个 deploy key，持有私钥的人可以读取这个仓库，key 有写权限时还能推送。"
 method = "POST"
 path = ["/repos/:owner/:repo/keys", "/repositories/:repository_id/keys"]
 level = "ask-always"
@@ -121,6 +151,9 @@ level = "ask-always"
 [[rule]]
 id = "add-webhook"
 label = "Add a webhook"
+label_zh = "添加 webhook"
+consent = "Add a webhook that sends events to {{ request.body.config.url }}."
+consent_zh = "添加一个 webhook，把事件发送到 {{ request.body.config.url }}。"
 method = "POST"
 path = [
   "/repos/:owner/:repo/hooks", "/repositories/:repository_id/hooks",
@@ -131,6 +164,9 @@ level = "ask-always"
 [[rule]]
 id = "edit-webhook"
 label = "Edit a webhook"
+label_zh = "编辑 webhook"
+consent = "Change this webhook, such as where it sends events."
+consent_zh = "修改这个 webhook，比如事件发送到的地址。"
 method = ["PATCH", "POST"]
 path = [
   "/repos/:owner/:repo/hooks/:hook_id", "/repos/:owner/:repo/hooks/:hook_id/config",
@@ -143,6 +179,9 @@ level = "ask-always"
 [[rule]]
 id = "set-actions-secret"
 label = "Set a repository secret (Actions, Dependabot, Codespaces, agents, environments)"
+label_zh = "设置仓库密钥（Actions、Dependabot、Codespaces、agent、环境）"
+consent = "Set this secret. Code that runs for the repository, such as workflows, can read it."
+consent_zh = "设置这个密钥，为这个仓库运行的代码（比如 workflow）可以读取它。"
 # `:kind` is actions, dependabot, codespaces or agents; each kind is read by
 # code that runs for the repo.
 method = "PUT"
@@ -157,6 +196,9 @@ level = "ask-always"
 [[rule]]
 id = "set-org-actions-secret"
 label = "Set an org or user secret, or which repositories can read it"
+label_zh = "设置组织或用户密钥，或哪些仓库能读取它"
+consent = "Set this organization or user secret, or choose which repositories can read it."
+consent_zh = "设置这个组织或用户密钥，或选择哪些仓库可以读取它。"
 # `:kind` is actions, dependabot, codespaces or agents. The `repositories`
 # sub-paths decide which repositories can read the secret.
 method = "PUT"
@@ -176,6 +218,9 @@ level = "ask-always"
 [[rule]]
 id = "dispatch-workflow"
 label = "Trigger a workflow run"
+label_zh = "触发一次 workflow 运行"
+consent = "Run this workflow on {{ request.body.ref }}."
+consent_zh = "在 {{ request.body.ref }} 上运行这个 workflow。"
 method = "POST"
 path = [
   "/repos/:owner/:repo/actions/workflows/:workflow_id/dispatches",
@@ -186,6 +231,9 @@ level = "ask-always"
 [[rule]]
 id = "repo-dispatch"
 label = "Trigger a repository_dispatch event"
+label_zh = "触发 repository_dispatch 事件"
+consent = "Send a {{ request.body.event_type }} event to this repository. Workflows listening for it start running."
+consent_zh = "向这个仓库发送 {{ request.body.event_type }} 事件，监听它的 workflow 会开始运行。"
 method = "POST"
 path = ["/repos/:owner/:repo/dispatches", "/repositories/:repository_id/dispatches"]
 level = "ask-always"
@@ -193,6 +241,9 @@ level = "ask-always"
 [[rule]]
 id = "register-runner"
 label = "Register a self-hosted runner"
+label_zh = "注册自托管 runner"
+consent = "Register a new self-hosted runner. Workflow jobs, with their secrets, can then run on that machine."
+consent_zh = "注册一个新的自托管 runner，之后 workflow 的 job 及其密钥可以在那台机器上运行。"
 method = "POST"
 path = [
   "/repos/:owner/:repo/actions/runners/registration-token",
@@ -210,6 +261,9 @@ level = "ask-always"
 [[rule]]
 id = "delete-branch"
 label = "Delete a branch or tag"
+label_zh = "删除分支或标签"
+consent = "Delete this branch or tag."
+consent_zh = "删除这个分支或标签。"
 method = "DELETE"
 path = ["/repos/:owner/:repo/git/refs/*", "/repositories/:repository_id/git/refs/*"]
 level = "ask"
@@ -217,6 +271,9 @@ level = "ask"
 [[rule]]
 id = "delete-release"
 label = "Delete a release"
+label_zh = "删除一个 release"
+consent = "Delete this release and its uploaded files. The git tag stays."
+consent_zh = "删除这个 release 及其上传的文件，git 标签会保留。"
 method = "DELETE"
 path = [
   "/repos/:owner/:repo/releases/:release_id",
@@ -233,6 +290,9 @@ level = "ask"
 [[rule]]
 id = "graphql-gated-mutations"
 label = "Change branch protection or rulesets, change who can access, or delete a branch (GraphQL)"
+label_zh = "修改分支保护或规则集、修改访问权限，或删除分支（GraphQL）"
+consent = "Change branch protection or rulesets, change who can access, or delete a branch through GitHub's GraphQL API."
+consent_zh = "通过 GitHub GraphQL API 修改分支保护或规则集、修改访问权限，或删除分支。"
 method = "POST"
 path = "/graphql"
 condition = "request.graphql.fields.exists(f, f in ['createBranchProtectionRule', 'updateBranchProtectionRule', 'deleteBranchProtectionRule', 'createRepositoryRuleset', 'updateRepositoryRuleset', 'deleteRepositoryRuleset', 'updateTeamsRepository', 'removeOutsideCollaborator', 'deleteRef', 'updateRefs', 'addEnterpriseOrganizationMember'])"

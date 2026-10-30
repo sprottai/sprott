@@ -148,19 +148,10 @@ jobs:
           ./artifacts/sprott-linux-x86_64 registry --json > artifacts/registry.json
           echo "registry.json services: $(grep -c '\"id\"' artifacts/registry.json)"
 
-      # Every installed `sprott upgrade` before 2.0 downloads `safeclaw-<platform>`
-      # from the newest release, so each release carries the binary under that
-      # name too: a 1.x install upgrades in place, and its first 2.x command
-      # moves it to the 2.x names (cli/migrate.rs).
-      - name: Copy binaries under the 1.x names
-        run: |
-          cd artifacts
-          for f in sprott-*; do cp "$f" "safeclaw-${f#sprott-}"; done
-
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
-          sha256sum sprott-* safeclaw-* > SHA256SUMS
+          sha256sum sprott-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance

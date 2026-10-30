@@ -784,14 +784,23 @@ impl BrokerHandler {
                         });
                     }
                     identity = key.identity(&covered);
+                    // The sentence: the matched shape's, else the deciding
+                    // rule's. A batch request's would name values the card
+                    // shows under that request's label.
+                    let (consent, consent_zh) = match (kept.part, kept_read.scope.as_ref()) {
+                        (Some(_), _) => (None, None),
+                        (None, Some(s)) if s.consent.is_some() => (s.consent.clone(), s.consent_zh.clone()),
+                        (None, _) => match &decided_by {
+                            crate::core::policy::DecidedBy::Rule { consent: Some(c), .. } => {
+                                (Some(c.en.clone()), c.zh.clone())
+                            }
+                            _ => (None, None),
+                        },
+                    };
                     card = Some(crate::approval::card::Card {
                         vars: covered.shown,
-                        // A batch request's consent would name values the
-                        // card shows under that request's label.
-                        consent: match kept.part {
-                            Some(_) => None,
-                            None => kept_read.scope.as_ref().and_then(|s| s.consent.clone()),
-                        },
+                        consent,
+                        consent_zh,
                     });
                 }
             }
@@ -1164,6 +1173,15 @@ impl BrokerHandler {
         // matched, so approve never records a value-blind window for it; or
         // `single_use`).
         stamp_signed_level(&mut scope, level, &decided_by, *scoped, method, grant_ttl);
+        // The rule that asked, for the card's "Rule" row (a floor decision
+        // stamps none): display only, signed with the rest of the op.
+        if let crate::core::policy::DecidedBy::Rule { id, label, label_zh, .. } = &decided_by {
+            for (k, v) in [("rule", id), ("rule_label", label), ("rule_label_zh", label_zh)] {
+                if let Some(v) = v {
+                    scope[k] = serde_json::Value::String(v.clone());
+                }
+            }
+        }
         // A window (`exact`, `rule`, `floor`) carries the policy fingerprint
         // it was decided under: approve stores no window when the policy
         // changed since.
@@ -2535,6 +2553,8 @@ mod tests {
         let send = DecidedBy::Rule {
             id: Some("send".into()),
             label: Some("Send email".into()),
+            label_zh: None,
+            consent: None,
         };
         let stamp = |level, by: &DecidedBy, scoped, method: &str, ttl| {
             let mut s = json!({ "method": method });

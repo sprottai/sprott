@@ -224,6 +224,14 @@ pub struct RegistryPolicyDefaults {
 pub struct RegistryPolicyRule {
     pub id: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_zh: Option<String>,
+    /// What an approval card says a request it decides does, as written
+    /// (and in Chinese).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_zh: Option<String>,
     /// Which requests the rule decides: `method` AND `path` (a URL Pattern
     /// pathname), each a bare string when it holds one, a list (any of) when
     /// several, omitted when absent (any).
@@ -319,6 +327,9 @@ fn policy_for(def: &ServiceDef, include_rules: bool) -> Option<RegistryServicePo
             .map(|r| RegistryPolicyRule {
                 id: r.id.clone().unwrap_or_default(),
                 label: r.label.clone().unwrap_or_default(),
+                label_zh: r.label_zh.clone(),
+                consent: r.consent.as_ref().map(|c| c.en.clone()),
+                consent_zh: r.consent.as_ref().and_then(|c| c.zh.clone()),
                 method: r.select.methods().to_vec(),
                 path: r.select.paths(),
                 match_pattern: r.select.display(),

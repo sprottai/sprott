@@ -19,6 +19,7 @@ encoded."request.body.raw" = { contentEncoding = "base64url", contentMediaType =
 # legible From/To/Subject/Body card, raw under Advanced Details. Same pipe
 # syntax as `{{ secret.X | basic }}`.
 consent = "{{ request.body.raw | email }}"
+consent_zh = "{{ request.body.raw | email }}"
 
 # A draft sent by its id alone: the card names the draft.
 [requests.draft_send_by_id]
@@ -26,12 +27,14 @@ method = "POST"
 path = "/gmail/v1/users/:user/drafts/send"
 condition = "!has(request.body.message)"
 consent = "Send draft {{ request.body.id }}"
+consent_zh = "发送草稿 {{ request.body.id }}"
 
 [requests.draft_send]
 method = "POST"
 path = "/gmail/v1/users/:user/drafts/send"
 encoded."request.body.message.raw" = { contentEncoding = "base64url", contentMediaType = "message/rfc822" }
 consent = "{{ request.body.message.raw | email }}"
+consent_zh = "{{ request.body.message.raw | email }}"
 
 [auth]
 type = "oauth2"

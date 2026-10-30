@@ -636,6 +636,8 @@ mod tests {
             decided_by: crate::core::policy::DecidedBy::Rule {
                 id: Some("r1".into()),
                 label: None,
+                label_zh: None,
+                consent: None,
             },
             ttl_seconds: ttl,
             host: Some("api.github.com".into()),

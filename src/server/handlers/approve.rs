@@ -488,6 +488,24 @@ fn vault_has_keyset(state: &AppState, vault_id: &str) -> bool {
     }
 }
 
+/// May this op share a batch gesture? `use`, `export` and every custom act
+/// except a danger one: the tone its act descriptor gives (vault-delete), or a
+/// danger tone stamped on the op. The credential lifecycle kinds (write, rotate,
+/// enroll, revoke) never do.
+fn batchable(op: &crate::protocol::operation::Operation) -> bool {
+    match &op.act.kind {
+        ActType::Use | ActType::Export => true,
+        ActType::Custom(name) => {
+            let catalog_danger = crate::protocol::consent::act_catalog()
+                .get(name.as_str())
+                .is_some_and(|d| d.tone == "danger");
+            let stamped_danger = op.act.scope.get("tone").and_then(|t| t.as_str()) == Some("danger");
+            !(catalog_danger || stamped_danger)
+        }
+        _ => false,
+    }
+}
+
 /// `POST /op/{op_id}/approve` — U submits the signed grant. T validates and
 /// dispatches the act (Enroll / Write / Export / Use).
 /// Batch-arm pre-verification (design/batch-approve.md §Daemon verify 1-5):
@@ -555,14 +573,15 @@ fn batch_expected_challenge(
             if rec.vault_id != vault_id {
                 return Err(AppError::BatchVerify("batch spans vaults".into()));
             }
-            // The consent boundary, not an optimization: lifecycle and
-            // high-consequence kinds keep the per-op ceremony. Export joins
-            // behind E1 (design/approvals-inbox.md D2) — its value reaches
-            // only the creating waiter — and every per-op Export check still
-            // runs at this row's own apply (`export_precheck`).
-            if !matches!(rec.op.act.kind, ActType::Use | ActType::Export) {
+            // The consent boundary: a destructive op (danger tone, today
+            // vault-delete) confirms alone, and the credential lifecycle kinds
+            // the broker never raises stay out. Every other op may share one
+            // gesture: the assertion signs each op's β (its full content), the
+            // console shows every card before the one tap, and each row still
+            // runs all of its own checks at its own apply (founder, 10-30).
+            if !batchable(&rec.op) {
                 return Err(AppError::BatchVerify(
-                    "batch may contain only `use` and `export` ops".into(),
+                    "a danger op, or a credential lifecycle op, confirms alone".into(),
                 ));
             }
             let r_bytes = STANDARD
@@ -3129,28 +3148,41 @@ mod tests {
             AppError::BatchVerify(_)
         ));
 
-        // Lifecycle / high-consequence siblings — the consent boundary. Every
-        // Custom act keeps the per-op ceremony: a batch carries only `use`
-        // and `export`, so the console must never plan these kinds into an
-        // envelope at ANY daemon version (there is no version with the arm).
-        for kind in ["vault-delete", "vault-unlock", "widen-host", "secret-rm"] {
-            let custom_id = {
-                let mut s = state.approvals.lock().unwrap();
-                let mut op = use_op("v1", "/x");
-                op.act.kind = ActType::Custom(kind.into());
-                s.create("v1".into(), op, b64r(9))
-            };
-            let g = batch_grant(
-                use_op("v1", "/r/0"),
-                &b64r(0),
-                vec![ids[0].clone(), custom_id],
-            );
+        // The consent boundary: a danger op (vault-delete, by its descriptor
+        // or a stamped tone) and the credential lifecycle kinds confirm alone;
+        // every other custom act joins a batch (founder, 10-30).
+        let custom = |kind: &str, tone: Option<&str>| {
+            let mut s = state.approvals.lock().unwrap();
+            let mut op = use_op("v1", "/x");
+            op.act.kind = ActType::Custom(kind.into());
+            if let Some(t) = tone {
+                op.act.scope = serde_json::json!({ "tone": t });
+            }
+            s.create("v1".into(), op, b64r(9))
+        };
+        for (kind, tone) in [("vault-delete", None), ("connection-add", Some("danger"))] {
+            let g = batch_grant(use_op("v1", "/r/0"), &b64r(0), vec![ids[0].clone(), custom(kind, tone)]);
             match batch_expected_challenge(&state, &ids[0], "v1", &g).unwrap_err() {
-                AppError::BatchVerify(m) => {
-                    assert!(m.contains("only `use` and `export`"), "{kind}: {m}")
-                }
+                AppError::BatchVerify(m) => assert!(m.contains("confirms alone"), "{kind}: {m}"),
                 other => panic!("{kind}: {other}"),
             }
+        }
+        for kind in [ActType::Enroll, ActType::Write] {
+            let id = {
+                let mut s = state.approvals.lock().unwrap();
+                let mut op = use_op("v1", "/x");
+                op.act.kind = kind.clone();
+                s.create("v1".into(), op, b64r(9))
+            };
+            let g = batch_grant(use_op("v1", "/r/0"), &b64r(0), vec![ids[0].clone(), id]);
+            assert!(
+                matches!(batch_expected_challenge(&state, &ids[0], "v1", &g), Err(AppError::BatchVerify(_))),
+                "{kind:?} confirms alone"
+            );
+        }
+        for kind in ["vault-unlock", "widen-host", "secret-rm", "connection-add", "some-future-act"] {
+            let g = batch_grant(use_op("v1", "/r/0"), &b64r(0), vec![ids[0].clone(), custom(kind, None)]);
+            assert!(batch_expected_challenge(&state, &ids[0], "v1", &g).is_ok(), "{kind} joins a batch");
         }
 
         // Export joins the batch arm (design/approvals-inbox.md D2, behind E1).
@@ -3287,6 +3319,8 @@ mod tests {
             decided_by: crate::core::policy::DecidedBy::Rule {
                 id: Some(id.into()),
                 label: label.map(str::to_string),
+                label_zh: None,
+                consent: None,
             },
             ..pc(crate::core::policy::AccessLevel::Ask, ttl)
         }
@@ -3940,6 +3974,8 @@ mod tests {
         crate::core::policy::DecidedBy::Rule {
             id: id.map(str::to_string),
             label: None,
+            label_zh: None,
+            consent: None,
         }
     }
 

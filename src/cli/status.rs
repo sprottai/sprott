@@ -5,6 +5,9 @@ use crate::cli::active::{console_origin, frontend_origin, join_vault_url, load a
 #[derive(Debug)]
 pub struct VaultStatus {
     pub url: String,
+    /// `name (kind)` from the vault catalog (`sprott vault ls`); `None` until a
+    /// discovery has mirrored the vault's cloud label.
+    pub name: Option<String>,
     /// Web console page for this vault (`{console_origin}/vault/{id}`) — the
     /// one URL here that IS meant for a browser. `None` when the device was
     /// never paired (local-only / self-host: no console exists).
@@ -134,8 +137,19 @@ pub async fn fetch_status(custodian: &str, vault: &str) -> VaultStatus {
     let url = join_vault_url(custodian, vault);
     // Mirrors the console's route shape (`/vault/{id}`, see fe vault-nav).
     let console = console_origin().map(|o| format!("{}/vault/{}", o, vault));
+    let name = crate::cli::active::known_vaults()
+        .into_iter()
+        .find(|kv| kv.vault == vault)
+        .and_then(|kv| {
+            let label = kv.label.filter(|l| !l.trim().is_empty())?;
+            Some(match kv.kind {
+                Some(kind) => format!("{} ({})", label, kind),
+                None => label,
+            })
+        });
     let status = |state| VaultStatus {
         url: url.clone(),
+        name: name.clone(),
         console: console.clone(),
         state,
         held: Vec::new(),
@@ -245,8 +259,8 @@ fn ledger_text(standing: Option<&str>, checked_at: Option<u64>, now: u64) -> Str
     let checked = checked_at
         .map(|at| format!(" (checked {} ago)", age_text(now.saturating_sub(at))));
     match standing {
-        Some("admitted") => format!("admitted{}", checked.unwrap_or_default()),
-        Some("not_admitted") => "not admitted to your account: run `sprott login`".to_string(),
+        Some("admitted") => format!("paired{}", checked.unwrap_or_default()),
+        Some("not_admitted") => "not paired with your account: run `sprott login`".to_string(),
         Some("account_missing") => crate::error::DEVICE_ACCOUNT_MISSING_MSG.to_string(),
         Some("stale") => "locked: Sprott could not reach your account for 7 days".to_string(),
         Some("revoked") => "removed from your account: run `sprott login` to pair it again".to_string(),
@@ -484,6 +498,9 @@ fn print_json(
 
 pub fn print_status(s: &VaultStatus) {
     println!("active vault");
+    if let Some(n) = &s.name {
+        println!("  name:     {}", crate::util::terminal_safe(n));
+    }
     // `control:` not `url:` — this is the vault's control-plane address (the
     // canonical vault handle), not a page; the browsable one is `console:`.
     println!("  control:  {}", s.url);
@@ -545,7 +562,7 @@ mod env_label_tests {
     fn ledger_lines() {
         assert_eq!(
             ledger_text(Some("admitted"), Some(1_000), 1_120),
-            "admitted (checked 2 min ago)"
+            "paired (checked 2 min ago)"
         );
         assert_eq!(
             ledger_text(Some("stale"), None, 0),

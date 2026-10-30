@@ -50,6 +50,8 @@ pub struct Card {
     /// `(request path, value)` pairs.
     pub vars: Vec<(String, String)>,
     pub consent: Option<String>,
+    /// `consent` in Chinese.
+    pub consent_zh: Option<String>,
 }
 
 /// A value too large to show, as its SHA-256 and size: `sha256:<hex>#<len>`.
@@ -113,8 +115,8 @@ impl Card {
         self.vars.is_empty() && self.consent.is_none()
     }
 
-    /// The card JSON: JCS of `{"v":1,"vars":{…},"consent":"…"}` (`consent`
-    /// only when there is a template).
+    /// The card JSON: JCS of `{"v":1,"vars":{…},"consent":"…","consent_zh":"…"}`
+    /// (`consent` and `consent_zh` only when there is a template).
     pub fn json(&self) -> Result<Vec<u8>> {
         let vars: serde_json::Map<String, serde_json::Value> = self
             .vars
@@ -124,6 +126,9 @@ impl Card {
         let mut v = serde_json::json!({ "v": 1, "vars": vars });
         if let Some(c) = &self.consent {
             v["consent"] = serde_json::Value::String(c.clone());
+        }
+        if let Some(c) = &self.consent_zh {
+            v["consent_zh"] = serde_json::Value::String(c.clone());
         }
         sudp::canonical::canonicalize_strict(&v)
             .map_err(|e| AppError::Internal(format!("approval card: {e}")))
@@ -218,6 +223,7 @@ mod tests {
                 ("request.body.to".into(), "+15550100".into()),
             ],
             consent: Some("Send {{ request.body.amount }} to {{ request.body.to }}".into()),
+            consent_zh: None,
         }
     }
 
@@ -326,6 +332,7 @@ mod tests {
                 ("request.headers['content-type']".into(), "text/plain".into()),
             ],
             consent: None,
+            consent_zh: None,
         };
         let sealed = seal(big, &[0u8; 32], "v", 0).unwrap();
         let vars = &sealed.card.vars;

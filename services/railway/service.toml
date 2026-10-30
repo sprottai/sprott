@@ -33,3 +33,4 @@ path = "/graphql/*"
 body = "graphql"
 scope   = ["request.graphql.request", "request.graphql.calls", "request.graphql.fields"]
 consent = "{{ request.graphql.calls | graphql }}"
+consent_zh = "{{ request.graphql.calls | graphql }}"

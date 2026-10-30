@@ -527,6 +527,12 @@ pub struct PolicyRule {
     pub id: Option<String>,
     /// Human-readable label for the console.
     pub label: Option<String>,
+    /// The label in Chinese (the `_zh` convention of acts.toml).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_zh: Option<String>,
+    /// What an approval card says a request this rule decides does.
+    #[serde(skip)]
+    pub consent: Option<RuleConsent>,
     /// Which requests it decides: `method` AND `path`, each a list read as
     /// any of (one logical operation exposed at several endpoints), absent =
     /// no restriction ([`crate::core::selector`]). Compiled when the rule is
@@ -542,6 +548,17 @@ pub struct PolicyRule {
     /// Cache TTL (seconds) after an `ask` approval, scoped to this rule
     /// (PROTOCOL.md §6.1 `policy.rules[].ttl`).
     pub ttl: Option<u64>,
+}
+
+/// The sentence an approval card shows for a request a rule decides: a
+/// template over `request` in the grammar of a `[requests]` shape's
+/// `consent` (`{{ request.body.type }}`), in English and optionally Chinese,
+/// and the values the templates read, which an approval covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleConsent {
+    pub en: String,
+    pub zh: Option<String>,
+    pub reads: Vec<crate::core::request::ReadPath>,
 }
 
 impl PolicyRule {
@@ -978,6 +995,8 @@ impl UserRules {
                 Resolved::Refused(PolicyRule {
                     id,
                     label: None,
+                    label_zh: None,
+                    consent: None,
                     select: Select::refused(why),
                     condition: None,
                     level,
@@ -1036,6 +1055,8 @@ impl UserRules {
                     let rule = PolicyRule {
                         id: Some(id.clone()),
                         label: rule.label.clone(),
+                        label_zh: None,
+                        consent: None,
                         condition: rule.condition.clone().filter(|c| c.error().is_none()),
                         select,
                         level: rule.level,
@@ -1265,13 +1286,28 @@ pub fn evaluate(
 /// (`crate::approval::Reuse`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecidedBy {
-    /// A rule matched; its `id` and `label` as declared.
+    /// A rule matched; its `id` and `label` as declared, and what an
+    /// approval card shows for it.
     Rule {
         id: Option<String>,
         label: Option<String>,
+        label_zh: Option<String>,
+        consent: Option<RuleConsent>,
     },
     /// No rule matched.
     Floor,
+}
+
+impl DecidedBy {
+    /// What deciding by `rule` records.
+    pub fn of(rule: &PolicyRule) -> DecidedBy {
+        DecidedBy::Rule {
+            id: rule.id.clone(),
+            label: rule.label.clone(),
+            label_zh: rule.label_zh.clone(),
+            consent: rule.consent.clone(),
+        }
+    }
 }
 
 /// Resolve the access decision for a request, returning `(level,
@@ -1348,10 +1384,7 @@ pub fn evaluate_decision(
     let Some(first) = refused.next() else {
         return Ok(without);
     };
-    let by = |r: &PolicyRule| DecidedBy::Rule {
-        id: r.id.clone(),
-        label: r.label.clone(),
-    };
+    let by = DecidedBy::of;
     if let Some(deny) = std::iter::once(first)
         .chain(refused)
         .find(|r| r.level == Some(AccessLevel::Deny))
@@ -1391,8 +1424,8 @@ fn meets(rule: &PolicyRule, request: &Request<'_>) -> Result<Met, Unreadable> {
     })
 }
 
-/// The condition reads of every rule in `rules` that matches `request` at
-/// `level` (cleanly or through an error): what an approval of a request
+/// The condition and consent reads of every rule in `rules` that matches
+/// `request` at `level` (cleanly or through an error): what an approval of a request
 /// decided at `level` covers besides its scope (DESIGN §4).
 pub fn matched_reads(
     request: &Request<'_>,
@@ -1401,11 +1434,19 @@ pub fn matched_reads(
 ) -> Result<Vec<Read>, Unreadable> {
     let mut out = Vec::new();
     for rule in rules.iter().filter(|r| r.level == Some(level)) {
-        let Some(condition) = &rule.condition else {
+        if rule.condition.is_none() && rule.consent.is_none() {
             continue;
-        };
+        }
         if meets(rule, request)? != Met::No {
-            out.extend(condition.reads().iter().cloned());
+            if let Some(condition) = &rule.condition {
+                out.extend(condition.reads().iter().cloned());
+            }
+            if let Some(consent) = &rule.consent {
+                out.extend(consent.reads.iter().map(|p| Read {
+                    path: p.clone(),
+                    presence: false,
+                }));
+            }
         }
     }
     Ok(out)
@@ -1460,10 +1501,7 @@ fn decide_readable(
         }
         match best {
             Some((rule, level)) => {
-                let by = DecidedBy::Rule {
-                    id: rule.id.clone(),
-                    label: rule.label.clone(),
-                };
+                let by = DecidedBy::of(rule);
                 // The rule's own ttl wins; else it inherits the default-floor window.
                 (level, by, rule.ttl.or(floor_ttl))
             }
@@ -1534,6 +1572,8 @@ mod tests {
         PolicyRule {
             id: Some(id.into()),
             label: None,
+            label_zh: None,
+            consent: None,
             select: sel(pat),
             condition: None,
             level: Some(level),
@@ -1844,6 +1884,8 @@ mod tests {
         let rules = vec![PolicyRule {
             id: Some("open-network".into()),
             label: None,
+            label_zh: None,
+            consent: None,
             select: Select::new(
                 vec!["POST".into(), "PATCH".into()],
                 vec![

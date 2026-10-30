@@ -10,6 +10,9 @@ write = "allow"
 [[rule]]
 id = "list-events"
 label = "List events"
+label_zh = "列出日程"
+consent = "List the events on this calendar."
+consent_zh = "列出这个日历上的日程。"
 method = "GET"
 path = "/calendar/v3/calendars/:calendar/events"
 level = "allow"
@@ -17,6 +20,9 @@ level = "allow"
 [[rule]]
 id = "delete-event"
 label = "Delete event"
+label_zh = "删除日程"
+consent = "Delete this event from the calendar."
+consent_zh = "从日历中删除这个日程。"
 method = "DELETE"
 path = "/calendar/v3/calendars/:calendar/events/:event"
 level = "allow"
@@ -24,6 +30,9 @@ level = "allow"
 [[rule]]
 id = "share-calendar"
 label = "Share a whole calendar with someone or publicly"
+label_zh = "把整个日历共享给某人或公开"
+consent = "Give {{ request.body.scope.type }} {{ request.body.scope.value }} {{ request.body.role }} access to this whole calendar."
+consent_zh = "授予 {{ request.body.scope.type }} {{ request.body.scope.value }} 整个日历的 {{ request.body.role }} 权限。"
 method = ["POST", "PUT", "PATCH"]
 path = ["/calendar/v3/calendars/:calendar/acl", "/calendar/v3/calendars/:calendar/acl/:rule"]
 level = "ask-always"
@@ -32,6 +41,9 @@ level = "ask-always"
 [[rule]]
 id = "delete-calendar"
 label = "Delete or clear a whole calendar (drops all its events)"
+label_zh = "删除或清空整个日历（删掉其中全部日程）"
+consent = "Delete this calendar, or clear every event from it."
+consent_zh = "删除这个日历，或清空其中的全部日程。"
 method = ["DELETE", "POST"]
 path = ["/calendar/v3/calendars/:calendar", "/calendar/v3/calendars/:calendar/clear"]
 level = "ask-always"
@@ -41,6 +53,9 @@ level = "ask-always"
 [[rule]]
 id = "batch"
 label = "Send a batch of Calendar calls"
+label_zh = "批量发送 Calendar 请求"
+consent = "Send several Calendar requests in one call."
+consent_zh = "在一次调用里发送多个 Calendar 请求。"
 method = "POST"
 path = ["/batch", "/batch/*"]
 level = "allow"

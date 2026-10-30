@@ -513,8 +513,10 @@ pub struct RequestShape {
     /// the same split as `[auth]`). Interpolated values are escaped by the
     /// renderer (they come from the agent).
     pub consent: Option<String>,
-    /// The paths `consent` reads: always covered, so what the card phrases
-    /// is what an approval covers.
+    /// `consent` in Chinese (the `_zh` convention of acts.toml).
+    pub consent_zh: Option<String>,
+    /// The paths `consent` and `consent_zh` read: always covered, so what
+    /// the card phrases is what an approval covers.
     pub consent_reads: Vec<ReadPath>,
     /// Request paths whose string values carry encoded media, keyed by the
     /// path's text, in JSON Schema's own content keywords (2020-12 §8): a
@@ -642,6 +644,7 @@ pub fn read_request<'a>(
             let scope = RequestScope {
                 shape: name.clone(),
                 consent: shape.consent.clone(),
+                consent_zh: shape.consent_zh.clone(),
                 whole: shape.covers_whole(),
                 listed: shape.scope.clone().unwrap_or_default(),
                 consent_reads: shape.consent_reads.clone(),
@@ -666,8 +669,9 @@ pub fn read_request<'a>(
 pub struct RequestScope {
     /// The matched shape's name (its `[requests.<name>]` key).
     pub shape: String,
-    /// The shape's consent template.
+    /// The shape's consent template, and in Chinese.
     pub consent: Option<String>,
+    pub consent_zh: Option<String>,
     /// The whole request is covered ([`RequestShape::covers_whole`]).
     pub whole: bool,
     /// The paths its `scope` lists.
@@ -2958,6 +2962,27 @@ scope = ["request.body.memo"]
                 .collect();
             for id in *ids {
                 assert!(have.contains(id), "{service} {id}");
+            }
+        }
+    }
+
+    /// Every compiled rule names itself in Chinese and says on the card what
+    /// a request it decides does, in English and Chinese; so does every
+    /// `[requests]` shape that has a sentence.
+    #[test]
+    fn every_compiled_rule_has_a_card_sentence() {
+        let r = ServiceRegistry::compiled_only();
+        for (service, def) in r.all() {
+            for rule in def.policy.iter().flat_map(|p| p.rules.iter()) {
+                let id = rule.id.as_deref().unwrap_or("?");
+                assert!(rule.label_zh.is_some(), "{service} {id}: label_zh");
+                let consent = rule.consent.as_ref().unwrap_or_else(|| panic!("{service} {id}: consent"));
+                assert!(consent.zh.is_some(), "{service} {id}: consent_zh");
+            }
+            for (name, shape) in &def.requests {
+                if shape.consent.is_some() {
+                    assert!(shape.consent_zh.is_some(), "{service} [requests.{name}]: consent_zh");
+                }
             }
         }
     }
