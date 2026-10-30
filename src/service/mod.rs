@@ -513,8 +513,10 @@ pub struct RequestShape {
     /// the same split as `[auth]`). Interpolated values are escaped by the
     /// renderer (they come from the agent).
     pub consent: Option<String>,
-    /// The paths `consent` reads: always covered, so what the card phrases
-    /// is what an approval covers.
+    /// `consent` in Chinese (the `_zh` convention of acts.toml).
+    pub consent_zh: Option<String>,
+    /// The paths `consent` and `consent_zh` read: always covered, so what
+    /// the card phrases is what an approval covers.
     pub consent_reads: Vec<ReadPath>,
     /// Request paths whose string values carry encoded media, keyed by the
     /// path's text, in JSON Schema's own content keywords (2020-12 §8): a
@@ -642,6 +644,7 @@ pub fn read_request<'a>(
             let scope = RequestScope {
                 shape: name.clone(),
                 consent: shape.consent.clone(),
+                consent_zh: shape.consent_zh.clone(),
                 whole: shape.covers_whole(),
                 listed: shape.scope.clone().unwrap_or_default(),
                 consent_reads: shape.consent_reads.clone(),
@@ -666,8 +669,9 @@ pub fn read_request<'a>(
 pub struct RequestScope {
     /// The matched shape's name (its `[requests.<name>]` key).
     pub shape: String,
-    /// The shape's consent template.
+    /// The shape's consent template, and in Chinese.
     pub consent: Option<String>,
+    pub consent_zh: Option<String>,
     /// The whole request is covered ([`RequestShape::covers_whole`]).
     pub whole: bool,
     /// The paths its `scope` lists.

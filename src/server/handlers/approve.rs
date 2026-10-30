@@ -3287,6 +3287,8 @@ mod tests {
             decided_by: crate::core::policy::DecidedBy::Rule {
                 id: Some(id.into()),
                 label: label.map(str::to_string),
+                label_zh: None,
+                consent: None,
             },
             ..pc(crate::core::policy::AccessLevel::Ask, ttl)
         }
@@ -3940,6 +3942,8 @@ mod tests {
         crate::core::policy::DecidedBy::Rule {
             id: id.map(str::to_string),
             label: None,
+            label_zh: None,
+            consent: None,
         }
     }
 

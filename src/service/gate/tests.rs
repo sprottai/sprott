@@ -906,3 +906,31 @@ fn problems_are_capped() {
 }
 
 mod corpus;
+
+/// A rule's `consent` (and `consent_zh`) is a template over `request` like a
+/// shape's: its reads are compiled, a Chinese one needs an English one, and a
+/// path that names nothing is refused.
+#[test]
+fn a_rule_consent_is_checked_like_a_shapes() {
+    let rule = |extra: &str| {
+        format!(
+            "[[rule]]\nid = \"share\"\nlabel = \"Share\"\nmethod = \"POST\"\npath = \"/f/:id\"\nlevel = \"ask-always\"\n{extra}"
+        )
+    };
+    let def = admit(
+        None,
+        GITHUB,
+        Some(&rule("label_zh = \"共享\"\nconsent = \"Give {{ request.body.who }} access\"\nconsent_zh = \"让 {{ request.body.who }} 以 {{ request.body.role }} 访问\"")),
+    )
+    .unwrap();
+    let r = &def.policy.as_ref().unwrap().rules[0];
+    assert_eq!(r.label_zh.as_deref(), Some("共享"));
+    let c = r.consent.as_ref().expect("a consent");
+    assert_eq!(c.zh.as_deref(), Some("让 {{ request.body.who }} 以 {{ request.body.role }} 访问"));
+    let reads: Vec<String> = c.reads.iter().map(|p| p.to_string()).collect();
+    assert_eq!(reads, ["request.body.role", "request.body.who"]);
+    assert!(mentions(&rejected_with(GITHUB, &rule("consent_zh = \"让 {{ request.body.who }}\"")), "consent_zh needs a consent"));
+    assert!(mentions(&rejected_with(GITHUB, &rule("consent = \"{{ request.nothing }}\"")), "rule 'share' consent"));
+    assert!(mentions(&rejected_with(GITHUB, &rule("label_zh = \" \"")), "label_zh must not be empty"));
+    assert!(mentions(&rejected_with(GITHUB, &rule("consent = \"File {{ request.params.id }}\"")), "can't read request.params"));
+}

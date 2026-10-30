@@ -3044,6 +3044,8 @@ mod tests {
         let by = DecidedBy::Rule {
             id: Some("purchase".into()),
             label: None,
+            label_zh: None,
+            consent: None,
         };
         let key = |scoped: bool, digest: &str| {
             PermitKey::of(

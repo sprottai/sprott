@@ -47,12 +47,15 @@ level = "ask-always"
 | Field | Required | Meaning |
 |---|---|---|
 | `id` | yes | Stable id. Your overrides refer to it. |
-| `label` | yes | What the action is, in words. Shown on approval cards and in the console. |
+| `label` | yes | What the action is, in words. Shown in the console and as the "Rule" on approval cards. |
+| `label_zh` | no | `label` in Chinese. |
 | `method` | no | An HTTP method, or a list (any one matches). Unset: any method. |
 | `path` | no | A path pattern, or a list (any one matches). Unset: any path. |
 | `condition` | no | A [CEL](https://cel.dev) expression over the request: `"has(request.body.amount) && request.body.amount > 100"`. Unset: any request. |
 | `level` | yes | `allow`, `ask`, `ask-always` or `deny`. |
 | `ttl` | no | The approval window for `ask`, in seconds. |
+| `consent` | no | What the approval card says this request does, over request paths: `"Give {{ request.body.type }} {{ request.body.role }} access to this file"`. The card shows the request line above it, so it doesn't read `request.params`. The values it reads are covered by the approval. A `[requests]` shape's `consent` takes precedence. |
+| `consent_zh` | no | `consent` in Chinese. Needs a `consent`. |
 
 Unknown keys reject the whole file.
 

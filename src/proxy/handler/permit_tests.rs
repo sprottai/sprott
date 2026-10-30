@@ -419,6 +419,60 @@ async fn a_shaped_ask_carries_its_card_sealed_and_its_values_key_the_permit() {
     assert_eq!(send(&state, "PATCH", url, &auth, body).await.sent().0, "Bearer cf-token");
 }
 
+/// A rule's own sentence (and its Chinese) fills the card when no shape
+/// declares one, and the values it reads are on the card; the op names the
+/// rule that asked, for the card's "Rule" row.
+#[tokio::test]
+async fn a_rule_consent_fills_the_card_and_the_op_names_the_rule() {
+    let (_dir, state) = new_state();
+    let service = r#"
+[service]
+id = "careful"
+name = "Careful"
+hosts = ["api.careful.dev"]
+secrets = ["CAREFUL_KEY"]
+"#;
+    let policy = r#"
+[default]
+write = "ask-always"
+
+[[rule]]
+id = "share"
+label = "Share a file"
+label_zh = "共享文件"
+method = "POST"
+path = "/files/:file/share"
+consent = "Give {{ request.body.who }} access"
+consent_zh = "让 {{ request.body.who }} 访问"
+level = "ask-always"
+"#;
+    let mut vault = Vault::new().secret("CAREFUL_KEY", "c");
+    vault.aux.services.insert(
+        "careful".into(),
+        crate::service::source::StoredService::new(service.into(), Some(policy.into()), None),
+    );
+    vault.unlock(&state);
+    let url = "https://api.careful.dev/files/f1/share";
+    let auth = bearer("__sprott__careful__");
+    let op = send(&state, "POST", url, &auth, r#"{"who": "anyone", "note": "x"}"#).await.ask();
+    let scope = {
+        let store = state.approvals.lock().unwrap();
+        store.get_any(&op).unwrap().op.act.scope.clone()
+    };
+    assert_eq!(scope["rule"], "share");
+    assert_eq!(scope["rule_label"], "Share a file");
+    assert_eq!(scope["rule_label_zh"], "共享文件");
+    let json = crate::approval::card::open(scope["card"]["sealed"].as_str().unwrap(), &K, V, 0).unwrap();
+    let card: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(card["consent"], "Give {{ request.body.who }} access");
+    assert_eq!(card["consent_zh"], "让 {{ request.body.who }} 访问");
+    assert_eq!(card["vars"]["request.body.who"], "anyone");
+    // A floor ask names no rule.
+    let op = send(&state, "POST", "https://api.careful.dev/other", &auth, "{}").await.ask();
+    let store = state.approvals.lock().unwrap();
+    assert!(store.get_any(&op).unwrap().op.act.scope.get("rule").is_none());
+}
+
 /// Two retries of one shaped request chain (the inbox's `supersedes`) though
 /// each carries a freshly sealed card.
 #[tokio::test]
@@ -1219,6 +1273,8 @@ async fn the_permit_is_spent_once_and_a_lock_before_spending_is_vault_locked() {
             &crate::core::policy::DecidedBy::Rule {
                 id: Some("t".into()),
                 label: None,
+                label_zh: None,
+                consent: None,
             },
             false,
             AG,

@@ -121,6 +121,8 @@ struct RawRequestShape {
     #[serde(default)]
     consent: Option<String>,
     #[serde(default)]
+    consent_zh: Option<String>,
+    #[serde(default)]
     encoded: Option<std::collections::BTreeMap<String, RawEncoded>>,
 }
 
@@ -188,6 +190,13 @@ struct RawPolicyFile {
 struct RawRule {
     id: String,
     label: String,
+    #[serde(default)]
+    label_zh: Option<String>,
+    /// What an approval card says a request this rule decides does.
+    #[serde(default)]
+    consent: Option<String>,
+    #[serde(default)]
+    consent_zh: Option<String>,
     /// The 2.0 `"METHOD /path"`: named so it is refused with the replacement
     /// spelled out, not as an unknown field.
     #[serde(default, rename = "match")]
@@ -1178,10 +1187,19 @@ fn check_requests(
             paths
         });
 
-        let consent_reads = match &shape.consent {
+        let mut consent_reads = match &shape.consent {
             Some(consent) => check_consent(&what, consent, format, errs),
             None => Vec::new(),
         };
+        match (&shape.consent, &shape.consent_zh) {
+            (None, Some(_)) => errs.push(format!("{}: consent_zh needs a consent", what)),
+            (_, Some(zh)) => {
+                consent_reads.extend(check_consent(&format!("{} (zh)", what), zh, format, errs));
+                consent_reads.sort();
+                consent_reads.dedup();
+            }
+            _ => {}
+        }
 
         let mut encoded = std::collections::BTreeMap::new();
         if let Some(entries) = shape.encoded {
@@ -1240,6 +1258,7 @@ fn check_requests(
                     scope,
                     scope_whole,
                     consent: shape.consent,
+                    consent_zh: shape.consent_zh,
                     consent_reads,
                     encoded,
                 },
@@ -1405,9 +1424,36 @@ fn policy_from_file(
             .condition
             .as_deref()
             .and_then(|c| check_condition(&what, c, Decides::Rule(level), errs, warnings));
+        if r.label_zh.as_deref().is_some_and(|l| l.trim().is_empty()) {
+            errs.push(format!("{}: label_zh must not be empty", what));
+        }
+        let consent = match (r.consent, r.consent_zh) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                errs.push(format!("{}: consent_zh needs a consent", what));
+                None
+            }
+            (Some(en), zh) => {
+                let mut reads = check_consent(&what, &en, BodyFormat::default(), errs);
+                if let Some(zh) = &zh {
+                    reads.extend(check_consent(&format!("{} (zh)", what), zh, BodyFormat::default(), errs));
+                }
+                reads.sort();
+                reads.dedup();
+                if reads.iter().any(|p| p.field == Field::Params) {
+                    errs.push(format!(
+                        "{}: consent can't read request.params (a rule's path names none); the card shows the request line",
+                        what
+                    ));
+                }
+                Some(crate::core::policy::RuleConsent { en, zh, reads })
+            }
+        };
         rules.push(PolicyRule {
             id: Some(r.id),
             label: Some(r.label),
+            label_zh: r.label_zh,
+            consent,
             select: select.unwrap_or_default(),
             condition,
             level,
@@ -1464,6 +1510,8 @@ fn policy_from_inline(inline: &RawInlinePolicy, errs: &mut Vec<String>) -> Servi
         rules.push(PolicyRule {
             id: None,
             label: None,
+            label_zh: None,
+            consent: None,
             select,
             condition: None,
             level,

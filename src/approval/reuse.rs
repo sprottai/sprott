@@ -364,6 +364,8 @@ mod tests {
         DecidedBy::Rule {
             id: id.map(str::to_string),
             label: label.map(str::to_string),
+            label_zh: None,
+            consent: None,
         }
     }
 
