@@ -41,6 +41,7 @@ type = "snaplii"
 method = "POST"
 path = "/v2/purchase"
 consent = "Buy {{ request.body.orderInfo.item.itemId }} ({{ request.body.orderInfo.orderType }}) for {{ request.body.orderInfo.item.price }}"
+consent_zh = "以 {{ request.body.orderInfo.item.price }} 购买 {{ request.body.orderInfo.item.itemId }}（{{ request.body.orderInfo.orderType }}）"
 
 # A P2P transfer sends wallet balance to a phone number once its short undo
 # window ends.
@@ -49,3 +50,4 @@ method = "POST"
 path = "/v2/transfers"
 scope   = ["request.body.to_phone", "request.body.amount", "request.body.remark"]
 consent = "Send {{ request.body.amount }} to {{ request.body.to_phone }}"
+consent_zh = "向 {{ request.body.to_phone }} 转账 {{ request.body.amount }}"

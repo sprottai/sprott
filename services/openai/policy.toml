@@ -5,6 +5,9 @@ write = "allow"
 [[rule]]
 id = "expensive-model"
 label = "Use expensive model"
+label_zh = "使用昂贵模型"
+consent = "Use {{ request.body.model }}, an expensive model."
+consent_zh = "使用较贵的模型 {{ request.body.model }}。"
 method = "POST"
 path = [
   "/v1/chat/completions", "/v1/responses", "/v1/completions",
@@ -20,6 +23,9 @@ level = "ask"
 [[rule]]
 id = "batch-run"
 label = "Run a batch job (its model is chosen in the uploaded file)"
+label_zh = "运行批处理任务（模型在上传的文件里指定）"
+consent = "Start a batch job. The uploaded file sets which models it uses."
+consent_zh = "启动一个批处理任务，用哪些模型由上传的文件决定。"
 method = "POST"
 path = "/v1/batches"
 level = "ask"

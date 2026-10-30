@@ -28,6 +28,9 @@ write = "allow"
 [[rule]]
 id = "trigger-pipeline"
 label = "Trigger, continue or rerun a pipeline or job (runs CI code)"
+label_zh = "触发、继续或重跑流水线或 job（会运行 CI 代码）"
+consent = "Start, continue or rerun a CircleCI pipeline or job, which runs the commands in the project's config."
+consent_zh = "启动、继续或重跑 CircleCI 流水线或 job，会执行项目配置里的命令。"
 method = "POST"
 path = [
   "/api/v2/project/:vcs{/:org}?{/:project}?/pipeline",
@@ -45,6 +48,9 @@ level = "ask"
 [[rule]]
 id = "job-ssh"
 label = "Rerun a job with SSH access, or give a user SSH access to a job"
+label_zh = "以 SSH 方式重跑 job，或给某个用户开放 job 的 SSH 访问"
+consent = "Rerun this job with SSH access, or let a user SSH into it. Whoever connects can read the job's environment variables and secrets."
+consent_zh = "以 SSH 方式重跑这个 job，或允许某个用户 SSH 进去。连上的人能读到这个 job 的环境变量和密钥。"
 method = "POST"
 path = [
   "/api/v1.1/project/:vcs{/:org}?{/:project}?/:build_num/ssh",
@@ -55,6 +61,9 @@ level = "ask"
 [[rule]]
 id = "schedule-pipeline"
 label = "Create or change a pipeline schedule or trigger"
+label_zh = "创建或修改流水线的定时计划或触发器"
+consent = "Create or change a schedule or trigger that starts this project's pipelines automatically."
+consent_zh = "创建或修改会自动启动这个项目流水线的定时计划或触发器。"
 method = ["POST", "PATCH"]
 path = [
   "/api/v2/project/:vcs{/:org}?{/:project}?/schedule",
@@ -67,6 +76,9 @@ level = "ask"
 [[rule]]
 id = "pipeline-definition"
 label = "Create or change a pipeline definition (which config a project runs)"
+label_zh = "创建或修改流水线定义（项目运行哪份配置）"
+consent = "Create or change a pipeline definition, which sets the config file this project's pipelines run."
+consent_zh = "创建或修改流水线定义，也就是这个项目的流水线运行哪份配置文件。"
 method = ["POST", "PATCH"]
 path = [
   "/api/v2/projects/:project_id/pipeline-definitions",
@@ -78,6 +90,9 @@ level = "ask"
 [[rule]]
 id = "approve-job"
 label = "Approve a job that is waiting for approval (can release a held deploy)"
+label_zh = "批准一个等待审批的 job（可能放行被拦下的部署）"
+consent = "Approve this held job so its workflow continues. It may release a deploy."
+consent_zh = "批准这个等待中的 job，让 workflow 继续运行，可能会放行一次部署。"
 method = "POST"
 path = "/api/v2/workflow/:workflow/approve/:approval"
 level = "ask"
@@ -85,6 +100,9 @@ level = "ask"
 [[rule]]
 id = "rollback-project"
 label = "Roll back a project (runs its rollback pipeline)"
+label_zh = "回滚项目（运行它的回滚流水线）"
+consent = "Roll {{ request.body.component_name }} in {{ request.body.environment_name }} back to version {{ request.body.target_version }}."
+consent_zh = "把 {{ request.body.environment_name }} 中的 {{ request.body.component_name }} 回滚到版本 {{ request.body.target_version }}。"
 method = "POST"
 path = "/api/v2/projects/:project_id/rollback"
 level = "ask"
@@ -93,6 +111,9 @@ level = "ask"
 [[rule]]
 id = "create-env-var"
 label = "Create or overwrite a project or context environment variable"
+label_zh = "创建或覆盖项目或 context 的环境变量"
+consent = "Set the {{ request.body.name }} environment variable for this project or context. Builds can read it."
+consent_zh = "为这个项目或 context 设置环境变量 {{ request.body.name }}，构建可以读取它。"
 method = ["POST", "PUT"]
 path = [
   "/api/v2/project/:vcs{/:org}?{/:project}?/envvar",
@@ -104,6 +125,9 @@ level = "ask"
 [[rule]]
 id = "add-project-key"
 label = "Add a checkout key or SSH key to a project"
+label_zh = "给项目添加 checkout key 或 SSH key"
+consent = "Add a checkout key or SSH key to this project. Builds can use it to reach repos or servers."
+consent_zh = "给这个项目添加 checkout key 或 SSH key，构建可以用它访问仓库或服务器。"
 method = "POST"
 path = [
   "/api/v2/project/:vcs{/:org}?{/:project}?/checkout-key",
@@ -116,6 +140,9 @@ level = "ask"
 [[rule]]
 id = "project-settings"
 label = "Change a project's advanced settings"
+label_zh = "修改项目的高级设置"
+consent = "Change this project's advanced settings, such as whether builds from forks get its secrets."
+consent_zh = "修改这个项目的高级设置，比如 fork 来的构建能否拿到项目的密钥。"
 method = ["PATCH", "POST"]
 path = "/api/v2/project/:vcs{/:org}?{/:project}?/settings"
 level = "ask"
@@ -123,6 +150,9 @@ level = "ask"
 [[rule]]
 id = "oidc-claims"
 label = "Change the custom claims in CircleCI's OIDC tokens for an organization or project"
+label_zh = "修改组织或项目的 CircleCI OIDC token 自定义声明"
+consent = "Change the custom claims in the OIDC tokens CircleCI issues to jobs, which cloud accounts check before letting a job in."
+consent_zh = "修改 CircleCI 发给 job 的 OIDC token 里的自定义声明，云账号凭这些声明决定是否放行 job。"
 method = ["PATCH", "POST", "DELETE"]
 path = [
   "/api/v2/org/:org_id/oidc-custom-claims",
@@ -135,6 +165,9 @@ level = "ask"
 [[rule]]
 id = "remove-context-restriction"
 label = "Remove a restriction on who can use a context"
+label_zh = "移除对 context 使用者的限制"
+consent = "Remove this restriction from the context, so more projects or people can use its secrets."
+consent_zh = "移除这个 context 的一条限制，更多项目或成员将能使用其中的密钥。"
 method = ["DELETE", "POST"]
 path = "/api/v2/context/:context/restrictions/:restriction"
 level = "ask"

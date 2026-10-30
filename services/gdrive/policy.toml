@@ -11,6 +11,9 @@ write = "allow"
 [[rule]]
 id = "list-files"
 label = "List files"
+label_zh = "列出文件"
+consent = "List files in this Google Drive."
+consent_zh = "列出这个 Google Drive 里的文件。"
 method = "GET"
 path = ["/drive/v3/files", "/drive/v2/files"]
 level = "allow"
@@ -19,6 +22,9 @@ level = "allow"
 [[rule]]
 id = "delete-file"
 label = "Delete a file permanently (skips Trash) or empty the trash"
+label_zh = "永久删除文件（不进回收站）或清空回收站"
+consent = "Delete this file for good, skipping Trash, or empty the Trash. This can't be undone."
+consent_zh = "永久删除这个文件（不进回收站），或清空回收站，无法撤销。"
 method = "DELETE"
 path = ["/drive/v3/files/:file", "/drive/v2/files/:file"]
 level = "ask-always"
@@ -26,6 +32,9 @@ level = "ask-always"
 [[rule]]
 id = "share-file"
 label = "Share a file with a person or group, or change someone's access"
+label_zh = "把文件共享给某人或某个群组，或修改某人的访问权限"
+consent = "Give {{ request.body.emailAddress }} {{ request.body.role }} access to this file, or answer a request for access."
+consent_zh = "授予 {{ request.body.emailAddress }} 这个文件的 {{ request.body.role }} 权限，或处理一条访问申请。"
 method = ["POST", "PUT", "PATCH"]
 path = [
   "/drive/v3/files/:file/permissions",
@@ -39,6 +48,9 @@ level = "allow"
 [[rule]]
 id = "share-public"
 label = "Make a file public, open to anyone with the link or a whole domain, or hand over ownership"
+label_zh = "把文件设为公开、任何人凭链接可访问、整个域可访问，或转移所有权"
+consent = "Give {{ request.body.type }} {{ request.body.role }} access to this file"
+consent_zh = "让 {{ request.body.type }} 以 {{ request.body.role }} 身份访问这个文件"
 method = ["POST", "PUT", "PATCH"]
 path = [
   "/drive/v3/files/:file/permissions",
@@ -52,6 +64,9 @@ level = "ask-always"
 [[rule]]
 id = "publish-to-web"
 label = "Publish a Google Doc to the web"
+label_zh = "把 Google 文档发布到网络"
+consent = "Publish this version of the document to the web."
+consent_zh = "把文档的这个版本发布到网络。"
 method = ["PATCH", "PUT"]
 path = ["/drive/v3/files/:file/revisions/:revision", "/drive/v2/files/:file/revisions/:revision"]
 condition = "has(request.body.published) && string(request.body.published) == 'true' || has(request.body.publishedOutsideDomain) && string(request.body.publishedOutsideDomain) == 'true'"

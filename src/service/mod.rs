@@ -2966,6 +2966,27 @@ scope = ["request.body.memo"]
         }
     }
 
+    /// Every compiled rule names itself in Chinese and says on the card what
+    /// a request it decides does, in English and Chinese; so does every
+    /// `[requests]` shape that has a sentence.
+    #[test]
+    fn every_compiled_rule_has_a_card_sentence() {
+        let r = ServiceRegistry::compiled_only();
+        for (service, def) in r.all() {
+            for rule in def.policy.iter().flat_map(|p| p.rules.iter()) {
+                let id = rule.id.as_deref().unwrap_or("?");
+                assert!(rule.label_zh.is_some(), "{service} {id}: label_zh");
+                let consent = rule.consent.as_ref().unwrap_or_else(|| panic!("{service} {id}: consent"));
+                assert!(consent.zh.is_some(), "{service} {id}: consent_zh");
+            }
+            for (name, shape) in &def.requests {
+                if shape.consent.is_some() {
+                    assert!(shape.consent_zh.is_some(), "{service} [requests.{name}]: consent_zh");
+                }
+            }
+        }
+    }
+
     /// A Gmail `drafts/send` that names only a draft id reads as its own
     /// shape, whose card names the draft; one carrying the message reads as
     /// the send of that message.
