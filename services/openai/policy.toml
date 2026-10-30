@@ -4,7 +4,7 @@ write = "allow"
 
 [[rule]]
 id = "expensive-model"
-label = "Use expensive model"
+label = "Use an expensive model"
 label_zh = "使用昂贵模型"
 consent = "Use {{ request.body.model }}, an expensive model."
 consent_zh = "使用较贵的模型 {{ request.body.model }}。"
