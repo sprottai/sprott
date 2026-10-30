@@ -254,7 +254,9 @@ mod tests {
     }
 
     /// `sprott upgrade` looks for these exact asset names, so install.sh and
-    /// the release workflow must publish them, and only them.
+    /// the release workflow must publish them. The release also carries each
+    /// binary as `safeclaw-<platform>`, the name every 1.x `sprott upgrade`
+    /// downloads.
     #[test]
     fn asset_names_match_install_sh_and_the_release_workflow() {
         let install = include_str!("../../install.sh");
@@ -268,8 +270,9 @@ mod tests {
             assert!(install.contains(&format!("ASSET=\"{asset}\"")), "{asset}");
             assert!(workflow.contains(&format!("artifact: {asset}")), "{asset}");
         }
-        assert!(workflow.contains("sha256sum sprott-* > SHA256SUMS"));
-        assert_eq!(workflow.matches("artifact: ").count(), 4, "four assets, no aliases");
+        assert!(workflow.contains("sha256sum sprott-* safeclaw-* > SHA256SUMS"));
+        assert!(workflow.contains(r#"cp "$f" "safeclaw-${f#sprott-}""#));
+        assert_eq!(workflow.matches("artifact: ").count(), 4, "four builds");
         assert!(asset_name().unwrap().starts_with("sprott-"));
     }
 
