@@ -679,8 +679,16 @@ mod tests {
         assert_eq!(authority("fe80::1%eth0", 7890), "[fe80::1%eth0]:7890");
         assert_eq!(authority("10.0.0.1", 80), "10.0.0.1:80");
         assert_eq!(authority("api.example.com", 443), "api.example.com:443");
-        for (h, p) in [("::1", 7890u16), ("[::1]", 7890), ("fe80::1%eth0", 7890), ("10.0.0.1", 80), ("api.example.com", 443)] {
-            let uri: Uri = format!("http://{}", authority(h, p)).parse().expect("valid authority");
+        for (h, p) in [
+            ("::1", 7890u16),
+            ("[::1]", 7890),
+            ("fe80::1%eth0", 7890),
+            ("10.0.0.1", 80),
+            ("api.example.com", 443),
+        ] {
+            let uri: Uri = format!("http://{}", authority(h, p))
+                .parse()
+                .expect("valid authority");
             assert_eq!(uri.port_u16(), Some(p));
         }
     }
