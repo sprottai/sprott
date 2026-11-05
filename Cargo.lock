@@ -3032,6 +3032,7 @@ dependencies = [
  "httparse",
  "hudsucker",
  "hyper-rustls",
+ "hyper-util",
  "iri-string",
  "jsonwebtoken",
  "mailparse",

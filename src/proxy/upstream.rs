@@ -39,6 +39,8 @@ use hudsucker::hyper_util::rt::TokioIo;
 use hudsucker::rustls::crypto::aws_lc_rs;
 use hudsucker::rustls::ClientConfig;
 use hyper_rustls::{ConfigBuilderExt, HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::client::legacy::connect::dns::GaiResolver;
+use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tower_service::Service;
@@ -178,28 +180,78 @@ impl Service<Uri> for TunnelConnector {
             let connect = async {
                 match this.use_proxy_for(&host) {
                     Some(p) => connect_via_proxy(&p, &host, port).await,
-                    None => {
-                        let s = TcpStream::connect((host.as_str(), port)).await?;
-                        let _ = s.set_nodelay(true);
-                        Ok(s)
-                    }
+                    None => dial(tcp_dialer(GaiResolver::new()), &host, port).await,
                 }
             };
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect)
-                .await
-                .map_err(|_| -> BoxError {
-                    format!("forward connect to {}:{} timed out", host, port).into()
-                })??;
+            let stream = connect_within(CONNECT_TIMEOUT, &host, port, connect).await?;
             Ok(TokioIo::new(stream))
         })
     }
 }
 
+/// Bound a forward-hop connect to `host:port` by `limit`. However time runs out
+/// (this bound, or the dialer's own connect timeout), the error reads
+/// `forward connect to host:port timed out`.
+async fn connect_within(
+    limit: Duration,
+    host: &str,
+    port: u16,
+    connect: impl Future<Output = Result<TcpStream, BoxError>>,
+) -> Result<TcpStream, BoxError> {
+    match tokio::time::timeout(limit, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) if !is_timeout(&*e) => Err(e),
+        _ => Err(format!("forward connect to {}:{} timed out", host, port).into()),
+    }
+}
+
+/// Did time run out? The dialer reports its connect timeout as an
+/// `io::ErrorKind::TimedOut` somewhere in the error's source chain.
+fn is_timeout(err: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(err), |e| e.source()).any(|e| {
+        e.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
+    })
+}
+
+/// The TCP dialer for both forward-hop legs (straight to the upstream, or to the
+/// egress proxy): hyper-util's `HttpConnector`, the connector reqwest is built
+/// on, so the broker reaches a host the way a standard HTTP client does. When a
+/// name resolves to both IPv6 and IPv4 addresses it races the two families
+/// (Happy Eyeballs, RFC 8305: the second family starts after hyper-util's
+/// default 300 ms) instead of trying the addresses one after another, so a
+/// black-holed IPv6 route costs that delay, not the whole `CONNECT_TIMEOUT`.
+/// Its connect timeout is `CONNECT_TIMEOUT`, split across each family's
+/// addresses as reqwest's is, so one dead address doesn't use up the budget.
+/// `resolver` is the system resolver in production; tests pass a fixed one.
+fn tcp_dialer<R>(resolver: R) -> HttpConnector<R> {
+    let mut dialer = HttpConnector::new_with_resolver(resolver);
+    dialer.set_nodelay(true);
+    dialer.set_connect_timeout(Some(CONNECT_TIMEOUT));
+    dialer
+}
+
+/// Open a TCP connection to `host:port` with `dialer` (see [`tcp_dialer`]).
+async fn dial<C>(mut dialer: C, host: &str, port: u16) -> Result<TcpStream, BoxError>
+where
+    C: Service<Uri, Response = TokioIo<TcpStream>>,
+    C::Error: Into<BoxError>,
+{
+    // `host` comes from a `Uri` (an IPv6 literal keeps its brackets), so this is
+    // a valid authority. The `http` scheme only satisfies the connector, which
+    // dials TCP and nothing more; hyper-rustls layers TLS on top.
+    let uri: Uri = format!("http://{host}:{port}").parse()?;
+    std::future::poll_fn(|cx| dialer.poll_ready(cx))
+        .await
+        .map_err(Into::into)?;
+    let io = dialer.call(uri).await.map_err(Into::into)?;
+    Ok(io.into_inner())
+}
+
 /// Open a CONNECT tunnel to `host:port` through the HTTP proxy `p` and return
 /// the tunneled TCP stream (TLS is layered on top by the caller).
 async fn connect_via_proxy(p: &ProxyCfg, host: &str, port: u16) -> Result<TcpStream, BoxError> {
-    let mut stream = TcpStream::connect((p.host.as_str(), p.port)).await?;
-    let _ = stream.set_nodelay(true);
+    let mut stream = dial(tcp_dialer(GaiResolver::new()), &p.host, p.port).await?;
 
     let mut req = format!(
         "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n",
@@ -565,5 +617,145 @@ mod tests {
             .await
             .expect("read banner direct");
         assert_eq!(buf, BANNER);
+    }
+
+    // ── Happy Eyeballs: a hanging first address must not stall the dial ──────
+    // The api.cloudflare.com failure: the name resolves IPv6-first, the IPv6
+    // route black-holes (connects hang, they are not refused), IPv4 works.
+    use hyper_util::client::legacy::connect::dns::Name;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use tokio::net::TcpSocket;
+
+    /// Answers every name with a fixed address list, in order.
+    #[derive(Clone)]
+    struct FixedResolver(Vec<SocketAddr>);
+
+    impl Service<Name> for FixedResolver {
+        type Response = std::vec::IntoIter<SocketAddr>;
+        type Error = std::io::Error;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _name: Name) -> Self::Future {
+            std::future::ready(Ok(self.0.clone().into_iter()))
+        }
+    }
+
+    /// Fill the accept queue of `listener`, which never accepts, so any further
+    /// connect to it hangs: the kernel drops the SYN instead of refusing it, the
+    /// way a black-holed route behaves. The returned connections must stay alive.
+    async fn fill_accept_queue(listener: &TcpListener) -> Vec<TokioTcp> {
+        let addr = listener.local_addr().unwrap();
+        let mut queued = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(200), TokioTcp::connect(addr)).await {
+                Ok(Ok(s)) => queued.push(s),
+                Ok(Err(e)) => panic!("filling the accept queue of {addr}: {e}"),
+                Err(_) => return queued, // full: this connect hung
+            }
+            assert!(queued.len() < 64, "accept queue of {addr} never filled");
+        }
+    }
+
+    #[tokio::test]
+    async fn dial_falls_back_to_ipv4_when_ipv6_hangs() {
+        // The connector applies the URI's port to every resolved address, so the
+        // working IPv4 listener and the hanging IPv6 one share a port.
+        let mut pair = None;
+        for _ in 0..20 {
+            let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = v4.local_addr().unwrap().port();
+            let v6 = match TcpSocket::new_v6() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("skipped: no IPv6 sockets on this machine ({e})");
+                    return;
+                }
+            };
+            match v6.bind((Ipv6Addr::LOCALHOST, port).into()) {
+                Ok(()) => {
+                    pair = Some((v4, v6.listen(1).unwrap(), port));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(e) => {
+                    eprintln!("skipped: no IPv6 loopback on this machine ({e})");
+                    return;
+                }
+            }
+        }
+        let (v4, v6, port) = pair.expect("a port free on both 127.0.0.1 and ::1");
+        let ok_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let hang_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = v4.accept().await {
+                let _ = s.write_all(BANNER).await;
+                let _ = s.flush().await;
+            }
+        });
+        let _queued = fill_accept_queue(&v6).await;
+
+        let addrs = vec![hang_addr, ok_addr];
+        let bound = CONNECT_TIMEOUT / 4;
+
+        let started = std::time::Instant::now();
+        let dialer = tcp_dialer(FixedResolver(addrs.clone()));
+        let mut stream = connect_within(
+            CONNECT_TIMEOUT,
+            "upstream.test",
+            port,
+            dial(dialer, "upstream.test", port),
+        )
+        .await
+        .expect("dial");
+        let took = started.elapsed();
+        assert!(took < bound, "dial took {took:?}");
+        assert_eq!(stream.peer_addr().unwrap(), ok_addr);
+        let mut buf = vec![0u8; BANNER.len()];
+        stream.read_exact(&mut buf).await.expect("read banner");
+        assert_eq!(buf, BANNER);
+
+        // Control: the IPv6 address really hangs rather than failing fast, so
+        // the old one-address-after-another dial is still stuck on it after
+        // longer than the dial above took in total.
+        assert!(
+            tokio::time::timeout(bound, TokioTcp::connect(&addrs[..]))
+                .await
+                .is_err(),
+            "a sequential dial must still be waiting on {hang_addr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_dial_reads_forward_connect_timed_out() {
+        // A dial whose only address hangs, cut short either by the dialer's own
+        // connect timeout or by the outer bound: the agent sees the same text.
+        let sock = TcpSocket::new_v4().unwrap();
+        sock.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let hang = sock.listen(1).unwrap();
+        let _queued = fill_accept_queue(&hang).await;
+        let hang_addr = hang.local_addr().unwrap();
+        let port = hang_addr.port();
+        let want = format!("forward connect to upstream.test:{port} timed out");
+
+        let short = Duration::from_millis(300);
+        for (dialer_timeout, outer) in [(short, CONNECT_TIMEOUT), (CONNECT_TIMEOUT, short)] {
+            let mut dialer = tcp_dialer(FixedResolver(vec![hang_addr]));
+            dialer.set_connect_timeout(Some(dialer_timeout));
+            let started = std::time::Instant::now();
+            let err = connect_within(
+                outer,
+                "upstream.test",
+                port,
+                dial(dialer, "upstream.test", port),
+            )
+            .await
+            .expect_err("a hanging address cannot connect");
+            assert_eq!(err.to_string(), want);
+            assert!(started.elapsed() < CONNECT_TIMEOUT / 4);
+        }
     }
 }
