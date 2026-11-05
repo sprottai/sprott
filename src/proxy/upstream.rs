@@ -231,16 +231,26 @@ fn tcp_dialer<R>(resolver: R) -> HttpConnector<R> {
     dialer
 }
 
+/// `host:port` as a URI authority. A host from a `Uri` keeps an IPv6 literal's
+/// brackets; an egress proxy's host is stored without them (`::1` from
+/// `http://::1:7890`), so a bare IPv6 address gets them here.
+fn authority(host: &str, port: u16) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Open a TCP connection to `host:port` with `dialer` (see [`tcp_dialer`]).
 async fn dial<C>(mut dialer: C, host: &str, port: u16) -> Result<TcpStream, BoxError>
 where
     C: Service<Uri, Response = TokioIo<TcpStream>>,
     C::Error: Into<BoxError>,
 {
-    // `host` comes from a `Uri` (an IPv6 literal keeps its brackets), so this is
-    // a valid authority. The `http` scheme only satisfies the connector, which
-    // dials TCP and nothing more; hyper-rustls layers TLS on top.
-    let uri: Uri = format!("http://{host}:{port}").parse()?;
+    // The `http` scheme only satisfies the connector, which dials TCP and nothing
+    // more; hyper-rustls layers TLS on top.
+    let uri: Uri = format!("http://{}", authority(host, port)).parse()?;
     std::future::poll_fn(|cx| dialer.poll_ready(cx))
         .await
         .map_err(Into::into)?;
@@ -657,6 +667,19 @@ mod tests {
                 Err(_) => return queued, // full: this connect hung
             }
             assert!(queued.len() < 64, "accept queue of {addr} never filled");
+        }
+    }
+
+    #[test]
+    fn authority_brackets_a_bare_ipv6_host() {
+        assert_eq!(authority("::1", 7890), "[::1]:7890");
+        assert_eq!(authority("[::1]", 7890), "[::1]:7890");
+        assert_eq!(authority("2001:db8::1", 443), "[2001:db8::1]:443");
+        assert_eq!(authority("10.0.0.1", 80), "10.0.0.1:80");
+        assert_eq!(authority("api.example.com", 443), "api.example.com:443");
+        for (h, p) in [("::1", 7890u16), ("[::1]", 7890), ("10.0.0.1", 80), ("api.example.com", 443)] {
+            let uri: Uri = format!("http://{}", authority(h, p)).parse().expect("valid authority");
+            assert_eq!(uri.port_u16(), Some(p));
         }
     }
 
