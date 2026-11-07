@@ -11,7 +11,7 @@ Your agent runs every command. You open links and approve with your passkey.
 Paste this to your coding agent:
 
 ```text
-Set up Sprott for me: run `curl -fsSL https://sprott.ai/install.sh | sh` and follow what it prints. I only open links and tap my passkey; you run every command.
+Set up Sprott from sprott.ai/install
 ```
 
 The agent runs the installer and `sprott setup`, and hands you each link to
