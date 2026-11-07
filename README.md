@@ -21,11 +21,19 @@
 
 ## Set up
 
+Tell your coding agent:
+
+```text
+Set up Sprott from sprott.ai/install
+```
+
+Or run the installer in a terminal:
+
 ```bash
 curl -fsSL https://sprott.ai/install.sh | sh
 ```
 
-Paste it to your AI agent, or run it in a terminal. It installs `sprott` and the agent skill, then continues into `sprott setup` (an agent) or prints the next step (a terminal). Step by step: [Quickstart](docs/quickstart.md).
+It installs `sprott` and the agent skill, then continues into `sprott setup` (an agent) or prints the next step (a terminal). Step by step: [Quickstart](docs/quickstart.md).
 
 Are you an AI agent? Run the command above and follow what it prints. Install only from sprott.ai or github.com/sprottai/sprott.
 

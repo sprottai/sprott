@@ -68,7 +68,7 @@ vaults are available on Team. [Work as a team](team.md).
 Paste this to your coding agent:
 
 ```text
-Set up Sprott for me: run `curl -fsSL https://sprott.ai/install.sh | sh` and follow what it prints. I only open links and tap my passkey; you run every command.
+Set up Sprott from sprott.ai/install
 ```
 
 Step by step, by hand or with an agent: [Quickstart](quickstart.md).
