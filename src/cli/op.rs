@@ -76,14 +76,17 @@ fn verdict(status: &str) -> Verdict {
     }
 }
 
-/// Whether an approved op (`act` = the poll's act discriminator) still needs
-/// the original command run again. The daemon applies a requested change on
-/// approval, so re-running it would ask for a second approval. A brokered
-/// request (`use`) retries to spend its approval; an unlock or lock re-run
-/// reports the state it reached.
-fn rerun_after_approval(act: &str) -> bool {
+/// Whether an approved op (`act` = the poll's act discriminator, `op` = the
+/// poll's op JSON) still needs the original command run again. The daemon
+/// applies a requested change on approval, so re-running it would ask for a
+/// second approval. A brokered request (`use`) retries to spend its approval;
+/// an unlock or lock re-run reports the state it reached. A `widen-host` the
+/// proxy minted (its scope carries `etld1`) answered a request that was refused
+/// and never sent, so that request runs again.
+fn rerun_after_approval(act: &str, op: &Value) -> bool {
     match act.strip_prefix("custom:") {
         None | Some("vault-unlock" | "vault-lock") => true,
+        Some("widen-host") => op.pointer("/act/scope/etld1").is_some(),
         Some(_) => false,
     }
 }
@@ -161,7 +164,8 @@ pub async fn run_wait(args: OpWaitArgs, approval: &ApprovalArgs, json: bool) -> 
                                     println!("{}", body);
                                 }
                                 let act = body.get("act").and_then(|s| s.as_str()).unwrap_or("");
-                                if rerun_after_approval(act) {
+                                let op = body.get("op").cloned().unwrap_or(Value::Null);
+                                if rerun_after_approval(act, &op) {
                                     eprintln!("Approved. Re-run the original command.");
                                 } else {
                                     eprintln!("Approved and applied.");
@@ -263,12 +267,25 @@ mod tests {
 
     #[test]
     fn only_a_retry_or_a_lifecycle_op_is_re_run() {
-        assert!(rerun_after_approval("use"));
-        assert!(rerun_after_approval("export"));
-        assert!(rerun_after_approval("custom:vault-unlock"));
-        assert!(rerun_after_approval("custom:vault-lock"));
+        let none = Value::Null;
+        assert!(rerun_after_approval("use", &none));
+        assert!(rerun_after_approval("export", &none));
+        assert!(rerun_after_approval("custom:vault-unlock", &none));
+        assert!(rerun_after_approval("custom:vault-lock", &none));
         // A consumed tombstone carries no act.
-        assert!(rerun_after_approval(""));
+        assert!(rerun_after_approval("", &none));
+        // The proxy's widen-host answers a refused request: run it again.
+        let proxy_widen = serde_json::json!({
+            "act": { "type": { "custom": "widen-host" }, "target": "",
+                     "scope": { "connection_id": "github", "host": "uploads.github.com", "etld1": "github.com" } }
+        });
+        assert!(rerun_after_approval("custom:widen-host", &proxy_widen));
+        // `sprott connection add-host` mints the same act without etld1: applied.
+        let cli_widen = serde_json::json!({
+            "act": { "type": { "custom": "widen-host" }, "target": "",
+                     "scope": { "connection_id": "github", "host": "uploads.github.com" } }
+        });
+        assert!(!rerun_after_approval("custom:widen-host", &cli_widen));
         for applied in [
             "custom:secret-set",
             "custom:secret-rm",
@@ -280,7 +297,7 @@ mod tests {
             "custom:service-rm",
             "custom:vault-delete",
         ] {
-            assert!(!rerun_after_approval(applied), "{applied}");
+            assert!(!rerun_after_approval(applied, &none), "{applied}");
         }
     }
 
