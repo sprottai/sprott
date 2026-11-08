@@ -10,9 +10,9 @@
 //!     (`op.rs` → `relay::client::spawn_register_and_poll`); the browser
 //!     opens K, HPKE-seals it with its identity signature and deposits the grant; the daemon polls the
 //!     relay and applies it. The CLI just surfaces the link and polls the
-//!     daemon for the op to resolve — no local gesture. Off a terminal it
-//!     prints the link and a `To wait:` command and returns instead (the op
-//!     stays pending), except for an op whose value comes back to it.
+//!     daemon for the op to resolve — no local gesture. By default it prints
+//!     the link and a `To wait:` command and returns (the op stays pending);
+//!     it waits with `--wait`, or for an op whose value comes back to it.
 //!
 //!   • **Local** (self-host, no cloud pairing): the on-box ceremony — the
 //!     daemon serves the WebAuthn page on localhost, the CLI spawns a
@@ -27,7 +27,6 @@
 //! everywhere by construction.
 
 use std::time::{Duration, Instant};
-use std::io::IsTerminal;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -72,6 +71,9 @@ pub struct ApproveOpts {
     pub cb_port: Option<u16>,
     /// Local on-box gesture timeout (seconds).
     pub timeout: u64,
+    /// `--wait`: a remote approval waits for the decision instead of
+    /// returning after the link.
+    pub wait: bool,
 }
 
 /// How [`approve_op`] ended for its caller.
@@ -79,7 +81,7 @@ pub struct ApproveOpts {
 pub enum Approval {
     /// Approved and applied: the daemon's approve response (see [`act_result`]).
     Done(Value),
-    /// Remote and non-interactive: the link and its `To wait:` command are
+    /// Remote, without `--wait`: the link and its `To wait:` command are
     /// printed and the op stays pending on the daemon, which applies it on
     /// approval (`sprott op wait` reports the outcome). The caller prints no
     /// result line and exits 0.
@@ -95,6 +97,7 @@ impl ApproveOpts {
             timeout: flags
                 .timeout
                 .unwrap_or(crate::config::APPROVAL_TIMEOUT_SECS),
+            wait: flags.wait,
         }
     }
 }
@@ -216,8 +219,8 @@ pub async fn set_secret_unlocked(
 
 /// Create `op` on the daemon and drive it to a passkey approval. Returns
 /// [`Approval::Done`] with the daemon's approve response once the op is
-/// approved and applied, or [`Approval::Pending`] when a non-interactive
-/// remote run returned after printing the link ([`returns_after_link`]).
+/// approved and applied, or [`Approval::Pending`] when a remote approval
+/// returned after printing the link ([`returns_after_link`]).
 /// `label` is a human verb ("Unlock vault") used in prompts.
 pub async fn approve_op(
     custodian: &str,
@@ -248,7 +251,7 @@ pub async fn approve_op(
             &created.op_id,
             label,
             waiter,
-            returns_after_link(interactive(), value_comes_back),
+            returns_after_link(opts.wait, value_comes_back),
         )
         .await
     } else {
@@ -295,24 +298,19 @@ pub async fn approve_op(
     }
 }
 
-/// Whether a person may be watching this run: stdin and stderr are both
-/// terminals. An agent's tool call or a pipe is not.
-fn interactive() -> bool {
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
 /// Whether `op` is an Export (`act.type == "export"`).
 fn is_export(op: &Value) -> bool {
     op.pointer("/act/type").and_then(|t| t.as_str()) == Some("export")
 }
 
 /// Whether a remote approval returns once its link is printed instead of
-/// waiting for the decision. A non-interactive caller (an agent's tool call)
-/// sees output only when the command ends, so it returns, and the daemon
-/// applies the op on approval without this process. An op whose value comes
-/// back to this process (an Export, released only to its waiter) waits.
-fn returns_after_link(interactive: bool, value_comes_back: bool) -> bool {
-    !interactive && !value_comes_back
+/// waiting for the decision. It returns unless the caller passed `--wait`
+/// (like Helm's `--wait`, off by default): the daemon applies the op on
+/// approval without this process, and a caller such as an agent's tool call
+/// sees output only when the command ends. An op whose value comes back to
+/// this process (an Export, released only to its waiter) always waits.
+fn returns_after_link(wait: bool, value_comes_back: bool) -> bool {
+    !wait && !value_comes_back
 }
 
 /// Request header carrying an Export's waiter secret (mirror of the daemon's
@@ -774,11 +772,11 @@ mod tests {
 
     use super::*;
 
-    /// Off a terminal, a remote approval returns after its link unless its
-    /// value comes back to this process (an Export waits for it). On a
-    /// terminal it always waits.
+    /// A remote approval returns after its link unless the caller passed
+    /// `--wait` or its value comes back to this process (an Export always
+    /// waits for it).
     #[test]
-    fn only_a_non_interactive_run_without_a_returned_value_returns_after_the_link() {
+    fn returns_after_the_link_unless_wait_or_a_returned_value() {
         assert!(returns_after_link(false, false));
         assert!(!returns_after_link(false, true));
         assert!(!returns_after_link(true, false));

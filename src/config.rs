@@ -82,6 +82,9 @@ pub struct ApprovalArgs {
     /// 120), or in `sprott op wait` (default 1900).
     #[arg(long, global = true, value_name = "SECONDS")]
     pub timeout: Option<u64>,
+    /// Wait for the approval and print the result.
+    #[arg(long, global = true)]
+    pub wait: bool,
 }
 
 /// `--timeout` default for a local browser approval.
@@ -1101,6 +1104,19 @@ mod cli_surface_tests {
         let cli = parse(&["--timeout", "60", "op", "wait", "op-1"]).unwrap();
         assert_eq!(cli.approval.timeout, Some(60));
         assert_eq!(parse(&["unlock"]).unwrap().approval.timeout, None);
+        // `--wait` is global and off by default; `setup --wait` stays setup's.
+        assert!(!parse(&["unlock"]).unwrap().approval.wait);
+        assert!(parse(&["set", "K", "v", "--wait"]).unwrap().approval.wait);
+        assert!(parse(&["--wait", "connection", "rm", "x", "--yes"]).unwrap().approval.wait);
+        let Command::Setup(s) = parse(&["setup", "--agent-name", "a", "--wait"]).unwrap().command
+        else {
+            panic!("setup");
+        };
+        assert!(s.wait);
+        {
+            use clap::CommandFactory as _;
+            Cli::command().debug_assert();
+        }
 
         let Command::Vault(v) = parse(&["vault", "use", "2"]).unwrap().command else {
             panic!("vault");
