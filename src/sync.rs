@@ -3615,6 +3615,47 @@ pub async fn push_item(
     }
 }
 
+/// Pushes one sealed row to the cloud with compare-and-swap (a claim: the
+/// console's install requests, an OAuth code).
+#[allow(async_fn_in_trait)]
+pub(crate) trait ItemPush {
+    /// `None`: no cloud is configured (the write stays local).
+    async fn push(
+        &self,
+        vault: &str,
+        item_id: &str,
+        base: Option<u64>,
+        version: u64,
+        ct_b64: &str,
+        generation: Option<u64>,
+    ) -> Option<Result<PushOutcome, String>>;
+}
+
+/// The cloud this device syncs with.
+pub(crate) struct Cloud;
+
+impl ItemPush for Cloud {
+    async fn push(
+        &self,
+        vault: &str,
+        item_id: &str,
+        base: Option<u64>,
+        version: u64,
+        ct_b64: &str,
+        generation: Option<u64>,
+    ) -> Option<Result<PushOutcome, String>> {
+        let cfg = active::load().ok()?;
+        let cloud = cfg.cloud_backend.filter(|s| !s.is_empty())?;
+        let dk = device_key()?;
+        Some(
+            push_item(
+                &cloud, vault, &dk, item_id, base, version, ct_b64, generation,
+            )
+            .await,
+        )
+    }
+}
+
 /// One DIRTY local row (`version > synced_version`) snapshotted for a push, so
 /// the store isn't held across awaits.
 #[derive(Clone)]
@@ -3660,6 +3701,10 @@ enum ConflictAction {
     /// is set aside locally ([`set_aside_fixes`]) and the user is told it
     /// changed elsewhere meanwhile.
     SetAside,
+    /// Ours no longer applies to their row
+    /// ([`item_layer::device_edit_applies`]): theirs stays and is taken
+    /// locally (their row gone: ours is dropped). Nothing is written.
+    Superseded,
 }
 
 /// The §4 decision for OUR dirty row vs THEIR current row (`None` = gone),
@@ -3671,20 +3716,27 @@ enum ConflictAction {
 ///     equal to our `base` (normalized; e.g. they only copied it during a
 ///     migration) is no conflict: ours is re-applied. Our delete vs their
 ///     edit: the delete is re-applied;
-///   - `take_writer`: ours is re-applied (a delete too);
+///   - `take_writer`: ours is re-applied (a delete too) while it still
+///     applies ([`item_layer::device_edit_applies`]); an edit of a record
+///     deleted meanwhile (their tombstone, or their row gone), of a connect
+///     started again, or over another device's claim is superseded: theirs
+///     stands;
 ///   - `owner_config`: ours is set aside, never written over theirs.
 ///
-/// Their row gone → ours is re-created.
+/// Their row gone → ours is re-created (a superseded take-writer edit: dropped).
 fn decide_conflict(
     ours: &item_layer::ItemPayload,
     theirs: Option<&item_layer::ItemPayload>,
     base: Option<&str>,
 ) -> ConflictAction {
     use item_layer::Conflict;
+    let policy = item_layer::conflict_policy(ours.ns, &ours.name);
+    if policy == Conflict::TakeWriter && !item_layer::device_edit_applies(ours, theirs) {
+        return ConflictAction::Superseded;
+    }
     let Some(theirs) = theirs else {
         return ConflictAction::Reapply;
     };
-    let policy = item_layer::conflict_policy(ours.ns, &ours.name);
     if ours.is_tombstone() {
         return if theirs.is_tombstone() {
             ConflictAction::Adopt
@@ -4289,6 +4341,8 @@ fn warn_rejected_once(vault_id: &str, item: &str, version: u64, status: u16, err
 /// Reconcile one 409 on OUR dirty row (§4) under `K` (`keys`): open ours, read
 /// THEIR current row from the full snapshot, then per [`decide_conflict`]:
 ///   - `Adopt`    → take theirs locally;
+///   - `Superseded` → ours no longer applies: take theirs locally (their row
+///     gone: drop ours); nothing is written;
 ///   - `SetAside` → owner-config: theirs stays, ours is set aside
 ///     ([`set_aside_fixes`]) and reported; nothing is written;
 ///   - `KeepBoth` → write ours as the conflict copy (CREATE at version 1 under
@@ -4451,6 +4505,16 @@ async fn resolve_conflict(
         ConflictAction::SetAside => {
             tracing::info!(vault = %vault_id, item = %ours_row.id, "per-item 409: owner-config changed elsewhere; ours set aside");
             set_aside(ours_row, &ours, theirs)
+        }
+        ConflictAction::Superseded => {
+            tracing::info!(vault = %vault_id, item = %ours_row.id, "per-item 409: ours no longer applies (deleted, started again or claimed elsewhere); theirs kept");
+            Resolved::Fixed(vec![match theirs {
+                Some((r, ct, p)) => adopt_fix(ours_row, &r, ct, p.is_tombstone()),
+                None => LocalFix::Drop {
+                    id: ours_row.id.clone(),
+                    expect: ours_row.version,
+                },
+            }])
         }
         ConflictAction::Reapply => {
             if theirs.as_ref().is_some_and(|(r, _, _)| r.sig.is_some()) {
@@ -7374,6 +7438,99 @@ mod peritem_tests {
         }
     }
 
+    /// A failure stamp from a device that lost the race to redeem a code, on
+    /// a 409 over the winner's tombstone of the completed connect: theirs is
+    /// taken, nothing is pushed (the cloud URL here is unreachable, so a push
+    /// attempt would leave the row dirty instead), and the connect stays
+    /// completed. Their row gone: ours is dropped, never re-created.
+    #[test]
+    fn a_stale_connect_edit_never_brings_back_a_completed_connect() {
+        use crate::storage::item::{self as il, ItemPayload};
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let k = [0x42u8; 32];
+        let vid = "v";
+        let keys = VaultKeys::single(&k);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut pv = empty_pv();
+        let stamp = ItemPayload::live(
+            ItemNs::Connecting,
+            "gmail",
+            serde_json::json!({ "service": "gmail", "oauth2": {
+                "code": "c", "code_verifier": "v",
+                "error": "authorization expired or already used" } }),
+        );
+        let id = pv
+            .seal_and_upsert::<StdPrimitives>(keys, vid, ItemNs::Connecting, "gmail", 3, &stamp)
+            .unwrap();
+        pv.items.get_mut(&id).unwrap().synced_version = 2;
+        let dirty = DirtyRow {
+            id: id.clone(),
+            version: 3,
+            synced_version: 2,
+            ct: pv.get_item(&id).unwrap().ct.clone(),
+            tombstone: false,
+            base: None,
+            upgrade: false,
+            generation: None,
+        };
+        let gone = ItemPayload::tombstone(ItemNs::Connecting, "gmail");
+        let their_ct = il::seal_wire_item::<StdPrimitives>(keys, vid, &id, 3, &gone).unwrap();
+        let their_row = ItemRow {
+            item_id: id.clone(),
+            version: 3,
+            seq: 9,
+            ct: URL_SAFE_NO_PAD.encode(&their_ct),
+            sig: None,
+            signer: None,
+        };
+        let mut fetched = TheirRows::Fetched([(id.clone(), their_row)].into_iter().collect());
+        let Resolved::Fixed(fixes) = rt.block_on(resolve_conflict(
+            "http://127.0.0.1:9",
+            vid,
+            "dk",
+            keys,
+            &mut fetched,
+            &dirty,
+            3,
+            Some(0),
+        )) else {
+            panic!("theirs taken");
+        };
+        let mut taken = pv.clone();
+        apply_local_fixes(&mut taken, fixes, Some((keys, vid)));
+        let row = taken.get_item(&id).unwrap();
+        assert_eq!(
+            (row.version, row.synced_version, row.tombstone),
+            (3, 3, true)
+        );
+        assert!(taken
+            .fold_view::<StdPrimitives>(keys, vid)
+            .unwrap()
+            .aux
+            .connecting
+            .is_empty());
+
+        // The row was collected meanwhile (409 with currentVersion 0).
+        let Resolved::Fixed(fixes) = rt.block_on(resolve_conflict(
+            "http://127.0.0.1:9",
+            vid,
+            "dk",
+            keys,
+            &mut TheirRows::Unfetched,
+            &dirty,
+            0,
+            Some(0),
+        )) else {
+            panic!("ours dropped");
+        };
+        apply_local_fixes(&mut pv, fixes, Some((keys, vid)));
+        assert!(pv.get_item(&id).is_none());
+    }
+
     /// Ours is set aside, never written over theirs: an owner-config record
     /// on any conflict (also unsigned, on a vault without a keyset), and any
     /// record whose row of theirs is signed (this process signs nothing), on
@@ -7642,6 +7799,21 @@ mod peritem_tests {
         assert_eq!(
             decide_conflict(&ours, Some(&ours.clone()), None),
             ConflictAction::Adopt
+        );
+        // ... but an edit never brings back a connect deleted meanwhile
+        // (their tombstone, or their row gone), while our delete still applies.
+        let g_tomb = tomb(ItemNs::Connecting, "g");
+        assert_eq!(
+            decide_conflict(&ours, Some(&g_tomb), None),
+            ConflictAction::Superseded
+        );
+        assert_eq!(
+            decide_conflict(&ours, None, None),
+            ConflictAction::Superseded
+        );
+        assert_eq!(
+            decide_conflict(&g_tomb, Some(&theirs), None),
+            ConflictAction::Reapply
         );
         // Owner-config (native or legacy address): never overwritten, also
         // without a keyset; an equal body adopts.

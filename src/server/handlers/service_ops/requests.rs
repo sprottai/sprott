@@ -38,6 +38,7 @@ use crate::service::source::{self, SourceSpec};
 use crate::state::AppState;
 use crate::storage::item::{wire_id_for, ItemNs, ItemPayload, VaultKeys};
 use crate::sync::PushOutcome;
+pub(crate) use crate::sync::{Cloud, ItemPush};
 
 /// The error a request claimed here gets when it never got a result.
 pub(crate) const INTERRUPTED: &str = "the request was interrupted; install again";
@@ -75,46 +76,6 @@ pub(crate) fn step(body: &Value, me: &str, account: Option<&str>) -> Step {
         },
         Some(c) if c != me => Step::Leave,
         Some(_) => Step::Interrupt,
-    }
-}
-
-/// Pushes one sealed row to the cloud with compare-and-swap.
-#[allow(async_fn_in_trait)]
-pub(crate) trait ItemPush {
-    /// `None`: no cloud is configured (the write stays local).
-    async fn push(
-        &self,
-        vault: &str,
-        item_id: &str,
-        base: Option<u64>,
-        version: u64,
-        ct_b64: &str,
-        generation: Option<u64>,
-    ) -> Option<Result<PushOutcome, String>>;
-}
-
-/// The cloud this device syncs with.
-pub(crate) struct Cloud;
-
-impl ItemPush for Cloud {
-    async fn push(
-        &self,
-        vault: &str,
-        item_id: &str,
-        base: Option<u64>,
-        version: u64,
-        ct_b64: &str,
-        generation: Option<u64>,
-    ) -> Option<Result<PushOutcome, String>> {
-        let cfg = crate::cli::active::load().ok()?;
-        let cloud = cfg.cloud_backend.filter(|s| !s.is_empty())?;
-        let dk = crate::sync::device_key()?;
-        Some(
-            crate::sync::push_item(
-                &cloud, vault, &dk, item_id, base, version, ct_b64, generation,
-            )
-            .await,
-        )
     }
 }
 

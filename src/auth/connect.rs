@@ -300,10 +300,14 @@ fn collect_pending(m: &ProtectedState) -> Vec<(String, Connecting)> {
 /// Merge codes the 8765 loopback listener caught into their matching pending
 /// entries (keyed by connection id), so [`collect_pending`] picks them up for
 /// exchange this cycle. Only fills an EMPTY code — never overwrites one already
-/// present (a racing paste wins whichever landed first). Pure state edit.
+/// present (a racing paste wins whichever landed first). A caught code is
+/// this device's (`me`) to redeem: only it holds the code, so the entry names
+/// it as `redeemer`, and a write that stores the code stores the claim with
+/// it. Pure state edit.
 fn inject_codes(
     m: &mut ProtectedState,
     codes: &std::collections::BTreeMap<String, String>,
+    me: Option<&str>,
 ) -> Vec<String> {
     let mut connecting = aux_map::<Connecting>(m, "connecting");
     let mut filled = Vec::new();
@@ -311,6 +315,7 @@ fn inject_codes(
         if let Some(entry) = connecting.get_mut(conn) {
             if entry.oauth2.code.is_empty() && !code.is_empty() {
                 entry.oauth2.code = code.clone();
+                entry.oauth2.redeemer = me.map(str::to_string);
                 filled.push(conn.clone());
             }
         }
@@ -396,6 +401,145 @@ pub(crate) fn code_exchange_expired(first_tried: std::time::Instant, now: std::t
     now.saturating_duration_since(first_tried) > CODE_EXCHANGE_WINDOW
 }
 
+/// What this device does with an in-flight connect's code, given the claim
+/// on its row (`redeemer`), whether the cloud holds the row as this device
+/// does (`confirmed`: no local change unpushed), and this device (`me`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimStep {
+    /// The cloud's row names this device: it exchanges the code.
+    Redeem,
+    /// Unclaimed, or claimed here but not on the cloud yet: it writes its
+    /// claim first ([`claim_code`]).
+    Claim,
+    /// Another device's: never exchanged, stamped or written here.
+    Leave,
+}
+
+pub(crate) fn claim_step(redeemer: Option<&str>, confirmed: bool, me: &str) -> ClaimStep {
+    match redeemer {
+        Some(r) if r != me => ClaimStep::Leave,
+        Some(_) if confirmed => ClaimStep::Redeem,
+        _ => ClaimStep::Claim,
+    }
+}
+
+/// The pending connect `conn` (`entry`, as this run read it) as this device
+/// may exchange it now, claimed by this device (`me`); `None` when it may
+/// not this run.
+///
+/// An authorization code is used at most once, and every device of the
+/// account is the same client (RFC 6749 §4.1.2). So a device exchanges a code
+/// it read from the vault only once the cloud's row names it as `redeemer`:
+/// an unclaimed row is claimed first, with compare-and-swap at the version the
+/// cloud is known to hold (the standard optimistic-concurrency claim, as the
+/// console's install requests are claimed). Any other outcome (another writer
+/// changed the row first, a refusal, no network, a changed vault key) writes
+/// nothing here and leaves the code this run; it is never reconciled over
+/// theirs. With no cloud configured the claim stays local: no other device
+/// sees the vault. A vault with no per-item store has no row to claim:
+/// `entry` is claimed in memory.
+///
+/// The caller holds the vault write lock.
+async fn claim_code<P: crate::sync::ItemPush>(
+    state: &Arc<AppState>,
+    vault_id: &str,
+    k: &[u8],
+    conn: &str,
+    entry: &Connecting,
+    me: &str,
+    push: &P,
+) -> Option<Connecting> {
+    use crate::storage::item::{wire_id_for, ItemNs, ItemPayload, VaultKeys};
+    use crate::sync::PushOutcome;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    type S = sudp::primitives::StdPrimitives;
+    let claimed = |mut e: Connecting| {
+        e.oauth2.redeemer = Some(me.to_string());
+        e
+    };
+    let store = state
+        .vaults
+        .per_item_path(vault_id)
+        .ok()
+        .map(|path| (crate::storage::sealed_vault::read_per_item(&path), path));
+    let (mut pv, path) = match store {
+        Some((Ok(Some(pv)), path)) => (pv, path),
+        Some((Err(e), _)) => {
+            tracing::warn!(vault = %vault_id, conn = %conn, "oauth connect: store unreadable, code not claimed: {}", e);
+            return None;
+        }
+        _ => {
+            return match claim_step(entry.oauth2.redeemer.as_deref(), true, me) {
+                ClaimStep::Leave => None,
+                _ => Some(claimed(entry.clone())),
+            };
+        }
+    };
+    let keys = VaultKeys::from_material(k);
+    let id = wire_id_for::<S>(keys.id_seed, ItemNs::Connecting, conn).ok()?;
+    let (version, synced) = pv.items.get(&id).map(|r| (r.version, r.synced_version))?;
+    let stored: Connecting = match pv.open_item::<S>(keys, vault_id, ItemNs::Connecting, conn) {
+        Ok(Some(p)) if !p.is_tombstone() => serde_json::from_value(p.body).ok()?,
+        _ => return None,
+    };
+    if stored.oauth2.code.is_empty() || stored.oauth2.error.is_some() {
+        return None;
+    }
+    match claim_step(stored.oauth2.redeemer.as_deref(), version == synced, me) {
+        ClaimStep::Leave => return None,
+        ClaimStep::Redeem => return Some(stored),
+        ClaimStep::Claim => {}
+    }
+    let mine = claimed(stored);
+    let body = serde_json::to_value(&mine).ok()?;
+    pv.seal_and_upsert::<S>(
+        keys,
+        vault_id,
+        ItemNs::Connecting,
+        conn,
+        version + 1,
+        &ItemPayload::live(ItemNs::Connecting, conn, body),
+    )
+    .ok()?;
+    let row = pv.items.get(&id)?.clone();
+    let base = (synced > 0).then_some(synced);
+    let ct = URL_SAFE_NO_PAD.encode(&row.ct);
+    match push
+        .push(vault_id, &id, base, row.version, &ct, row.generation)
+        .await
+    {
+        None => {}
+        Some(Ok(PushOutcome::Ok { .. })) => {
+            if let Some(r) = pv.items.get_mut(&id) {
+                r.synced_version = r.version;
+                r.base = None;
+            }
+        }
+        Some(Ok(PushOutcome::Revoked(membership))) => {
+            crate::sync::schedule_revoke_vault_access(state, vault_id, membership);
+            return None;
+        }
+        Some(Ok(PushOutcome::Conflict { .. })) => {
+            tracing::info!(vault = %vault_id, conn = %conn, "oauth connect: the code's row changed first; not claimed");
+            return None;
+        }
+        Some(Ok(_)) => {
+            tracing::warn!(vault = %vault_id, conn = %conn, "oauth connect: the cloud did not take the claim on the code");
+            return None;
+        }
+        Some(Err(e)) => {
+            tracing::warn!(vault = %vault_id, conn = %conn, "oauth connect: the claim on the code was not sent: {}", e);
+            return None;
+        }
+    }
+    if let Err(e) = crate::storage::sealed_vault::write_per_item_atomic(&path, &pv) {
+        tracing::warn!(vault = %vault_id, conn = %conn, "oauth connect: the claim on the code was not stored: {}", e);
+        return None;
+    }
+    Some(mine)
+}
+
 /// Drive the connecting→refresh→move state machine over an open `ProtectedState`,
 /// given an async `exchange` closure (injected so tests can avoid real network
 /// calls). Mutates `m` in place; returns a [`ConnectReport`] of what happened. On
@@ -404,12 +548,17 @@ pub(crate) fn code_exchange_expired(first_tried: std::time::Instant, now: std::t
 ///
 /// The caller persists + pushes whenever [`ConnectReport::changed`] is true.
 ///
+/// `skip`: connects this device does not redeem this run (another device's
+/// claim, or a claim of its own that did not land, see [`claim_code`]): not
+/// exchanged, stamped or reported.
+///
 /// `exchange(conn, cfg, connecting)` performs the code→token call and returns the
 /// tokens (or an error string to log + skip).
 pub async fn run_pending<F, Fut>(
     services: &crate::service::ServiceRegistry,
     custom: &std::collections::HashMap<String, crate::service::ServiceDef>,
     m: &mut ProtectedState,
+    skip: &std::collections::BTreeSet<String>,
     mut exchange: F,
 ) -> ConnectReport
 where
@@ -418,7 +567,7 @@ where
 {
     let pending = collect_pending(m);
     let mut report = ConnectReport::default();
-    for (conn, p) in pending {
+    for (conn, p) in pending.into_iter().filter(|(c, _)| !skip.contains(c)) {
         let Some(cfg) = resolve_exchange_config(services, custom, &p.service) else {
             tracing::warn!(
                 conn = %conn,
@@ -728,12 +877,16 @@ async fn apply_pending_connects_inner(
         }
     }
 
+    // This device, as a code's `redeemer` names it.
+    let me = crate::device_auth::device_signer().map(|s| s.device_id().to_string());
+
     // Fill in the codes the loopback listener caught this round. A caught code
     // is then handled exactly like a pasted one: if this run does not finish
     // the connect (a transient failure), the code is sealed into its pending
-    // entry and pushed, so the same retry, expiry and status path owns it.
+    // entry, with this device as its redeemer, and pushed, so the same retry,
+    // expiry and status path owns it.
     let caught: Vec<String> = match &injected {
-        Some(injected) => inject_codes(&mut m, injected),
+        Some(injected) => inject_codes(&mut m, injected, me.as_deref()),
         None => Vec::new(),
     };
 
@@ -748,8 +901,38 @@ async fn apply_pending_connects_inner(
     // snapshot always runs before us (sync/watch/unlock+write all install,
     // THEN process connects), so it's fresh here.
     let custom = state.custom_services_snapshot(vault_id);
+
+    // A code read from the vault is exchanged only by the device whose claim
+    // the cloud holds ([`claim_code`]); a caught one is exchanged from memory
+    // first. Nothing is claimed that this run would not exchange: a code this
+    // daemon already redeemed, or one whose service it cannot exchange.
+    let mut skip = std::collections::BTreeSet::new();
+    for (conn, p) in collect_pending(&m) {
+        if caught.contains(&conn)
+            || state.was_code_redeemed(&p.oauth2.code)
+            || resolve_exchange_config(services, &custom, &p.service).is_none()
+        {
+            continue;
+        }
+        let claimed = match me.as_deref() {
+            Some(me) => claim_code(state, vault_id, &k, &conn, &p, me, &crate::sync::Cloud).await,
+            None => None,
+        };
+        match claimed {
+            Some(entry) => {
+                let mut connecting = aux_map::<Connecting>(&m, "connecting");
+                connecting.insert(conn, entry);
+                set_aux_map(&mut m, "connecting", connecting);
+            }
+            None => {
+                tracing::debug!(vault = %vault_id, conn = %conn, "oauth connect: code not claimed by this device; left to its redeemer");
+                skip.insert(conn);
+            }
+        }
+    }
+
     let st = state.clone();
-    let report = run_pending(services, &custom, &mut m, move |_conn, cfg, p| {
+    let report = run_pending(services, &custom, &mut m, &skip, move |_conn, cfg, p| {
         let state = st.clone();
         async move {
             // Idempotency key = the authorization code. A single-use code this
@@ -1611,7 +1794,7 @@ mod tests {
         // Inject the caught code → it becomes collectable for exchange.
         let mut codes = std::collections::BTreeMap::new();
         codes.insert("gmail".to_string(), "code-CAUGHT".to_string());
-        inject_codes(&mut m, &codes);
+        inject_codes(&mut m, &codes, None);
         let got = collect_pending(&m);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1.oauth2.code, "code-CAUGHT");
@@ -1624,11 +1807,10 @@ mod tests {
         let mut m = with_connecting("gmail", "gmail", "already-there");
         let mut codes = std::collections::BTreeMap::new();
         codes.insert("gmail".to_string(), "new-code".to_string());
-        inject_codes(&mut m, &codes);
-        assert_eq!(
-            aux_map::<Connecting>(&m, "connecting")["gmail"].oauth2.code,
-            "already-there",
-        );
+        inject_codes(&mut m, &codes, Some("dev_me"));
+        let entry = &aux_map::<Connecting>(&m, "connecting")["gmail"];
+        assert_eq!(entry.oauth2.code, "already-there");
+        assert_eq!(entry.oauth2.redeemer, None, "not caught here, not claimed");
     }
 
     #[test]
@@ -1802,7 +1984,7 @@ mod tests {
         let mut m = with_connecting("gmail", "gmail", "code-AUX");
 
         let mut seen = None;
-        let report = run_pending(&services, &no_custom(), &mut m, |conn, cfg, p| {
+        let report = run_pending(&services, &no_custom(), &mut m, &Default::default(), |conn, cfg, p| {
             seen = Some((
                 conn.clone(),
                 cfg.token_url.clone(),
@@ -1847,6 +2029,7 @@ mod tests {
             &services,
             &no_custom(),
             &mut m,
+            &Default::default(),
             |_conn, _cfg, _p| async move {
                 Err("oauth2 code-exchange returned HTTP 400: invalid_grant".to_string())
             },
@@ -1913,7 +2096,7 @@ mod tests {
 
         // A 400 rejection (not invalid_grant) stamps a terminal error.
         let mut m = with_connecting("gmail", "gmail", "code-A");
-        let report = run_pending(&services, &no_custom(), &mut m, |_conn, _cfg, _p| async move {
+        let report = run_pending(&services, &no_custom(), &mut m, &Default::default(), |_conn, _cfg, _p| async move {
             Err("oauth2 code-exchange returned HTTP 400 Bad Request: {\"error\":\"invalid_request\",\"error_description\":\"client_secret is missing.\"}".to_string())
         })
         .await;
@@ -1937,6 +2120,7 @@ mod tests {
             &services,
             &no_custom(),
             &mut m,
+            &Default::default(),
             |_conn, _cfg, _p| async move {
                 Err("oauth2 code-exchange returned HTTP 500: oops".to_string())
             },
@@ -1969,6 +2153,7 @@ mod tests {
             &services,
             &no_custom(),
             &mut m,
+            &Default::default(),
             |_conn, _cfg, _p| async move { Err(ALREADY_REDEEMED.to_string()) },
         )
         .await;
@@ -2003,6 +2188,7 @@ mod tests {
             &services,
             &no_custom(),
             &mut m,
+            &Default::default(),
             |_conn, _cfg, _p| async move {
                 Ok(tokens(None)) // consent without offline access → no refresh_token
             },
@@ -2022,7 +2208,7 @@ mod tests {
         let mut m = with_connecting("whatever", "nosuchservice", "code-A");
 
         let mut called = false;
-        let report = run_pending(&services, &no_custom(), &mut m, |_conn, _cfg, _p| {
+        let report = run_pending(&services, &no_custom(), &mut m, &Default::default(), |_conn, _cfg, _p| {
             called = true;
             async move { Ok(tokens(Some("rt"))) }
         })
@@ -2446,7 +2632,7 @@ refresh_token = "REFRESH_TOKEN"
 
         let services = gmail_registry();
         let mut m = with_connecting("gmail", "gmail", "code-late");
-        let report = run_pending(&services, &no_custom(), &mut m, |_conn, _cfg, _p| async move {
+        let report = run_pending(&services, &no_custom(), &mut m, &Default::default(), |_conn, _cfg, _p| async move {
             Err(CODE_EXPIRED.to_string())
         })
         .await;
@@ -2463,17 +2649,23 @@ refresh_token = "REFRESH_TOKEN"
 
     /// A caught code fills only an empty pending entry (a pasted code already
     /// in the vault wins), and the filled ones are reported so a run that does
-    /// not finish them stores them like a paste.
+    /// not finish them stores them like a paste, claimed by this device in the
+    /// same write.
     #[test]
     fn a_caught_code_fills_an_empty_entry_and_is_reported() {
         let caught: std::collections::BTreeMap<String, String> =
             [("ga4".to_string(), "code-1".to_string())].into();
         let mut m = with_connecting("ga4", "ga4", "");
-        assert_eq!(inject_codes(&mut m, &caught), vec!["ga4".to_string()]);
-        assert_eq!(aux_map::<Connecting>(&m, "connecting")["ga4"].oauth2.code, "code-1");
+        assert_eq!(
+            inject_codes(&mut m, &caught, Some("dev_me")),
+            vec!["ga4".to_string()]
+        );
+        let entry = &aux_map::<Connecting>(&m, "connecting")["ga4"];
+        assert_eq!(entry.oauth2.code, "code-1");
+        assert_eq!(entry.oauth2.redeemer.as_deref(), Some("dev_me"));
 
         let mut pasted = with_connecting("ga4", "ga4", "pasted");
-        assert!(inject_codes(&mut pasted, &caught).is_empty());
+        assert!(inject_codes(&mut pasted, &caught, Some("dev_me")).is_empty());
         assert_eq!(aux_map::<Connecting>(&pasted, "connecting")["ga4"].oauth2.code, "pasted");
     }
 
@@ -2917,5 +3109,342 @@ refresh_token = "ACME_REFRESH_TOKEN"
                 "connection gmail: not applied".to_string()
             )]
         );
+    }
+
+    /// Who redeems a code: the device the cloud's claim names; an unclaimed
+    /// code, or this device's claim not on the cloud yet, is claimed first;
+    /// another device's claim is left alone.
+    #[test]
+    fn claim_step_decides_who_redeems_a_code() {
+        assert_eq!(claim_step(None, true, "dev_me"), ClaimStep::Claim);
+        assert_eq!(claim_step(None, false, "dev_me"), ClaimStep::Claim);
+        assert_eq!(
+            claim_step(Some("dev_me"), true, "dev_me"),
+            ClaimStep::Redeem
+        );
+        assert_eq!(
+            claim_step(Some("dev_me"), false, "dev_me"),
+            ClaimStep::Claim
+        );
+        assert_eq!(claim_step(Some("dev_b"), true, "dev_me"), ClaimStep::Leave);
+        assert_eq!(claim_step(Some("dev_b"), false, "dev_me"), ClaimStep::Leave);
+    }
+
+    /// A connect this device does not redeem this run is not exchanged,
+    /// stamped or reported.
+    #[tokio::test]
+    async fn run_pending_never_touches_a_skipped_code() {
+        let services = gmail_registry();
+        let mut m = with_connecting("gmail", "gmail", "code-X");
+        let skip: std::collections::BTreeSet<String> = ["gmail".to_string()].into();
+        let calls = std::cell::Cell::new(0);
+        let report = run_pending(&services, &no_custom(), &mut m, &skip, |_c, _cfg, _p| {
+            calls.set(calls.get() + 1);
+            async move { Err::<ExchangedTokens, String>("invalid_grant".into()) }
+        })
+        .await;
+        assert_eq!(calls.get(), 0);
+        assert!(!report.changed() && report.unreached.is_empty() && report.left_pending.is_empty());
+        assert_eq!(
+            aux_map::<Connecting>(&m, "connecting")["gmail"]
+                .oauth2
+                .error,
+            None
+        );
+    }
+
+    /// A cloud for [`claim_code`]: answers every push with `outcome`.
+    struct FakePush {
+        outcome: fn() -> Option<Result<crate::sync::PushOutcome, String>>,
+        calls: std::sync::Mutex<Vec<(Option<u64>, u64)>>,
+    }
+
+    impl FakePush {
+        fn new(outcome: fn() -> Option<Result<crate::sync::PushOutcome, String>>) -> Self {
+            Self {
+                outcome,
+                calls: Default::default(),
+            }
+        }
+
+        fn calls(&self) -> Vec<(Option<u64>, u64)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::sync::ItemPush for FakePush {
+        async fn push(
+            &self,
+            _vault: &str,
+            _item_id: &str,
+            base: Option<u64>,
+            version: u64,
+            _ct_b64: &str,
+            _generation: Option<u64>,
+        ) -> Option<Result<crate::sync::PushOutcome, String>> {
+            self.calls.lock().unwrap().push((base, version));
+            (self.outcome)()
+        }
+    }
+
+    const CLAIM_KEY: [u8; 32] = [0x42u8; 32];
+
+    /// The body of the in-flight connect `gmail` (code `c`).
+    fn connect_body(redeemer: Option<&str>) -> serde_json::Value {
+        let mut oauth2 = serde_json::json!({ "code": "c", "code_verifier": "v" });
+        if let Some(r) = redeemer {
+            oauth2["redeemer"] = r.into();
+        }
+        serde_json::json!({ "service": "gmail", "oauth2": oauth2 })
+    }
+
+    /// A store holding the in-flight connect `gmail` claimed by `redeemer`,
+    /// at v2, last confirmed on the cloud at `synced`. Returns the state,
+    /// vault, store path and the row's id.
+    fn claim_fixture(
+        redeemer: Option<&str>,
+        synced: u64,
+    ) -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        &'static str,
+        std::path::PathBuf,
+        String,
+    ) {
+        use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+        use crate::storage::sealed_vault::PerItemVault;
+        type S = sudp::primitives::StdPrimitives;
+        let (dir, state) = temp_state();
+        let vid = "claim-v";
+        let keys = VaultKeys::single(&CLAIM_KEY);
+        let mut pv = PerItemVault::build_initial(
+            b"c".to_vec(),
+            "x".into(),
+            "y".into(),
+            "Dev".into(),
+            vec![0u8; 32],
+            vec![0u8; 48],
+        )
+        .unwrap();
+        let body = connect_body(redeemer);
+        let id = pv
+            .seal_and_upsert::<S>(
+                keys,
+                vid,
+                ItemNs::Connecting,
+                "gmail",
+                2,
+                &ItemPayload::live(ItemNs::Connecting, "gmail", body),
+            )
+            .unwrap();
+        pv.items.get_mut(&id).unwrap().synced_version = synced;
+        let path = state.vaults.per_item_path(vid).unwrap();
+        crate::storage::sealed_vault::write_per_item_atomic(&path, &pv).unwrap();
+        (dir, state, vid, path, id)
+    }
+
+    /// The stored row `id`: `(version, synced_version, its connect)`.
+    fn stored_connect(
+        path: &std::path::Path,
+        id: &str,
+        vid: &str,
+    ) -> (u64, u64, Option<Connecting>) {
+        use crate::storage::item::{ItemNs, VaultKeys};
+        type S = sudp::primitives::StdPrimitives;
+        let pv = crate::storage::sealed_vault::read_per_item(path)
+            .unwrap()
+            .unwrap();
+        let row = &pv.items[id];
+        let entry = pv
+            .open_item::<S>(
+                VaultKeys::single(&CLAIM_KEY),
+                vid,
+                ItemNs::Connecting,
+                "gmail",
+            )
+            .unwrap()
+            .filter(|p| !p.is_tombstone())
+            .map(|p| serde_json::from_value(p.body).unwrap());
+        (row.version, row.synced_version, entry)
+    }
+
+    fn entry(redeemer: Option<&str>) -> Connecting {
+        serde_json::from_value(connect_body(redeemer)).unwrap()
+    }
+
+    /// An unclaimed code is claimed with compare-and-swap at the version the
+    /// cloud holds before it is exchanged; once the cloud holds the claim the
+    /// device redeems it without another write.
+    #[tokio::test]
+    async fn a_code_is_claimed_with_compare_and_swap_before_it_is_exchanged() {
+        use crate::sync::PushOutcome;
+        let (_dir, state, vid, path, id) = claim_fixture(None, 2);
+        let cloud = FakePush::new(|| Some(Ok(PushOutcome::Ok { version: 3, seq: 1 })));
+        let got = claim_code(
+            &state,
+            vid,
+            &CLAIM_KEY,
+            "gmail",
+            &entry(None),
+            "dev_me",
+            &cloud,
+        )
+        .await
+        .expect("claimed");
+        assert_eq!(got.oauth2.redeemer.as_deref(), Some("dev_me"));
+        assert_eq!(cloud.calls(), vec![(Some(2), 3)]);
+        let (v, synced, stored) = stored_connect(&path, &id, vid);
+        assert_eq!((v, synced), (3, 3), "the claim is on the cloud");
+        assert_eq!(stored.unwrap().oauth2.redeemer.as_deref(), Some("dev_me"));
+
+        let none = FakePush::new(|| None);
+        let again = claim_code(&state, vid, &CLAIM_KEY, "gmail", &got, "dev_me", &none).await;
+        assert_eq!(again.unwrap().oauth2.redeemer.as_deref(), Some("dev_me"));
+        assert!(none.calls().is_empty(), "redeemed with no write");
+    }
+
+    /// A claim the cloud did not take (another writer changed the row first,
+    /// a refusal, no network) writes nothing and redeems nothing this run.
+    #[tokio::test]
+    async fn a_claim_the_cloud_did_not_take_writes_nothing() {
+        use crate::sync::PushOutcome;
+        let outcomes: [fn() -> Option<Result<PushOutcome, String>>; 4] = [
+            || Some(Ok(PushOutcome::Conflict { current_version: 3 })),
+            || {
+                Some(Ok(PushOutcome::Rejected {
+                    status: 403,
+                    error: "x".into(),
+                }))
+            },
+            || Some(Ok(PushOutcome::KeysetChanged)),
+            || Some(Err("reach cloud: timed out".into())),
+        ];
+        for outcome in outcomes {
+            let (_dir, state, vid, path, id) = claim_fixture(None, 2);
+            let cloud = FakePush::new(outcome);
+            let got = claim_code(
+                &state,
+                vid,
+                &CLAIM_KEY,
+                "gmail",
+                &entry(None),
+                "dev_me",
+                &cloud,
+            )
+            .await;
+            assert!(got.is_none());
+            assert_eq!(cloud.calls().len(), 1);
+            let (v, synced, stored) = stored_connect(&path, &id, vid);
+            assert_eq!((v, synced), (2, 2));
+            assert_eq!(stored.unwrap().oauth2.redeemer, None);
+        }
+    }
+
+    /// Another device's claim is never exchanged or written over; this
+    /// device's claim not on the cloud yet (e.g. a caught code stored but not
+    /// pushed) is claimed again with compare-and-swap; with no cloud
+    /// configured the claim stays local.
+    #[tokio::test]
+    async fn only_a_claim_the_cloud_holds_is_redeemed() {
+        use crate::sync::PushOutcome;
+        let (_dir, state, vid, path, id) = claim_fixture(Some("dev_b"), 2);
+        let cloud = FakePush::new(|| Some(Ok(PushOutcome::Ok { version: 3, seq: 1 })));
+        assert!(claim_code(
+            &state,
+            vid,
+            &CLAIM_KEY,
+            "gmail",
+            &entry(Some("dev_b")),
+            "dev_me",
+            &cloud
+        )
+        .await
+        .is_none());
+        assert!(cloud.calls().is_empty());
+        assert_eq!(stored_connect(&path, &id, vid).0, 2);
+
+        let (_dir, state, vid, path, id) = claim_fixture(Some("dev_me"), 1);
+        let got = claim_code(
+            &state,
+            vid,
+            &CLAIM_KEY,
+            "gmail",
+            &entry(Some("dev_me")),
+            "dev_me",
+            &cloud,
+        )
+        .await;
+        assert!(got.is_some());
+        assert_eq!(cloud.calls(), vec![(Some(1), 3)]);
+        assert_eq!(stored_connect(&path, &id, vid).1, 3);
+
+        let (_dir, state, vid, path, id) = claim_fixture(None, 2);
+        let local = FakePush::new(|| None);
+        let got = claim_code(
+            &state,
+            vid,
+            &CLAIM_KEY,
+            "gmail",
+            &entry(None),
+            "dev_me",
+            &local,
+        )
+        .await;
+        assert_eq!(got.unwrap().oauth2.redeemer.as_deref(), Some("dev_me"));
+        let (v, synced, stored) = stored_connect(&path, &id, vid);
+        assert_eq!((v, synced), (3, 2), "stored, unpushed");
+        assert_eq!(stored.unwrap().oauth2.redeemer.as_deref(), Some("dev_me"));
+    }
+
+    /// A failure stamp never brings back a connect completed elsewhere while
+    /// the exchange ran (its tombstone landed in the store), and lands when
+    /// the connect is still the one it read.
+    #[test]
+    fn a_failure_stamp_never_brings_back_a_completed_connect() {
+        use crate::storage::item::{ItemNs, ItemPayload, VaultKeys};
+        type S = sudp::primitives::StdPrimitives;
+        for completed_elsewhere in [true, false] {
+            let (_dir, state, vid, path, id) = claim_fixture(Some("dev_me"), 2);
+            let (mut m, base) = open_m_for_write(&state, vid, &CLAIM_KEY, None).unwrap();
+            if completed_elsewhere {
+                let mut pv = crate::storage::sealed_vault::read_per_item(&path)
+                    .unwrap()
+                    .unwrap();
+                pv.seal_and_upsert::<S>(
+                    VaultKeys::single(&CLAIM_KEY),
+                    vid,
+                    ItemNs::Connecting,
+                    "gmail",
+                    3,
+                    &ItemPayload::tombstone(ItemNs::Connecting, "gmail"),
+                )
+                .unwrap();
+                pv.items.get_mut(&id).unwrap().synced_version = 3;
+                crate::storage::sealed_vault::write_per_item_atomic(&path, &pv).unwrap();
+            }
+            mark_connecting_failed(&mut m, "gmail", "authorization expired or already used");
+            let view =
+                crate::storage::plaintext::VaultPlaintextView::from_protected_state(&m).unwrap();
+            reconcile_per_item_after_connect(
+                &state,
+                vid,
+                None,
+                &view,
+                &CLAIM_KEY,
+                ReconcileBase::Since(&base),
+            )
+            .unwrap()
+            .expect("a per-item store backs the vault");
+            let (v, _, stored) = stored_connect(&path, &id, vid);
+            if completed_elsewhere {
+                assert_eq!(v, 3);
+                assert!(stored.is_none(), "still completed");
+            } else {
+                assert_eq!(v, 3);
+                let stamped = stored.unwrap();
+                assert_eq!(stamped.oauth2.redeemer.as_deref(), Some("dev_me"));
+                assert!(stamped.oauth2.error.is_some());
+            }
+        }
     }
 }
