@@ -585,11 +585,11 @@ mod tests {
         // Starts direct.
         assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
         // A `sprott config set proxy` reload swaps the cell…
-        *shared.write().unwrap() = Some(Arc::new(ProxyCfg {
+        *shared.write().unwrap() = Some(Upstream::Given(Arc::new(ProxyCfg {
             host: "127.0.0.1".into(),
             port: 7778,
             auth: None,
-        }));
+        })));
         // …and the same connector now tunnels — without being rebuilt.
         let p = c
             .use_proxy_for("gmail.googleapis.com", true)
