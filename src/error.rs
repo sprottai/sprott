@@ -823,3 +823,20 @@ mod tests {
         assert_eq!(b["action"], "unlock");
     }
 }
+
+/// Flatten an error's `source()` chain into one line, dropping empty/duplicate
+/// frames. `reqwest::Error`'s own `Display` stops at "error sending request for
+/// url (...)"; the cause that tells a person what to fix (a timeout, a DNS
+/// failure, a refused connection, a TLS problem) lives further down the chain.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = cur {
+        let s = e.to_string();
+        if !s.is_empty() && !parts.iter().any(|p| p == &s) {
+            parts.push(s);
+        }
+        cur = e.source();
+    }
+    parts.join(": ")
+}

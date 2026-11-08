@@ -209,6 +209,10 @@ fn params_json(params: &[(String, String)]) -> serde_json::Value {
 /// `auth` (a Basic header carries it; post puts it in `params`), and
 /// `Accept: application/json` always (some providers default to another
 /// representation without it).
+/// Prefix of a code exchange that never got an HTTP answer (network, proxy,
+/// TLS). The rest of the message is the transport error chain.
+pub const CODE_EXCHANGE_REQUEST_FAILED: &str = "oauth2 code-exchange request failed: ";
+
 async fn post_token_endpoint(
     token_url: &str,
     style: OAuthStyle,
@@ -281,7 +285,13 @@ pub async fn exchange_code(
     );
     let resp = post_token_endpoint(token_url, style, auth, client_id, client_secret, &params)
         .await
-        .map_err(|e| format!("oauth2 code-exchange request failed: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "{}{}",
+                CODE_EXCHANGE_REQUEST_FAILED,
+                crate::error::error_chain(&e)
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();

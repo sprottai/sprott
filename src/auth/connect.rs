@@ -301,20 +301,24 @@ fn collect_pending(m: &ProtectedState) -> Vec<(String, Connecting)> {
 /// entries (keyed by connection id), so [`collect_pending`] picks them up for
 /// exchange this cycle. Only fills an EMPTY code — never overwrites one already
 /// present (a racing paste wins whichever landed first). Pure state edit.
-fn inject_codes(m: &mut ProtectedState, codes: &std::collections::BTreeMap<String, String>) {
+fn inject_codes(
+    m: &mut ProtectedState,
+    codes: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
     let mut connecting = aux_map::<Connecting>(m, "connecting");
-    let mut changed = false;
+    let mut filled = Vec::new();
     for (conn, code) in codes {
         if let Some(entry) = connecting.get_mut(conn) {
             if entry.oauth2.code.is_empty() && !code.is_empty() {
                 entry.oauth2.code = code.clone();
-                changed = true;
+                filled.push(conn.clone());
             }
         }
     }
-    if changed {
+    if !filled.is_empty() {
         set_aux_map(m, "connecting", connecting);
     }
+    filled
 }
 
 /// Per-run outcome of the connect state machine, so callers (and ultimately
@@ -330,7 +334,15 @@ fn inject_codes(m: &mut ProtectedState, codes: &std::collections::BTreeMap<Strin
 pub struct ConnectReport {
     pub completed: Vec<String>,
     pub failed: Vec<(String, String)>,
-    pub unreached: Vec<(String, String)>,
+    /// `(connection, provider host, transport detail)`.
+    pub unreached: Vec<(String, String, String)>,
+    /// Left pending without an error stamp for a reason other than the
+    /// network (no exchange config, no refresh_token returned):
+    /// `(connection, reason)`. Nothing is written for these.
+    pub left_pending: Vec<(String, String)>,
+    /// Codes the loopback listener caught for connects this run did not
+    /// finish, now sealed into their pending entries (as a paste would be).
+    pub code_stored: Vec<String>,
     /// The `completed` connects are stored but this device does not serve
     /// them yet ([`crate::error::STORED_NOT_SERVED_MSG`]).
     pub not_served: bool,
@@ -340,6 +352,11 @@ impl ConnectReport {
     /// Did anything MUTATE the sealed state (⇒ the caller must persist + push)?
     /// A transient `unreached` stamps nothing, so it does not count.
     pub fn changed(&self) -> bool {
+        !self.completed.is_empty() || !self.failed.is_empty() || !self.code_stored.is_empty()
+    }
+
+    /// Did a connect reach an end (completed or failed for good)?
+    pub fn settled(&self) -> bool {
         !self.completed.is_empty() || !self.failed.is_empty()
     }
 }
@@ -409,6 +426,10 @@ where
                 "oauth connect: no oauth2 exchange config for the connection's service \
                  (unknown/non-oauth2 service or missing provider creds); leaving connecting"
             );
+            report.left_pending.push((
+                conn.clone(),
+                format!("no OAuth exchange settings for service `{}` on this computer", p.service),
+            ));
             continue;
         };
         // Capture what the post-exchange MOVE needs before `p` is consumed.
@@ -426,6 +447,10 @@ where
                         conn = %conn,
                         "oauth connect: exchange returned no refresh_token; leaving connecting"
                     );
+                    report.left_pending.push((
+                        conn.clone(),
+                        "the provider returned no refresh token".to_string(),
+                    ));
                     continue;
                 }
                 apply_exchange_result(m, &conn, &service, hosts, keys, &cfg_apply, &tokens);
@@ -451,7 +476,7 @@ where
                     continue;
                 }
                 if e == CODE_EXPIRED {
-                    let reason = "the authorization code expired before the provider could be reached; reconnect".to_string();
+                    let reason = code_expired_reason(&host);
                     mark_connecting_failed(m, &conn, &reason);
                     report.failed.push((conn.clone(), reason));
                     tracing::warn!(conn = %conn, "oauth connect: exchange still failing past the code's lifetime; marked failed");
@@ -472,13 +497,28 @@ where
                     // Transient (network / provider 5xx / rate limit) — leave
                     // connecting; its retry timer tries again (backoff). Report it so `sc sync`
                     // can say "couldn't reach <host>" instead of a silent spin.
-                    report.unreached.push((conn.clone(), host));
+                    let detail = e
+                        .strip_prefix(crate::auth::oauth2::CODE_EXCHANGE_REQUEST_FAILED)
+                        .unwrap_or(&e)
+                        .to_string();
+                    report.unreached.push((conn.clone(), host, detail));
                     tracing::warn!(conn = %conn, "oauth connect: exchange failed (transient), will retry: {}", e);
                 }
             }
         }
     }
     report
+}
+
+/// The stamped reason for a code whose exchange kept failing transiently past
+/// its lifetime. Names the host this computer could not reach and the one
+/// setting that usually fixes it, so the console's "connect again" is not the
+/// whole story.
+fn code_expired_reason(host: &str) -> String {
+    format!(
+        "couldn't reach {host} from this computer before the authorization expired. \
+         Check its network or proxy (`sprott config set proxy <url>`), then connect again"
+    )
 }
 
 /// Classify an exchange failure: `Some(reason)` when re-sending the SAME
@@ -550,10 +590,12 @@ pub async fn process_vault_connects(
     // `injected` (conn → code) carries any codes the 8765 loopback listener just
     // caught; `None` on the ordinary sync path (nothing to inject).
     let report = apply_pending_connects(state, vault_id, injected).await;
-    if report.changed() {
+    if report.settled() {
         // A fresh connect landed → clear any stale needs-reauth flag for this
         // vault (a still-dead token re-marks on the next /use).
         state.oauth_clear_reauth_vault(vault_id);
+    }
+    if report.changed() {
         // Propagate to OTHER devices: push the re-sealed blob back to the cloud.
         // A Google authorization code is single-use, so only THIS daemon could
         // redeem the pending connect — every other device's daemon must PULL the
@@ -686,11 +728,14 @@ async fn apply_pending_connects_inner(
         }
     }
 
-    // Fill in any codes the 8765 listener caught this round, so the matching
-    // entries become exchangeable in the pre-check + run below.
-    if let Some(injected) = &injected {
-        inject_codes(&mut m, injected);
-    }
+    // Fill in the codes the loopback listener caught this round. A caught code
+    // is then handled exactly like a pasted one: if this run does not finish
+    // the connect (a transient failure), the code is sealed into its pending
+    // entry and pushed, so the same retry, expiry and status path owns it.
+    let caught: Vec<String> = match &injected {
+        Some(injected) => inject_codes(&mut m, injected),
+        None => Vec::new(),
+    };
 
     // Cheap pre-check: nothing to do if there are no in-flight connects.
     if collect_pending(&m).is_empty() {
@@ -761,6 +806,13 @@ async fn apply_pending_connects_inner(
     for (c, _) in &report.failed {
         state.clear_loopback_for_conn(vault_id, c);
     }
+    // A caught code whose connect is still pending is stored like a paste.
+    let mut report = report;
+    let stored: Vec<String> = caught
+        .into_iter()
+        .filter(|c| !report.completed.contains(c) && !report.failed.iter().any(|(f, _)| f == c))
+        .collect();
+    report.code_stored = stored;
 
     if !report.changed() {
         // Nothing MUTATED (all left pending / transient) — don't rewrite or push.
@@ -786,7 +838,6 @@ async fn apply_pending_connects_inner(
     // refresh_token without a manual lock/unlock. A connect the store did not
     // take is reported failed, never served from memory; one it took that
     // this device does not serve yet is reported so.
-    let mut report = report;
     let not_applied = match write_view(
         state,
         vault_id,
@@ -1819,6 +1870,13 @@ mod tests {
     }
 
     #[test]
+    fn code_expired_reason_names_the_host_and_the_proxy_setting() {
+        let r = code_expired_reason("oauth2.googleapis.com");
+        assert!(r.contains("oauth2.googleapis.com"));
+        assert!(r.contains("sprott config set proxy"));
+    }
+
+    #[test]
     fn terminal_exchange_reason_classifies_rejections_vs_transients() {
         // 4xx rejections are terminal, with the provider's detail surfaced.
         let missing_secret = terminal_exchange_reason(
@@ -2400,7 +2458,30 @@ refresh_token = "REFRESH_TOKEN"
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("expired before the provider could be reached"));
+            .contains("before the authorization expired"));
+    }
+
+    /// A caught code fills only an empty pending entry (a pasted code already
+    /// in the vault wins), and the filled ones are reported so a run that does
+    /// not finish them stores them like a paste.
+    #[test]
+    fn a_caught_code_fills_an_empty_entry_and_is_reported() {
+        let caught: std::collections::BTreeMap<String, String> =
+            [("ga4".to_string(), "code-1".to_string())].into();
+        let mut m = with_connecting("ga4", "ga4", "");
+        assert_eq!(inject_codes(&mut m, &caught), vec!["ga4".to_string()]);
+        assert_eq!(aux_map::<Connecting>(&m, "connecting")["ga4"].oauth2.code, "code-1");
+
+        let mut pasted = with_connecting("ga4", "ga4", "pasted");
+        assert!(inject_codes(&mut pasted, &caught).is_empty());
+        assert_eq!(aux_map::<Connecting>(&pasted, "connecting")["ga4"].oauth2.code, "pasted");
+    }
+
+    #[test]
+    fn a_stored_code_is_a_change_but_not_a_settled_connect() {
+        let r = ConnectReport { code_stored: vec!["ga4".into()], ..Default::default() };
+        assert!(r.changed(), "persisted and pushed like a paste");
+        assert!(!r.settled());
     }
 
     /// The first transient failure of a code starts its window, and later

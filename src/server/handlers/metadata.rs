@@ -316,7 +316,7 @@ pub async fn sync_now(
                         .map(|(conn, reason)| json!({ "conn": conn, "reason": reason }))
                         .collect::<Vec<_>>(),
                     "unreached": c.unreached.iter()
-                        .map(|(conn, host)| json!({ "conn": conn, "host": host }))
+                        .map(|(conn, host, detail)| json!({ "conn": conn, "host": host, "detail": detail }))
                         .collect::<Vec<_>>(),
                     // The completed connects are stored but not served here yet.
                     "served_message": c.not_served.then_some(crate::error::STORED_NOT_SERVED_MSG),

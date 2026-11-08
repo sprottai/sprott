@@ -22,7 +22,7 @@ use hudsucker::hyper::{header, HeaderMap, Method, Request, Response, StatusCode,
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
 use serde_json::json;
 
-use crate::error::ScCode;
+use crate::error::{error_chain, ScCode};
 use crate::proxy::resolver::{self, Phantom};
 use crate::state::AppState;
 
@@ -2193,23 +2193,6 @@ fn egress_error_parts(is_connect: bool, cause: &str, has_proxy: bool) -> (ScCode
             cause, hint
         ),
     )
-}
-
-/// Flatten an error's `source()` chain into one line, dropping empty/duplicate
-/// frames. For a forward-hop failure the deepest frame is our `TunnelConnector`
-/// message (e.g. `forward connect to gmail.googleapis.com:443 timed out`), which
-/// already names host:port and direct-vs-proxy.
-fn error_chain(err: &dyn std::error::Error) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut cur: Option<&dyn std::error::Error> = Some(err);
-    while let Some(e) = cur {
-        let s = e.to_string();
-        if !s.is_empty() && !parts.iter().any(|p| p == &s) {
-            parts.push(s);
-        }
-        cur = e.source();
-    }
-    parts.join(": ")
 }
 
 /// A plain-text 4xx/5xx for the MITM plane. Status comes from the registry
