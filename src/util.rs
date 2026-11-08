@@ -4,12 +4,19 @@ use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The builder every outbound HTTP client starts from: `User-Agent` names this
-/// binary (`sprott/<version>`; reqwest sends none by default), and the route is
-/// the device's effective egress (`cli::egress_proxy`): the proxy Sprott was
-/// given, else this computer's own proxy settings. One entry point, so every
-/// client agrees on how it reaches the internet.
+/// binary (`sprott/<version>`; reqwest sends none by default). In the daemon
+/// the route is its effective egress (`cli::egress_proxy::effective`): the
+/// proxy Sprott was given, else this computer's own proxy settings. Any other
+/// process leaves the route to reqwest, which reads the `*_PROXY` variables
+/// (per scheme, with `NO_PROXY`; `apply_to_env` filled the empty ones from
+/// the stored proxy), then this computer's settings. One entry point, so
+/// every client of a process agrees on how it reaches the internet.
 pub fn http_builder() -> reqwest::ClientBuilder {
-    crate::cli::egress_proxy::apply_effective(base_builder())
+    if crate::cli::egress_proxy::is_daemon() {
+        crate::cli::egress_proxy::apply_effective(base_builder())
+    } else {
+        base_builder()
+    }
 }
 
 /// [`http_builder`] without the egress route, for the callers that apply a

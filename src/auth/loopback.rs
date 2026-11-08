@@ -200,7 +200,20 @@ async fn handle_callback(
     } else if let Some((_, host, detail)) =
         report.unreached.iter().find(|(c, _, _)| *c == pending.conn_id)
     {
-        Outcome::Unreached { host: host.clone(), detail: detail.clone() }
+        Outcome::Unreached {
+            host: host.clone(),
+            detail: detail.clone(),
+            stored: report.code_stored.contains(&pending.conn_id),
+            shared: report.not_sent.contains(&pending.conn_id),
+        }
+    } else if let Some((_, host, detail)) =
+        report.provider_error.iter().find(|(c, _, _)| *c == pending.conn_id)
+    {
+        Outcome::ProviderError {
+            host: host.clone(),
+            detail: detail.clone(),
+            stored: report.code_stored.contains(&pending.conn_id),
+        }
     } else if let Some((_, reason)) =
         report.left_pending.iter().find(|(c, _)| *c == pending.conn_id)
     {
@@ -223,7 +236,12 @@ enum Outcome {
     StoredNotServed,
     Cancelled { why: String },
     Failed { reason: String },
-    Unreached { host: String, detail: String },
+    /// No HTTP answer from `host`. `stored`: the store holds the caught code,
+    /// retried from here; `shared`: the request was never sent, so the code
+    /// was stored unclaimed and another device may finish it.
+    Unreached { host: String, detail: String, stored: bool, shared: bool },
+    /// `host` answered with an error worth retrying.
+    ProviderError { host: String, detail: String, stored: bool },
     NotFinished { reason: String },
     Locked,
     Pending,
@@ -263,13 +281,35 @@ fn result_page(o: &Outcome) -> String {
             Some(reason.clone()),
             false,
         ),
-        Outcome::Unreached { host, detail } => (
-            format!("Couldn't reach {host}"),
+        Outcome::Unreached { host, detail, stored, shared } => {
+            let mut lines = vec![format!(
+                "Sprott on this computer couldn't reach {host}, so the connection isn't finished."
+            )];
+            lines.push(match (stored, shared) {
+                (true, false) => format!("Sprott saved the sign-in and retries it for up to {window} minutes."),
+                (true, true) => format!("Sprott saved the sign-in and retries it for up to {window} minutes. Another computer running Sprott on your account can also finish it."),
+                (false, _) => "Connect again from Sprott.".into(),
+            });
+            lines.push("Suggestion: if this computer uses a proxy, set it for Sprott:".into());
+            (
+                format!("Couldn't reach {host}"),
+                lines,
+                Some("sprott config set proxy http://HOST:PORT"),
+                Some(detail.clone()),
+                false,
+            )
+        }
+        Outcome::ProviderError { host, detail, stored } => (
+            format!("{host} answered with an error"),
             vec![
-                format!("Sprott on this computer couldn't reach {host}, so the connection isn't finished yet. Sprott saved the sign-in and retries it for up to {window} minutes."),
-                "Suggestion: if this computer uses a proxy, set it for Sprott:".into(),
+                format!("{host} answered with an error, so the connection isn't finished."),
+                if *stored {
+                    format!("Sprott saved the sign-in and retries it for up to {window} minutes.")
+                } else {
+                    "Connect again from Sprott.".into()
+                },
             ],
-            Some("sprott config set proxy http://HOST:PORT"),
+            None,
             Some(detail.clone()),
             false,
         ),
@@ -375,7 +415,8 @@ mod tests {
             Outcome::StoredNotServed,
             Outcome::Cancelled { why: "access_denied".into() },
             Outcome::Failed { reason: "provider rejected the exchange: invalid_client".into() },
-            Outcome::Unreached { host: "oauth2.googleapis.com".into(), detail: "operation timed out".into() },
+            Outcome::Unreached { host: "oauth2.googleapis.com".into(), detail: "operation timed out".into(), stored: true, shared: false },
+            Outcome::ProviderError { host: "oauth2.googleapis.com".into(), detail: "HTTP 503".into(), stored: true },
             Outcome::NotFinished { reason: "the provider returned no refresh token".into() },
             Outcome::Locked,
             Outcome::Pending,
@@ -389,11 +430,49 @@ mod tests {
         let page = result_page(&Outcome::Unreached {
             host: "oauth2.googleapis.com".into(),
             detail: "error sending request: <b>timed out</b>".into(),
+            stored: true,
+            shared: false,
         });
         assert!(page.contains("Couldn't reach oauth2.googleapis.com"));
         assert!(page.contains("sprott config set proxy"));
         assert!(page.contains("&lt;b&gt;timed out&lt;/b&gt;"), "detail is escaped");
         assert!(!page.contains("<b>"));
+    }
+
+    /// The page says the sign-in was saved and is retried only when the
+    /// store holds it; otherwise it says to connect again. A provider that
+    /// answered with an error is named as such, without a proxy suggestion.
+    #[test]
+    fn the_page_says_saved_only_when_stored() {
+        let host = "oauth2.googleapis.com".to_string();
+        let unreached = |stored, shared| {
+            result_page(&Outcome::Unreached {
+                host: host.clone(),
+                detail: "connection refused".into(),
+                stored,
+                shared,
+            })
+        };
+        assert!(unreached(true, false).contains("Sprott saved the sign-in"));
+        assert!(!unreached(true, false).contains("Another computer"));
+        assert!(unreached(true, true).contains("Another computer running Sprott"));
+        let lost = unreached(false, true);
+        assert!(!lost.contains("saved"));
+        assert!(lost.contains("Connect again from Sprott."));
+
+        let answered = |stored| {
+            result_page(&Outcome::ProviderError {
+                host: host.clone(),
+                detail: "returned HTTP 503 Service Unavailable: busy".into(),
+                stored,
+            })
+        };
+        let page = answered(true);
+        assert!(page.contains("oauth2.googleapis.com answered with an error"));
+        assert!(page.contains("HTTP 503"));
+        assert!(page.contains("Sprott saved the sign-in"));
+        assert!(!page.contains("couldn't reach") && !page.contains("proxy"));
+        assert!(answered(false).contains("Connect again from Sprott."));
     }
 
     #[test]

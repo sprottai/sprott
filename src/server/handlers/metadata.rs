@@ -318,6 +318,10 @@ pub async fn sync_now(
                     "unreached": c.unreached.iter()
                         .map(|(conn, host, detail)| json!({ "conn": conn, "host": host, "detail": detail }))
                         .collect::<Vec<_>>(),
+                    // The provider answered with an error worth retrying.
+                    "provider_error": c.provider_error.iter()
+                        .map(|(conn, host, detail)| json!({ "conn": conn, "host": host, "detail": detail }))
+                        .collect::<Vec<_>>(),
                     // The completed connects are stored but not served here yet.
                     "served_message": c.not_served.then_some(crate::error::STORED_NOT_SERVED_MSG),
                 },

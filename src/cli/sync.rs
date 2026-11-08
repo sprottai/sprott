@@ -75,16 +75,6 @@ fn sync_summary(pulled: bool, key_changed: bool) -> &'static str {
 /// in `sc log`. Stays silent when there was nothing pending.
 fn report_connects(connects: Option<&serde_json::Value>) {
     let Some(c) = connects else { return };
-    let conns = |arr: Option<&serde_json::Value>| -> Vec<String> {
-        arr.and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|it| it.get("conn").and_then(|v| v.as_str()).map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
 
     let completed: Vec<String> = c
         .get("completed")
@@ -117,22 +107,37 @@ fn report_connects(connects: Option<&serde_json::Value>) {
         }
     }
 
-    // Transient: the daemon couldn't REACH the provider. Honest, not a hard fail
-    // (it retries) — but the signal a user needs to check egress / `sc proxy`.
-    let unreached = conns(c.get("unreached"));
-    if !unreached.is_empty() {
-        let host = c
-            .get("unreached")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|it| it.get("host"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("the provider");
+    // Transient, retried: the daemon got no answer from the provider (the
+    // signal to check egress), or the provider answered with an error.
+    let line = |it: &serde_json::Value, what: &str| {
+        let text = |k: &str| it.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let detail = text("detail");
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", crate::util::terminal_safe(detail))
+        };
         eprintln!(
-            "  {}: couldn't reach {host} (network/proxy?); will retry. \
-             Behind a proxy? `sprott config set proxy <url>`.",
-            unreached.join(", ")
+            "  {}: {}{detail}; will retry.",
+            crate::util::terminal_safe(text("conn")),
+            what.replace("{host}", &crate::util::terminal_safe(text("host")))
         );
+    };
+    let items = |k: &str| {
+        c.get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let unreached = items("unreached");
+    for it in &unreached {
+        line(it, "couldn't reach {host}");
+    }
+    if !unreached.is_empty() {
+        eprintln!("  Suggestion: if this computer needs a proxy, `sprott config set proxy <url>`.");
+    }
+    for it in &items("provider_error") {
+        line(it, "{host} answered with an error");
     }
 }
 

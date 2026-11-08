@@ -149,7 +149,8 @@ async fn unset_proxy(key: &str) -> Result<(), String> {
     };
     egress_proxy::clear()?;
     println!(
-        "unset {} (was {}); the daemon reaches the internet directly",
+        "unset {} (was {}); Sprott now uses the shell proxy `sprott run` reports, \
+         else this computer's proxy settings",
         key, prev
     );
     apply_proxy_live().await

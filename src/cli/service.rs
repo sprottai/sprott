@@ -762,6 +762,12 @@ pub(crate) fn spawn_detached_serve(binary: &std::path::Path) -> Result<PathBuf, 
         .try_clone()
         .map_err(|e| format!("open {} for stderr: {}", log_path.display(), e))?;
     let mut command = ProcCommand::new(binary);
+    // The proxy variables this process filled from the stored proxy are not
+    // the operator's shell: the daemon reads the stored proxy itself, so a
+    // later `sprott config set/unset proxy` applies to it.
+    for key in crate::cli::egress_proxy::injected_env_keys() {
+        command.env_remove(key);
+    }
     command
         .arg("serve")
         .env_remove(crate::cli::human_action::STATUS_ENV)

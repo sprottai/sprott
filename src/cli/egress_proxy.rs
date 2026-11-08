@@ -43,7 +43,8 @@
 //! Precedence, highest first: the live shell proxy, `sprott config set proxy`,
 //! the computer's settings, direct.
 
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use crate::config::default_state_dir;
 
@@ -63,6 +64,25 @@ use crate::config::default_state_dir;
 /// to the file. Starts `None` (unseeded) until `apply_to_env` runs — so a unit
 /// test that never calls it sees `effective()` == the file, as before.
 static AMBIENT: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set by [`apply_to_env`] in the daemon: only the daemon routes its clients
+/// through [`effective`] ([`crate::util::http_builder`]).
+static DAEMON: AtomicBool = AtomicBool::new(false);
+
+/// The env keys [`apply_to_env`] filled from the stored proxy in this
+/// process: not the operator's shell, so a daemon this process starts must
+/// not inherit them ([`injected_env_keys`]).
+static INJECTED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// The proxy variables, in the order reqwest reads them.
+const PROXY_KEYS: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
 
 /// Persisted egress-proxy URL location: `<state_dir>/egress-proxy` (one line, the
 /// URL). Absent/empty = no configured egress proxy.
@@ -125,20 +145,19 @@ pub fn apply_to_env(daemon: bool) {
     // nothing is set. Writing the stored value into its env would make a later
     // `sprott config unset proxy` linger there and shadow those settings.
     if daemon {
+        DAEMON.store(true, Ordering::SeqCst);
         return;
     }
+    // Any other process leaves routing to reqwest, which reads these
+    // variables itself (per scheme, with NO_PROXY), then the computer's
+    // settings: the stored proxy fills only the slots the shell left empty,
+    // so the shell proxy wins, then the stored one, then the computer's.
     let Some(url) = load() else { return };
-    for key in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        // Only fill the slot the operator didn't already set in their shell.
-        if std::env::var_os(key).map(|v| v.is_empty()).unwrap_or(true) {
-            std::env::set_var(key, &url);
+    let mut injected = INJECTED.lock().unwrap();
+    for key in empty_proxy_slots(|k| std::env::var_os(k)) {
+        std::env::set_var(key, &url);
+        if !injected.contains(&key) {
+            injected.push(key);
         }
     }
     // NB: we do NOT pin the Sprott backend into NO_PROXY. A configured proxy
@@ -147,6 +166,28 @@ pub fn apply_to_env(daemon: bool) {
     // us *only* through a proxy. Loopback stays direct via
     // `proxy_env::pin_localhost_no_proxy`; any other exceptions are the
     // operator's own `NO_PROXY` to make.
+}
+
+/// The proxy variables the operator's shell left unset or empty (`get`
+/// reads one): the only ones the stored proxy may fill (pure).
+fn empty_proxy_slots(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<&'static str> {
+    PROXY_KEYS
+        .into_iter()
+        .filter(|k| get(k).is_none_or(|v| v.is_empty()))
+        .collect()
+}
+
+/// Is this process the daemon (its clients route through [`effective`])?
+pub fn is_daemon() -> bool {
+    DAEMON.load(Ordering::SeqCst)
+}
+
+/// The proxy variables [`apply_to_env`] set in this process from the stored
+/// proxy. A daemon started from here gets them removed: they are not the
+/// operator's shell, and the daemon reads the stored proxy itself (so a later
+/// `sprott config unset proxy` applies to it).
+pub fn injected_env_keys() -> Vec<&'static str> {
+    INJECTED.lock().unwrap().clone()
 }
 
 /// The egress proxy the DAEMON's own swappable clients (the shared reqwest
@@ -279,14 +320,7 @@ pub fn client_streaming(connect: std::time::Duration) -> reqwest::Result<reqwest
 /// The first non-empty proxy variable in THIS process's env right now. Read once by
 /// `apply_to_env` before it shapes env, so it reflects the operator's shell.
 fn shell_proxy_now() -> Option<String> {
-    for key in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
+    for key in PROXY_KEYS {
         if let Some(v) = std::env::var_os(key) {
             let v = v.to_string_lossy().trim().to_string();
             if !v.is_empty() {
@@ -314,5 +348,30 @@ mod tests {
         assert_eq!(resolve(Some("http://a"), None).as_deref(), Some("http://a"));
         // ...and neither = direct.
         assert_eq!(resolve(None, None), None);
+    }
+
+    /// The stored proxy fills only the variables the shell left unset or
+    /// empty (the shell proxy wins), and those are the ones a daemon started
+    /// from this process must not inherit.
+    #[test]
+    fn the_stored_proxy_fills_only_empty_slots() {
+        let shell = |k: &str| match k {
+            "HTTPS_PROXY" => Some(std::ffi::OsString::from("http://shell:1")),
+            "http_proxy" => Some(std::ffi::OsString::new()),
+            _ => None,
+        };
+        assert_eq!(
+            empty_proxy_slots(shell),
+            vec!["https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        );
+        assert_eq!(empty_proxy_slots(|_| None).len(), PROXY_KEYS.len());
+    }
+
+    /// Only the daemon routes through `effective()`; a process that never
+    /// declared itself the daemon (any CLI command, a unit test) leaves the
+    /// route to reqwest's own reading of its env and the computer's settings.
+    #[test]
+    fn only_the_daemon_routes_through_the_effective_proxy() {
+        assert!(!is_daemon());
     }
 }

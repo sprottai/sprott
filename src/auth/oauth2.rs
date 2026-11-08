@@ -205,14 +205,21 @@ fn params_json(params: &[(String, String)]) -> serde_json::Value {
     serde_json::Value::Object(body)
 }
 
+/// Prefix of a code exchange whose connection to the provider failed before
+/// the request was sent (DNS, TCP connect, TLS handshake, proxy CONNECT,
+/// connect timeout: `reqwest::Error::is_connect`), so the code never reached
+/// it. The rest of the message is the transport error chain.
+pub const CODE_EXCHANGE_NOT_SENT: &str = "oauth2 code-exchange not sent: ";
+
+/// Prefix of a code exchange that was sent and got no HTTP answer (a timeout
+/// or a reset after connecting): the code may have reached the provider. The
+/// rest of the message is the transport error chain.
+pub const CODE_EXCHANGE_REQUEST_FAILED: &str = "oauth2 code-exchange request failed: ";
+
 /// POST `params` to the token endpoint: the body in `style`, the client in
 /// `auth` (a Basic header carries it; post puts it in `params`), and
 /// `Accept: application/json` always (some providers default to another
 /// representation without it).
-/// Prefix of a code exchange that never got an HTTP answer (network, proxy,
-/// TLS). The rest of the message is the transport error chain.
-pub const CODE_EXCHANGE_REQUEST_FAILED: &str = "oauth2 code-exchange request failed: ";
-
 async fn post_token_endpoint(
     token_url: &str,
     style: OAuthStyle,
@@ -286,11 +293,12 @@ pub async fn exchange_code(
     let resp = post_token_endpoint(token_url, style, auth, client_id, client_secret, &params)
         .await
         .map_err(|e| {
-            format!(
-                "{}{}",
-                CODE_EXCHANGE_REQUEST_FAILED,
-                crate::error::error_chain(&e)
-            )
+            let prefix = if e.is_connect() {
+                CODE_EXCHANGE_NOT_SENT
+            } else {
+                CODE_EXCHANGE_REQUEST_FAILED
+            };
+            format!("{}{}", prefix, crate::error::error_chain(&e))
         })?;
 
     if !resp.status().is_success() {

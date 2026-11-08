@@ -29,7 +29,7 @@ pub async fn reload(State(state): State<Arc<AppState>>) -> Json<Value> {
     crate::proxy::upstream::reload_cell(&state.egress_proxy);
     let proxy = crate::cli::egress_proxy::effective();
     tracing::info!(
-        proxy = proxy.as_deref().unwrap_or("(direct)"),
+        proxy = proxy.as_deref().unwrap_or("this computer's proxy settings"),
         "egress proxy hot-reloaded"
     );
     Json(json!({ "ok": true, "proxy": proxy }))
