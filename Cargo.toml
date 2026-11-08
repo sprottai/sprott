@@ -68,7 +68,7 @@ base64 = "0.22"
 
 # Broker / service routing (ported from dev branch)
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "system-proxy"] }
 futures-util = "0.3"
 
 # Resident credential proxy — the one agent-facing surface. hudsucker is a
@@ -91,7 +91,7 @@ tower-service = "0.3"
 # The forward hop's TCP dial: hyper-util's HttpConnector, the connector reqwest
 # is built on, so the broker reaches a host the way a standard HTTP client does
 # (Happy Eyeballs, RFC 8305). Already in the tree via hyper-rustls + reqwest.
-hyper-util = { version = "0.1.20", features = ["client-legacy", "tokio"] }
+hyper-util = { version = "0.1.20", features = ["client-legacy", "client-proxy", "client-proxy-system", "tokio"] }
 # Portable OS trust-store roots (mac Keychain / linux cert files / windows
 # store) so `sc run` can hand tools a CA bundle = broker root + system roots.
 # Without the system roots, tools with no compiled CApath fallback (cargo's

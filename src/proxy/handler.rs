@@ -2183,8 +2183,9 @@ fn egress_error_parts(is_connect: bool, cause: &str, has_proxy: bool) -> (ScCode
          that host (`sprott config get proxy`), or change it with \
          `sprott config set proxy <url>` / `sprott config unset proxy`."
     } else {
-        "No egress proxy is set. If this machine reaches the internet only through a \
-         proxy, run `sprott config set proxy <url>`."
+        "No proxy is set for Sprott, so it uses this computer's proxy settings. \
+         Suggestion: if this host is reachable only through a proxy those settings \
+         don't name, run `sprott config set proxy <url>`."
     };
     (
         ScCode::EgressUnreachable,
@@ -2646,7 +2647,7 @@ mod tests {
         assert!(msg.contains(cause));
         assert!(msg.contains("not a credential problem"));
         assert!(msg.contains("sprott config set proxy"));
-        assert!(msg.contains("No egress proxy is set"));
+        assert!(msg.contains("uses this computer's proxy settings"));
 
         // Connect failure WITH a proxy configured: point at the proxy, never
         // echo its URL (it can carry userinfo), offer get/unset.

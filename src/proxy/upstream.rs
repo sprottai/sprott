@@ -58,7 +58,53 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// place by [`reload_cell`] on `/proxy/reload` (after `sprott config set/unset proxy`), so
 /// the forward hop re-points on its next connection with NO daemon restart (and
 /// so no vault re-unlock).
-pub type EgressProxyCell = Arc<RwLock<Option<Arc<ProxyCfg>>>>;
+pub type EgressProxyCell = Arc<RwLock<Option<Upstream>>>;
+
+/// How the forward hop reaches the internet when it does not dial direct.
+#[derive(Clone)]
+pub enum Upstream {
+    /// The proxy Sprott was given (live shell proxy or `sprott config set proxy`).
+    Given(Arc<ProxyCfg>),
+    /// Nothing given: this computer's proxy settings, matched per destination
+    /// by the same community implementation reqwest uses (hyper-util
+    /// `Matcher::from_system`: `*_PROXY` variables, then macOS System Settings
+    /// or Windows Internet Settings).
+    System(Arc<hyper_util::client::proxy::matcher::Matcher>),
+}
+
+/// How often the daemon re-reads this computer's proxy settings. Polling is
+/// what Chromium does on Linux for the same job; the read is cheap (env vars,
+/// one SCDynamicStore lookup on macOS, one registry key on Windows).
+const SYSTEM_PROXY_POLL: Duration = Duration::from_secs(5);
+
+/// Follow this computer's proxy settings while the daemon runs: when they
+/// change and nothing was given to Sprott, rebuild the shared reqwest client
+/// and this cell, so the next request and the next forward connection use the
+/// new settings. Per-call clients (`egress_proxy::client`) read them at build.
+pub fn spawn_system_proxy_watch(cell: EgressProxyCell) {
+    tokio::spawn(async move {
+        let mut last = system_settings_snapshot();
+        loop {
+            tokio::time::sleep(SYSTEM_PROXY_POLL).await;
+            let now = system_settings_snapshot();
+            if now == last {
+                continue;
+            }
+            last = now;
+            if crate::cli::egress_proxy::effective().is_none() {
+                tracing::info!("this computer's proxy settings changed; Sprott follows them");
+                crate::core::forward::reload_egress_proxy();
+                reload_cell(&cell);
+            }
+        }
+    });
+}
+
+/// A comparable snapshot of the computer's proxy settings. Compared in memory
+/// only, never logged: a proxy URL may carry credentials.
+fn system_settings_snapshot() -> String {
+    format!("{:?}", hyper_util::client::proxy::matcher::Matcher::from_system())
+}
 
 /// Build a fresh egress-proxy cell from the currently-effective proxy. Held in
 /// `AppState`; a clone backs the forward connector.
@@ -72,10 +118,15 @@ pub fn reload_cell(cell: &EgressProxyCell) {
     *cell.write().unwrap() = resolve_current();
 }
 
-/// The currently-effective egress proxy (env > stored file) parsed to a
-/// `ProxyCfg`. `None` = direct (unset, or a non-HTTP proxy we can't tunnel).
-fn resolve_current() -> Option<Arc<ProxyCfg>> {
-    let url = crate::cli::egress_proxy::effective()?;
+/// The forward hop's current route: the proxy Sprott was given, parsed; else
+/// this computer's proxy settings. `None` = direct (a given proxy that is not
+/// an HTTP proxy, which the CONNECT hop can't use).
+fn resolve_current() -> Option<Upstream> {
+    let Some(url) = crate::cli::egress_proxy::effective() else {
+        return Some(Upstream::System(Arc::new(
+            hyper_util::client::proxy::matcher::Matcher::from_system(),
+        )));
+    };
     match parse_proxy(&url) {
         Some(cfg) => {
             tracing::info!(
@@ -83,7 +134,7 @@ fn resolve_current() -> Option<Arc<ProxyCfg>> {
                 proxy_port = cfg.port,
                 "resident proxy forward hop routes through the egress proxy"
             );
-            Some(Arc::new(cfg))
+            Some(Upstream::Given(Arc::new(cfg)))
         }
         None => {
             tracing::warn!(
@@ -146,13 +197,18 @@ impl TunnelConnector {
         }
     }
 
-    fn use_proxy_for(&self, host: &str) -> Option<Arc<ProxyCfg>> {
-        let p = self.proxy.read().unwrap().clone()?;
+    /// The proxy to tunnel through for `host` (`https` = the forward target's
+    /// scheme), or `None` to dial direct.
+    fn use_proxy_for(&self, host: &str, https: bool) -> Option<Arc<ProxyCfg>> {
+        let route = self.proxy.read().unwrap().clone()?;
         let h = host.to_ascii_lowercase();
         if self.no_proxy.iter().any(|e| no_proxy_matches(e, &h)) {
             return None;
         }
-        Some(p)
+        match route {
+            Upstream::Given(p) => Some(p),
+            Upstream::System(m) => system_proxy_for(&m, &h, https),
+        }
     }
 }
 
@@ -178,7 +234,7 @@ impl Service<Uri> for TunnelConnector {
             });
 
             let connect = async {
-                match this.use_proxy_for(&host) {
+                match this.use_proxy_for(&host, dst.scheme_str() != Some("http")) {
                     Some(p) => connect_via_proxy(&p, &host, port).await,
                     None => dial(tcp_dialer(GaiResolver::new()), &host, port).await,
                 }
@@ -326,6 +382,38 @@ async fn connect_via_proxy(p: &ProxyCfg, host: &str, port: u16) -> Result<TcpStr
     Ok(stream)
 }
 
+/// The proxy this computer's settings name for `host`, as a tunnel target.
+/// `None` = direct: the settings name none for it, or name a non-HTTP proxy
+/// the CONNECT hop can't use (logged).
+fn system_proxy_for(
+    m: &hyper_util::client::proxy::matcher::Matcher,
+    host: &str,
+    https: bool,
+) -> Option<Arc<ProxyCfg>> {
+    let scheme = if https { "https" } else { "http" };
+    let dst: Uri = format!("{scheme}://{host}/").parse().ok()?;
+    let intercept = m.intercept(&dst)?;
+    let uri = intercept.uri();
+    if uri.scheme_str() != Some("http") {
+        tracing::warn!(
+            "this computer's proxy for {} is not an HTTP proxy; the forward hop dials direct",
+            host
+        );
+        return None;
+    }
+    // Same host form `parse_proxy` yields (an IPv6 host keeps its brackets).
+    let proxy_host = uri.host()?.to_string();
+    let auth = intercept
+        .basic_auth()
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    Some(Arc::new(ProxyCfg {
+        host: proxy_host,
+        port: uri.port_u16().unwrap_or(80),
+        auth,
+    }))
+}
+
 /// Parse an `http://[user:pass@]host[:port]` proxy URL. Returns `None` for a
 /// non-HTTP scheme (https/socks) — unsupported for the CONNECT forward hop.
 fn parse_proxy(url: &str) -> Option<ProxyCfg> {
@@ -395,7 +483,7 @@ mod tests {
 
     /// A live cell holding `p` — the shape `AppState`/`forward_connector` share.
     fn cell(p: Option<ProxyCfg>) -> EgressProxyCell {
-        Arc::new(RwLock::new(p.map(Arc::new)))
+        Arc::new(RwLock::new(p.map(|p| Upstream::Given(Arc::new(p)))))
     }
 
     #[test]
@@ -468,11 +556,11 @@ mod tests {
             ]),
         };
         // external host → through the proxy
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_some());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_some());
         // loopback + NO_PROXY host → direct
-        assert!(c.use_proxy_for("localhost").is_none());
-        assert!(c.use_proxy_for("internal.corp").is_none());
-        assert!(c.use_proxy_for("db.internal.corp").is_none());
+        assert!(c.use_proxy_for("localhost", true).is_none());
+        assert!(c.use_proxy_for("internal.corp", true).is_none());
+        assert!(c.use_proxy_for("db.internal.corp", true).is_none());
     }
 
     #[test]
@@ -481,7 +569,7 @@ mod tests {
             proxy: cell(None),
             no_proxy: Arc::new(vec![]),
         };
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
     }
 
     #[test]
@@ -495,7 +583,7 @@ mod tests {
             no_proxy: Arc::new(vec!["localhost".into(), "127.0.0.1".into()]),
         };
         // Starts direct.
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
         // A `sprott config set proxy` reload swaps the cell…
         *shared.write().unwrap() = Some(Arc::new(ProxyCfg {
             host: "127.0.0.1".into(),
@@ -504,12 +592,12 @@ mod tests {
         }));
         // …and the same connector now tunnels — without being rebuilt.
         let p = c
-            .use_proxy_for("gmail.googleapis.com")
+            .use_proxy_for("gmail.googleapis.com", true)
             .expect("now proxied");
         assert_eq!((p.host.as_str(), p.port), ("127.0.0.1", 7778));
         // …and a `sprott config unset proxy` reload swaps it back to direct.
         *shared.write().unwrap() = None;
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
     }
 
     // ── live socket e2e: the actual thing that was broken ────────────────────

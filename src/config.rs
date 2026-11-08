@@ -148,7 +148,8 @@ pub enum Command {
     Vault(VaultArgs),
     /// Read/write persistent preferences: `cb-port` (the fallback for
     /// `--cb-port`) and `proxy` (the HTTP proxy the daemon uses to reach the
-    /// internet). Subs: set / get / unset / ls.
+    /// internet; unset, it uses this computer's proxy settings). Subs: set /
+    /// get / unset / ls.
     Config(ConfigArgs),
     /// Manage the active vault's enrolled passkeys: `ls` lists them; `add` /
     /// `rm` / `rename` print the console page where that is done. Short:
@@ -728,7 +729,8 @@ pub enum ConfigSubcommand {
     /// Set a persistent preference. Keys: `cb-port` (e.g. `sprott config set
     /// cb-port 23394`) and `proxy`, the HTTP proxy the daemon uses to reach the
     /// internet (e.g. `sprott config set proxy http://127.0.0.1:7778`; applies
-    /// to the running daemon at once).
+    /// to the running daemon at once). Without it, Sprott uses this computer's
+    /// proxy settings and follows their changes.
     Set { key: String, value: String },
     /// Print the value of one preference. Exit code is nonzero when unset.
     Get { key: String },

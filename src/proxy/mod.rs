@@ -36,6 +36,10 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
         state.config.proxy_port,
     );
 
+    // Follow this computer's proxy settings while running (no-op while a
+    // proxy was given to Sprott).
+    upstream::spawn_system_proxy_watch(state.egress_proxy.clone());
+
     let proxy = Proxy::builder()
         .with_addr(addr)
         .with_ca(resident.authority)

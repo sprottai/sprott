@@ -4,8 +4,17 @@ use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The builder every outbound HTTP client starts from: `User-Agent` names this
-/// binary (`sprott/<version>`). reqwest sends no User-Agent by default.
+/// binary (`sprott/<version>`; reqwest sends none by default), and the route is
+/// the device's effective egress (`cli::egress_proxy`): the proxy Sprott was
+/// given, else this computer's own proxy settings. One entry point, so every
+/// client agrees on how it reaches the internet.
 pub fn http_builder() -> reqwest::ClientBuilder {
+    crate::cli::egress_proxy::apply_effective(base_builder())
+}
+
+/// [`http_builder`] without the egress route, for the callers that apply a
+/// specific one themselves (`core::forward`'s swappable shared client).
+pub fn base_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().user_agent(crate::names::USER_AGENT)
 }
 

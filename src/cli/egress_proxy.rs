@@ -32,6 +32,16 @@
 //! explicit override and the only option for a headless/remote daemon that no
 //! `sc run` ever reports to. Ambient and file are ONE resolver ([`effective`]),
 //! not two mechanisms — ambient is just the env tier kept live instead of frozen.
+//!
+//! THE COMPUTER'S SETTINGS (the default when neither is set): every client then
+//! follows this computer's own proxy settings, the ones its browser uses, read
+//! by the community implementation reqwest ships (`system-proxy`, i.e. hyper-util
+//! `Matcher::from_system`): the process's `*_PROXY` variables, then macOS System
+//! Settings or Windows Internet Settings. The daemon re-reads them while it runs
+//! and swaps its clients when they change (`proxy::upstream::spawn_system_proxy_watch`),
+//! so turning a proxy app on or off needs no restart and no `sprott config`.
+//! Precedence, highest first: the live shell proxy, `sprott config set proxy`,
+//! the computer's settings, direct.
 
 use std::sync::RwLock;
 
@@ -99,7 +109,7 @@ pub fn clear() -> Result<(), String> {
 /// every `sc` invocation (daemon + CLI) so `serve`'s clients and `sc upgrade`'s
 /// GitHub fetch both honour it. An already-set `HTTPS_PROXY` in the real env
 /// takes precedence and is left untouched (env > config).
-pub fn apply_to_env() {
+pub fn apply_to_env(daemon: bool) {
     // Seed the ambient proxy from THIS process's REAL shell BEFORE we fill env
     // slots from the file, so `effective()` keeps env > config even after this
     // pollutes the env. Only seed an empty slot: a `/proxy/ambient` push that
@@ -109,6 +119,13 @@ pub fn apply_to_env() {
         if a.is_none() {
             *a = shell_proxy_now();
         }
+    }
+    // The daemon routes every client through `effective()` (via
+    // `util::http_builder`), and follows the computer's own proxy settings when
+    // nothing is set. Writing the stored value into its env would make a later
+    // `sprott config unset proxy` linger there and shadow those settings.
+    if daemon {
+        return;
     }
     let Some(url) = load() else { return };
     for key in [
@@ -176,13 +193,12 @@ pub fn set_ambient(proxy: Option<String>) -> bool {
     true
 }
 
-/// Apply an EXPLICIT egress proxy (or explicit direct) to a reqwest client
-/// builder — the single place the daemon's HTTP clients agree on how the device
-/// proxy is applied. Loopback and any operator `NO_PROXY` stay direct; a
-/// malformed proxy URL logs and falls back to a direct dial. Setting an explicit
-/// proxy also disables reqwest's ambient-env proxy auto-detection, so this fully
-/// OWNS the routing — it never silently inherits a stale `*_PROXY` from the env
-/// `apply_to_env` froze at startup.
+/// Apply the egress route to a reqwest client builder: the single place every
+/// HTTP client agrees on how it reaches the internet. `Some(url)` = the proxy
+/// Sprott was given; setting it also turns off reqwest's own detection, so
+/// this fully owns the routing. `None` = follow this computer's proxy settings
+/// (see the match arm). Loopback and any operator `NO_PROXY` stay direct; a
+/// malformed proxy URL logs and falls back to a direct dial.
 pub fn apply(b: reqwest::ClientBuilder, proxy: Option<&str>) -> reqwest::ClientBuilder {
     match proxy {
         Some(url) => match reqwest::Proxy::all(url) {
@@ -206,8 +222,13 @@ pub fn apply(b: reqwest::ClientBuilder, proxy: Option<&str>) -> reqwest::ClientB
                 b.no_proxy()
             }
         },
-        // Explicit direct: ignore any proxy inherited in the process env.
-        None => b.no_proxy(),
+        // Nothing given to Sprott: follow this computer's proxy settings.
+        // reqwest's `system-proxy` (hyper-util `Matcher::from_system`) reads the
+        // `*_PROXY` variables of this process, then the OS settings: macOS
+        // System Settings, Windows Internet Settings. The daemon puts no proxy
+        // of its own into its env (`apply_to_env`), so a value cleared at
+        // runtime can't linger there; what it reads is the computer's.
+        None => b,
     }
 }
 
@@ -224,12 +245,10 @@ pub fn apply_effective(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 /// the given overall timeout. Routing sync/relay through here is what makes
 /// `sprott config set proxy` reach them without a daemon restart — see the module header.
 pub fn client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
-    apply_effective(
-        crate::util::http_builder()
-            .timeout(timeout)
-            .default_headers(version_headers()),
-    )
-    .build()
+    crate::util::http_builder()
+        .timeout(timeout)
+        .default_headers(version_headers())
+        .build()
 }
 
 /// Every cloud call announces the binary version (team §8.3: the backend's
@@ -251,12 +270,10 @@ fn version_headers() -> reqwest::header::HeaderMap {
 /// stream at the deadline. Liveness on the open stream is the caller's job
 /// (sync_stream's 45s no-bytes watchdog).
 pub fn client_streaming(connect: std::time::Duration) -> reqwest::Result<reqwest::Client> {
-    apply_effective(
-        crate::util::http_builder()
-            .connect_timeout(connect)
-            .default_headers(version_headers()),
-    )
-    .build()
+    crate::util::http_builder()
+        .connect_timeout(connect)
+        .default_headers(version_headers())
+        .build()
 }
 
 /// The first non-empty proxy variable in THIS process's env right now. Read once by
