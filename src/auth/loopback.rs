@@ -203,8 +203,9 @@ async fn handle_callback(
         Outcome::Unreached {
             host: host.clone(),
             detail: detail.clone(),
+            sent: !report.not_sent.contains(&pending.conn_id),
             stored: report.code_stored.contains(&pending.conn_id),
-            shared: report.not_sent.contains(&pending.conn_id),
+            handed_off: report.handed_off.contains(&pending.conn_id),
         }
     } else if let Some((_, host, detail)) =
         report.provider_error.iter().find(|(c, _, _)| *c == pending.conn_id)
@@ -236,10 +237,17 @@ enum Outcome {
     StoredNotServed,
     Cancelled { why: String },
     Failed { reason: String },
-    /// No HTTP answer from `host`. `stored`: the store holds the caught code,
-    /// retried from here; `shared`: the request was never sent, so the code
-    /// was stored unclaimed and another device may finish it.
-    Unreached { host: String, detail: String, stored: bool, shared: bool },
+    /// No HTTP answer from `host`. `sent`: the connection was made and the
+    /// request may have arrived (else the connection failed first);
+    /// `stored`: the store holds the caught code, retried; `handed_off`: it
+    /// was stored unclaimed, so any device on the account may finish it.
+    Unreached {
+        host: String,
+        detail: String,
+        sent: bool,
+        stored: bool,
+        handed_off: bool,
+    },
     /// `host` answered with an error worth retrying.
     ProviderError { host: String, detail: String, stored: bool },
     NotFinished { reason: String },
@@ -281,23 +289,36 @@ fn result_page(o: &Outcome) -> String {
             Some(reason.clone()),
             false,
         ),
-        Outcome::Unreached { host, detail, stored, shared } => {
-            let mut lines = vec![format!(
-                "Sprott on this computer couldn't reach {host}, so the connection isn't finished."
-            )];
-            lines.push(match (stored, shared) {
+        Outcome::Unreached {
+            host,
+            detail,
+            sent,
+            stored,
+            handed_off,
+        } => {
+            let (title, what) = if *sent {
+                (
+                    format!("No answer from {host}"),
+                    format!("Sprott on this computer got no answer from {host}, so the connection isn't finished."),
+                )
+            } else {
+                (
+                    format!("Couldn't reach {host}"),
+                    format!("Sprott on this computer couldn't reach {host}, so the connection isn't finished."),
+                )
+            };
+            let mut lines = vec![what];
+            lines.push(match (stored, handed_off) {
                 (true, false) => format!("Sprott saved the sign-in and retries it for up to {window} minutes."),
-                (true, true) => format!("Sprott saved the sign-in and retries it for up to {window} minutes. Another computer running Sprott on your account can also finish it."),
+                (true, true) => format!("Sprott saved the sign-in and retries it for up to {window} minutes. Any computer on your account that runs Sprott with this vault unlocked can finish it."),
                 (false, _) => "Connect again from Sprott.".into(),
             });
-            lines.push("Suggestion: if this computer uses a proxy, set it for Sprott:".into());
-            (
-                format!("Couldn't reach {host}"),
-                lines,
-                Some("sprott config set proxy http://HOST:PORT"),
-                Some(detail.clone()),
-                false,
-            )
+            let mut command = None;
+            if !*sent {
+                lines.push("Suggestion: if this computer uses a proxy, set it for Sprott:".into());
+                command = Some("sprott config set proxy http://HOST:PORT");
+            }
+            (title, lines, command, Some(detail.clone()), false)
         }
         Outcome::ProviderError { host, detail, stored } => (
             format!("{host} answered with an error"),
@@ -415,7 +436,7 @@ mod tests {
             Outcome::StoredNotServed,
             Outcome::Cancelled { why: "access_denied".into() },
             Outcome::Failed { reason: "provider rejected the exchange: invalid_client".into() },
-            Outcome::Unreached { host: "oauth2.googleapis.com".into(), detail: "operation timed out".into(), stored: true, shared: false },
+            Outcome::Unreached { host: "oauth2.googleapis.com".into(), detail: "operation timed out".into(), sent: true, stored: true, handed_off: false },
             Outcome::ProviderError { host: "oauth2.googleapis.com".into(), detail: "HTTP 503".into(), stored: true },
             Outcome::NotFinished { reason: "the provider returned no refresh token".into() },
             Outcome::Locked,
@@ -430,8 +451,9 @@ mod tests {
         let page = result_page(&Outcome::Unreached {
             host: "oauth2.googleapis.com".into(),
             detail: "error sending request: <b>timed out</b>".into(),
+            sent: false,
             stored: true,
-            shared: false,
+            handed_off: false,
         });
         assert!(page.contains("Couldn't reach oauth2.googleapis.com"));
         assert!(page.contains("sprott config set proxy"));
@@ -445,20 +467,33 @@ mod tests {
     #[test]
     fn the_page_says_saved_only_when_stored() {
         let host = "oauth2.googleapis.com".to_string();
-        let unreached = |stored, shared| {
+        let unreached = |stored, handed_off| {
             result_page(&Outcome::Unreached {
                 host: host.clone(),
                 detail: "connection refused".into(),
+                sent: false,
                 stored,
-                shared,
+                handed_off,
             })
         };
         assert!(unreached(true, false).contains("Sprott saved the sign-in"));
-        assert!(!unreached(true, false).contains("Another computer"));
-        assert!(unreached(true, true).contains("Another computer running Sprott"));
+        assert!(!unreached(true, false).contains("Any computer"));
+        assert!(unreached(true, true)
+            .contains("Any computer on your account that runs Sprott with this vault unlocked can finish it."));
         let lost = unreached(false, true);
         assert!(!lost.contains("saved"));
         assert!(lost.contains("Connect again from Sprott."));
+
+        // Connected, then no answer: the request may have arrived.
+        let page = result_page(&Outcome::Unreached {
+            host: host.clone(),
+            detail: "operation timed out".into(),
+            sent: true,
+            stored: true,
+            handed_off: false,
+        });
+        assert!(page.contains("got no answer from oauth2.googleapis.com"));
+        assert!(!page.contains("couldn't reach") && !page.contains("proxy"));
 
         let answered = |stored| {
             result_page(&Outcome::ProviderError {

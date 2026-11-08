@@ -129,11 +129,18 @@ fn report_connects(connects: Option<&serde_json::Value>) {
             .cloned()
             .unwrap_or_default()
     };
+    // `sent`: connected, then no answer (absent from an older daemon: read
+    // as not sent, its old wording).
+    let sent = |it: &serde_json::Value| it.get("sent").and_then(|v| v.as_bool()) == Some(true);
     let unreached = items("unreached");
     for it in &unreached {
-        line(it, "couldn't reach {host}");
+        if sent(it) {
+            line(it, "got no answer from {host}");
+        } else {
+            line(it, "couldn't reach {host}");
+        }
     }
-    if !unreached.is_empty() {
+    if unreached.iter().any(|it| !sent(it)) {
         eprintln!("  Suggestion: if this computer needs a proxy, `sprott config set proxy <url>`.");
     }
     for it in &items("provider_error") {

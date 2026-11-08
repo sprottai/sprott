@@ -197,6 +197,10 @@ pub fn build_bundle(
 /// Shaping the env once is simpler (and completer) than overriding proxy on
 /// every client; remote hosts still honour the proxy, so corp egress keeps
 /// working. Call once at startup, before the first HTTP client.
+///
+/// Known gap, Windows only (not shipped yet): hyper-util's system matcher
+/// reads Windows Internet Settings' `ProxyOverride` (the bypass list) only
+/// when `NO_PROXY` is unset, so the `NO_PROXY` pinned here hides it.
 pub fn pin_localhost_no_proxy() {
     for key in ["NO_PROXY", "no_proxy"] {
         let merged = with_loopback(&std::env::var(key).unwrap_or_default());

@@ -211,6 +211,11 @@ fn params_json(params: &[(String, String)]) -> serde_json::Value {
 /// it. The rest of the message is the transport error chain.
 pub const CODE_EXCHANGE_NOT_SENT: &str = "oauth2 code-exchange not sent: ";
 
+/// Prefix of a code exchange whose request could not be built (the rest says
+/// why, e.g. a token URL without a scheme): never sent, and re-sending can
+/// never succeed.
+pub const CODE_EXCHANGE_NOT_BUILT: &str = "oauth2 code-exchange not built: ";
+
 /// Prefix of a code exchange that was sent and got no HTTP answer (a timeout
 /// or a reset after connecting): the code may have reached the provider. The
 /// rest of the message is the transport error chain.
@@ -293,7 +298,9 @@ pub async fn exchange_code(
     let resp = post_token_endpoint(token_url, style, auth, client_id, client_secret, &params)
         .await
         .map_err(|e| {
-            let prefix = if e.is_connect() {
+            let prefix = if e.is_builder() {
+                CODE_EXCHANGE_NOT_BUILT
+            } else if e.is_connect() {
                 CODE_EXCHANGE_NOT_SENT
             } else {
                 CODE_EXCHANGE_REQUEST_FAILED
@@ -432,6 +439,27 @@ pub async fn perform_refresh(
 #[cfg(test)]
 mod connect_request_tests {
     use super::*;
+
+    /// A token URL the request can't be built from (no scheme) is a request
+    /// never built, not one that got no answer: nothing is sent.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_is_not_built() {
+        let e = exchange_code(
+            "oauth2.example.test/token",
+            "client",
+            None,
+            "code",
+            "verifier",
+            "http://127.0.0.1:8765/cb",
+            OAuthStyle::Form,
+            TokenAuth::Post,
+            &[],
+        )
+        .await
+        .err()
+        .expect("no request can be built");
+        assert!(e.starts_with(CODE_EXCHANGE_NOT_BUILT), "{e}");
+    }
 
     /// An unsigned JWT whose payload is `claims` (header/signature irrelevant —
     /// id_token_claim only reads the middle segment).

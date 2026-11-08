@@ -352,6 +352,13 @@ pub struct ConnectReport {
     /// Connects whose claim got no answer from the cloud (see
     /// [`claim_code`]): not exchanged this run, retried on the timer.
     pub claim_unanswered: Vec<String>,
+    /// Connects whose code this device gave up for another device to redeem
+    /// (its request was never sent): a claim released, or a caught code
+    /// stored unclaimed.
+    pub handed_off: Vec<String>,
+    /// Connects whose code this device gave up and may not claim again yet
+    /// ([`CodeHistory::cooling`]): retried on the timer.
+    pub cooling: Vec<String>,
     /// Left pending without an error stamp for a reason other than the
     /// network (no exchange config, no refresh_token returned):
     /// `(connection, reason)`. Nothing is written for these.
@@ -383,6 +390,7 @@ impl ConnectReport {
         !self.unreached.is_empty()
             || !self.provider_error.is_empty()
             || !self.claim_unanswered.is_empty()
+            || !self.cooling.is_empty()
     }
 
     /// Is connect `conn`'s exchange being retried?
@@ -418,10 +426,6 @@ const ALREADY_REDEEMED: &str = "__sc_already_redeemed__";
 /// `run_pending` marks the connection failed, saying how it last failed.
 const CODE_EXPIRED: &str = "__sc_code_expired__";
 
-/// Prefix of an exchange request that could not be built from the pending
-/// connect (the rest says why): re-sending can never succeed.
-const CODE_EXCHANGE_NOT_BUILT: &str = "oauth2 code-exchange not built: ";
-
 /// How a code exchange failed, read from its error text: what the stamp, the
 /// result page and `sprott sync` say, and whether the code may go to another
 /// device.
@@ -443,7 +447,9 @@ pub(crate) enum ExchangeFailure {
 }
 
 pub(crate) fn classify_exchange_error(e: &str) -> ExchangeFailure {
-    use crate::auth::oauth2::{CODE_EXCHANGE_NOT_SENT, CODE_EXCHANGE_REQUEST_FAILED};
+    use crate::auth::oauth2::{
+        CODE_EXCHANGE_NOT_BUILT, CODE_EXCHANGE_NOT_SENT, CODE_EXCHANGE_REQUEST_FAILED,
+    };
     if let Some(d) = e.strip_prefix(CODE_EXCHANGE_NOT_SENT) {
         return ExchangeFailure::NotSent(d.to_string());
     }
@@ -500,6 +506,9 @@ pub(crate) enum Claimed {
     No,
     /// The cloud did not answer the claim: not this run, retried on the timer.
     Unanswered,
+    /// This device gave the code up and may not claim it again yet
+    /// ([`CodeHistory::cooling`]): retried on the timer.
+    Cooling,
 }
 
 /// The pending connect `conn` (`entry`, as this run read it) as this device
@@ -547,9 +556,25 @@ async fn claim_code<P: crate::sync::ItemPush>(
         ClaimStep::Redeem => return Claimed::Mine(row.entry),
         ClaimStep::Claim => {}
     }
+    let code = row.entry.oauth2.code.clone();
+    if state
+        .code_history(&code)
+        .is_some_and(|h| h.cooling(std::time::Instant::now()))
+    {
+        return Claimed::Cooling;
+    }
+    // Claimed from an unclaimed row: this process sees every attempt from
+    // here on (a code is unclaimed only while no attempt may have reached
+    // the provider).
+    let from_unclaimed = row.entry.oauth2.redeemer.is_none();
     let mine = claimed(row.entry.clone());
     match cas_write_connect(state, vault_id, k, conn, row, &mine, push).await {
-        Cas::Written => Claimed::Mine(mine),
+        Cas::Written => {
+            if from_unclaimed {
+                state.code_history_start(&code);
+            }
+            Claimed::Mine(mine)
+        }
         Cas::NotTaken => Claimed::No,
         Cas::NoAnswer => Claimed::Unanswered,
     }
@@ -866,6 +891,54 @@ where
     report
 }
 
+/// This process's history of one authorization code, kept in memory by its
+/// hash from the moment this process caught the code or claimed it from an
+/// unclaimed row (so it saw every attempt since anyone could send it).
+#[derive(Debug, Clone, Copy)]
+pub struct CodeHistory {
+    /// An attempt may have reached the provider: it was sent, or it is not
+    /// known that it wasn't.
+    pub maybe_sent: bool,
+    /// Times this device gave up its claim on the code (released it, or
+    /// stored a caught code unclaimed).
+    pub releases: u32,
+    /// When it last did.
+    pub released_at: Option<std::time::Instant>,
+    /// When the history started (it expires with the code).
+    pub started: std::time::Instant,
+}
+
+impl CodeHistory {
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            maybe_sent: false,
+            releases: 0,
+            released_at: None,
+            started: now,
+        }
+    }
+
+    /// Is this device still kept from claiming the code again after giving it
+    /// up (a visibility timeout, as SQS's)? The wait after the n-th release
+    /// is the retry backoff's n-th step, so claim and release writes stay
+    /// bounded however fast the connection fails.
+    pub fn cooling(&self, now: std::time::Instant) -> bool {
+        self.released_at.is_some_and(|t| {
+            now.saturating_duration_since(t)
+                < crate::auth::retry::backoff(self.releases.saturating_sub(1))
+        })
+    }
+}
+
+/// May a code whose request just failed before it was sent go to another
+/// device? Only when this process knows the code's whole history and no
+/// attempt may have reached the provider: once a request may have been
+/// delivered it is never handed off (RFC 6749 §4.1.2). An unknown history
+/// (`None`, e.g. after a restart) keeps the claim (pure).
+pub(crate) fn may_hand_off(history: Option<&CodeHistory>) -> bool {
+    history.is_some_and(|h| !h.maybe_sent)
+}
+
 /// The stamped reason for a code whose exchange kept failing transiently past
 /// its lifetime, by how it last failed: the host this computer could not
 /// reach (with the one setting that usually fixes it, as a suggestion), or
@@ -873,9 +946,13 @@ where
 fn code_expired_reason(host: &str, last: &ExchangeFailure) -> String {
     let with = |d: &str| if d.is_empty() { String::new() } else { format!(": {d}") };
     match last {
-        ExchangeFailure::NotSent(d) | ExchangeFailure::NoAnswer(d) => format!(
+        ExchangeFailure::NotSent(d) => format!(
             "couldn't reach {host} from this computer before the authorization expired{}. \
              Suggestion: check this computer's network or proxy (`sprott config set proxy <url>`)",
+            with(d)
+        ),
+        ExchangeFailure::NoAnswer(d) => format!(
+            "got no answer from {host} before the authorization expired{}",
             with(d)
         ),
         ExchangeFailure::Answered(d) | ExchangeFailure::Terminal(d) => format!(
@@ -1106,6 +1183,12 @@ async fn apply_pending_connects_inner(
         Some(injected) => inject_codes(&mut m, injected, me.as_deref()),
         None => Vec::new(),
     };
+    // Only this process holds a caught code: it sees every attempt.
+    for conn in &caught {
+        if let Some(code) = injected.as_ref().and_then(|i| i.get(conn)) {
+            state.code_history_start(code);
+        }
+    }
 
     // Cheap pre-check: nothing to do if there are no in-flight connects.
     if collect_pending(&m).is_empty() {
@@ -1125,6 +1208,7 @@ async fn apply_pending_connects_inner(
     // daemon already redeemed, or one whose service it cannot exchange.
     let mut skip = std::collections::BTreeSet::new();
     let mut claim_unanswered = Vec::new();
+    let mut cooling = Vec::new();
     for (conn, p) in collect_pending(&m) {
         if caught.contains(&conn)
             || state.was_code_redeemed(&p.oauth2.code)
@@ -1144,6 +1228,10 @@ async fn apply_pending_connects_inner(
             }
             Claimed::Unanswered => {
                 claim_unanswered.push(conn.clone());
+                skip.insert(conn);
+            }
+            Claimed::Cooling => {
+                cooling.push(conn.clone());
                 skip.insert(conn);
             }
         }
@@ -1168,7 +1256,7 @@ async fn apply_pending_connects_inner(
                 &cfg.token_params,
                 p.oauth2.state.as_deref(),
             )
-            .map_err(|e| format!("{CODE_EXCHANGE_NOT_BUILT}{e}"))?;
+            .map_err(|e| format!("{}{e}", crate::auth::oauth2::CODE_EXCHANGE_NOT_BUILT))?;
             let out = crate::auth::oauth2::exchange_code(
                 &cfg.token_url,
                 &cfg.client_id,
@@ -1181,6 +1269,16 @@ async fn apply_pending_connects_inner(
                 &extra,
             )
             .await;
+            // Whether this attempt may have reached the provider: all but a
+            // request that failed before it was sent, or was never built.
+            let maybe_sent = match &out {
+                Ok(_) => true,
+                Err(e) => {
+                    !e.starts_with(crate::auth::oauth2::CODE_EXCHANGE_NOT_BUILT)
+                        && !matches!(classify_exchange_error(e), ExchangeFailure::NotSent(_))
+                }
+            };
+            state.code_history_attempt(&p.oauth2.code, maybe_sent);
             match &out {
                 Ok(_) => state.note_code_redeemed(&p.oauth2.code),
                 // Retried transient failures stop once the code can no longer
@@ -1210,6 +1308,7 @@ async fn apply_pending_connects_inner(
     }
     let mut report = report;
     report.claim_unanswered = claim_unanswered;
+    report.cooling = cooling;
 
     // A request that failed before it was sent never reached the provider, so
     // its code may go to any device: a non-idempotent request is handed on
@@ -1217,7 +1316,16 @@ async fn apply_pending_connects_inner(
     // retries do). A caught code is stored unclaimed, and a claim held here is
     // released with compare-and-swap. Any other failure keeps the claim: the
     // code may have reached the provider.
+    // Only when this process saw every attempt and none may have reached the
+    // provider ([`may_hand_off`]); after a release this device waits before
+    // claiming the code again ([`CodeHistory::cooling`]).
     for conn in report.not_sent.clone() {
+        let Some(mut entry) = aux_map::<Connecting>(&m, "connecting").remove(&conn) else {
+            continue;
+        };
+        if !may_hand_off(state.code_history(&entry.oauth2.code).as_ref()) {
+            continue;
+        }
         let release = match (caught.contains(&conn), me.as_deref()) {
             (true, _) => true,
             (false, Some(me)) => {
@@ -1226,17 +1334,20 @@ async fn apply_pending_connects_inner(
             (false, None) => false,
         };
         if release {
-            if let Some(mut entry) = aux_map::<Connecting>(&m, "connecting").remove(&conn) {
-                entry.oauth2.redeemer = None;
-                set_connecting(&mut m, &conn, entry);
-            }
+            state.code_history_released(&entry.oauth2.code);
+            entry.oauth2.redeemer = None;
+            set_connecting(&mut m, &conn, entry);
+            report.handed_off.push(conn);
         }
     }
 
     // A caught code is stored like a paste only while its exchange is being
-    // retried. One this run left otherwise (no exchange settings, no refresh
-    // token, already redeemed here) is not stored: its entry stays as it was.
-    let (stored, unsettled) = caught_codes_to_store(&caught, &report);
+    // retried, and only claimed by this device or handed off. One this run
+    // left otherwise (no exchange settings, no refresh token, already
+    // redeemed here, or, on a device with no identity to claim it with, an
+    // attempt that may have reached the provider) is not stored: its entry
+    // stays as it was.
+    let (stored, unsettled) = caught_codes_to_store(&caught, &report, me.is_some());
     for conn in unsettled {
         if let Some(entry) = before_catch.get(&conn) {
             set_connecting(&mut m, &conn, entry.clone());
@@ -1322,17 +1433,22 @@ fn set_connecting(m: &mut ProtectedState, conn: &str, entry: Connecting) {
 }
 
 /// Of the codes the loopback listener `caught` this run: those to store (the
-/// exchange is being retried), and those left neither stored nor settled
-/// (no exchange settings, no refresh token, already redeemed here), whose
-/// entry goes back to what it was before the catch (pure).
-fn caught_codes_to_store(caught: &[String], report: &ConnectReport) -> (Vec<String>, Vec<String>) {
+/// exchange is being retried, and the code is claimed by this device, which
+/// `can_claim` with its identity, or handed off), and those left neither
+/// stored nor settled, whose entry goes back to what it was before the catch
+/// (pure).
+fn caught_codes_to_store(
+    caught: &[String],
+    report: &ConnectReport,
+    can_claim: bool,
+) -> (Vec<String>, Vec<String>) {
     let settled = |c: &str| {
         report.completed.iter().any(|x| x == c) || report.failed.iter().any(|(f, _)| f == c)
     };
     let mut stored = Vec::new();
     let mut unsettled = Vec::new();
     for c in caught {
-        if report.exchange_retrying(c) {
+        if report.exchange_retrying(c) && (can_claim || report.handed_off.contains(c)) {
             stored.push(c.clone());
         } else if !settled(c) {
             unsettled.push(c.clone());
@@ -2357,14 +2473,14 @@ mod tests {
     #[test]
     fn code_expired_reason_says_how_it_last_failed() {
         let host = "oauth2.googleapis.com";
-        for last in [
-            ExchangeFailure::NotSent("connection refused".into()),
-            ExchangeFailure::NoAnswer("operation timed out".into()),
-        ] {
-            let r = code_expired_reason(host, &last);
-            assert!(r.starts_with("couldn't reach oauth2.googleapis.com"), "{r}");
-            assert!(r.contains("Suggestion: check this computer's network or proxy (`sprott config set proxy <url>`)"));
-        }
+        let r = code_expired_reason(host, &ExchangeFailure::NotSent("connection refused".into()));
+        assert!(r.starts_with("couldn't reach oauth2.googleapis.com"), "{r}");
+        assert!(r.contains("Suggestion: check this computer's network or proxy (`sprott config set proxy <url>`)"));
+        let r = code_expired_reason(host, &ExchangeFailure::NoAnswer("operation timed out".into()));
+        assert_eq!(
+            r,
+            "got no answer from oauth2.googleapis.com before the authorization expired: operation timed out"
+        );
         let r = code_expired_reason(host, &ExchangeFailure::Answered("returned HTTP 503: busy".into()));
         assert_eq!(
             r,
@@ -2403,7 +2519,10 @@ mod tests {
             ExchangeFailure::Terminal(_)
         ));
         assert_eq!(
-            classify_exchange_error(&format!("{CODE_EXCHANGE_NOT_BUILT}needs the consent state")),
+            classify_exchange_error(&format!(
+                "{}needs the consent state",
+                crate::auth::oauth2::CODE_EXCHANGE_NOT_BUILT
+            )),
             ExchangeFailure::Terminal("needs the consent state".into())
         );
     }
@@ -2455,9 +2574,78 @@ mod tests {
             left_pending: vec![("e".into(), "the provider returned no refresh token".into())],
             ..Default::default()
         };
-        let (stored, unsettled) = caught_codes_to_store(&caught, &report);
+        let (stored, unsettled) = caught_codes_to_store(&caught, &report, true);
         assert_eq!(stored, vec!["c".to_string(), "d".to_string()]);
         assert_eq!(unsettled, vec!["e".to_string()]);
+
+        // A device with no identity can't claim: only a handed-off code (never
+        // sent) is stored; one that may have reached the provider is not.
+        let report = ConnectReport {
+            unreached: vec![
+                ("c".into(), "h".into(), "timed out".into()),
+                ("d".into(), "h".into(), "connection refused".into()),
+            ],
+            not_sent: vec!["d".into()],
+            handed_off: vec!["d".into()],
+            ..Default::default()
+        };
+        let (stored, unsettled) = caught_codes_to_store(&["c".into(), "d".into()], &report, false);
+        assert_eq!(stored, vec!["d".to_string()]);
+        assert_eq!(unsettled, vec!["c".to_string()]);
+    }
+
+    /// A code goes to another device only when this process saw its whole
+    /// history and no attempt may have reached the provider; an unknown
+    /// history (e.g. after a restart) keeps the claim.
+    #[test]
+    fn a_code_is_handed_off_only_if_never_sent() {
+        let now = std::time::Instant::now();
+        assert!(!may_hand_off(None), "unknown history");
+        let fresh = CodeHistory::new(now);
+        assert!(may_hand_off(Some(&fresh)));
+        let sent = CodeHistory {
+            maybe_sent: true,
+            ..fresh
+        };
+        assert!(!may_hand_off(Some(&sent)));
+
+        let (_dir, state) = temp_state();
+        state.code_history_attempt("code-x", false);
+        assert!(state.code_history("code-x").is_none(), "an attempt starts no history");
+        state.code_history_start("code-x");
+        state.code_history_attempt("code-x", false);
+        assert!(may_hand_off(state.code_history("code-x").as_ref()));
+        // NoAnswer, then NotSent: an earlier attempt may have arrived.
+        state.code_history_attempt("code-x", true);
+        state.code_history_attempt("code-x", false);
+        assert!(!may_hand_off(state.code_history("code-x").as_ref()));
+        // Starting again keeps the history.
+        state.code_history_start("code-x");
+        assert!(state.code_history("code-x").unwrap().maybe_sent);
+    }
+
+    /// After giving a code up, this device waits the retry backoff's next
+    /// step before claiming it again, so however fast the connection fails,
+    /// claim and release writes stay bounded over the code's lifetime.
+    #[test]
+    fn claim_and_release_writes_are_bounded_by_the_cooldown() {
+        let t0 = std::time::Instant::now();
+        let mut h = CodeHistory::new(t0);
+        assert!(!h.cooling(t0), "never released");
+        let mut writes = 0;
+        for s in 0..CODE_EXCHANGE_WINDOW.as_secs() {
+            let now = t0 + std::time::Duration::from_secs(s);
+            if !h.cooling(now) {
+                // Claim, the request fails before it is sent, release.
+                writes += 2;
+                h.releases += 1;
+                h.released_at = Some(now);
+            }
+        }
+        assert_eq!(writes, 12, "releases at 0, 5, 20, 65, 185 and 485 s");
+        let last = h.released_at.unwrap();
+        assert!(h.cooling(last + std::time::Duration::from_secs(299)));
+        assert!(!h.cooling(last + std::time::Duration::from_secs(300)));
     }
 
     #[test]
@@ -3680,7 +3868,7 @@ refresh_token = "ACME_REFRESH_TOKEN"
     fn mine(c: Claimed) -> Option<Connecting> {
         match c {
             Claimed::Mine(e) => Some(e),
-            Claimed::No | Claimed::Unanswered => None,
+            Claimed::No | Claimed::Unanswered | Claimed::Cooling => None,
         }
     }
 
@@ -3710,6 +3898,22 @@ refresh_token = "ACME_REFRESH_TOKEN"
         let (v, _, stored) = stored_connect(&path, &id, vid);
         assert_eq!(v, 2);
         assert_eq!(stored.unwrap().oauth2.redeemer.as_deref(), Some("dev_me"));
+    }
+
+    /// A code this device gave up is not claimed again while it cools down:
+    /// nothing is written (a wake-driven run respects it; the retry timer
+    /// claims once it has passed).
+    #[tokio::test]
+    async fn a_code_given_up_is_not_claimed_while_cooling() {
+        use crate::sync::PushOutcome;
+        let (_dir, state, vid, path, id) = claim_fixture(None, 2);
+        state.code_history_start("c");
+        state.code_history_released("c");
+        let cloud = FakePush::new(|| Some(Ok(PushOutcome::Ok { version: 3, seq: 1 })));
+        let got = claim_code(&state, vid, &CLAIM_KEY, "gmail", &entry(None), "dev_me", &cloud).await;
+        assert!(matches!(got, Claimed::Cooling));
+        assert!(cloud.calls().is_empty());
+        assert_eq!(stored_connect(&path, &id, vid).0, 2);
     }
 
     /// An unclaimed code is claimed with compare-and-swap at the version the
