@@ -113,8 +113,9 @@ your badge.
 
 ## For agents
 
-A command that needs an approval fails with the approval link in its output.
-The agent gives you the link, runs `sprott op wait <op_id>` in the background
-(exit `0` means approved), and runs the same command again. With several
-requests waiting, the agent sends you the console's Approvals page instead of
-each link.
+Run by an agent, a command that needs an approval prints the approval link and
+a `To wait:` command, then returns. The agent gives you the link and runs
+`sprott op wait <op_id>` in the background; exit `0` means approved. A request
+under `sprott run` is retried after that; `sprott get` waits instead, because
+the value comes back to it. With several requests waiting, the agent sends you
+the console's Approvals page instead of each link.

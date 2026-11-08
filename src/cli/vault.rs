@@ -255,7 +255,7 @@ async fn run_rm(args: VaultDeleteArgs, approval: &ApprovalArgs) -> Result<(), St
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = crate::cli::approve::ApproveOpts::from_flags(approval);
-    crate::cli::approve::approve_op(
+    let outcome = crate::cli::approve::approve_op(
         &custodian,
         &vault,
         &op,
@@ -263,6 +263,9 @@ async fn run_rm(args: VaultDeleteArgs, approval: &ApprovalArgs) -> Result<(), St
         &opts,
     )
     .await?;
+    if let crate::cli::approve::Approval::Pending = outcome {
+        return Ok(());
+    }
     eprintln!("sprott vault rm: ok (vault {} wiped)", shown);
     Ok(())
 }

@@ -71,6 +71,8 @@ If `sprott` cannot reach its daemon, start it with `sprott up`.
 
 ## Approvals
 
+Approval links are for the user: approving takes their passkey.
+
 When several requests need approval, start them together and send the console's
 `/approvals` page instead of each `/grant` link; there the signed-in user approves
 them together.

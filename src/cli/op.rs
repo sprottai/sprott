@@ -6,6 +6,9 @@
 //! treats the process exit as its wake-up — then re-runs the original
 //! command (the approval is cached; the retry consumes it). Polling `/op/{id}`
 //! never consumes anything, so waiting and retrying can't race each other.
+//! A change the daemon makes itself on approval (a set, a connection, a
+//! service, a removal) is already applied when the wait ends, so nothing is
+//! re-run ([`rerun_after_approval`]).
 //!
 //! Exit codes are the contract: 0 approved, 5 not approved (a person said no,
 //! or a stated cause), 6 ended without a decision (withdrawn by the requester
@@ -70,6 +73,18 @@ fn verdict(status: &str) -> Verdict {
         "ok" | "consumed" => Verdict::Approved,
         "rejected" => Verdict::Rejected,
         _ => Verdict::Pending,
+    }
+}
+
+/// Whether an approved op (`act` = the poll's act discriminator) still needs
+/// the original command run again. The daemon applies a requested change on
+/// approval, so re-running it would ask for a second approval. A brokered
+/// request (`use`) retries to spend its approval; an unlock or lock re-run
+/// reports the state it reached.
+fn rerun_after_approval(act: &str) -> bool {
+    match act.strip_prefix("custom:") {
+        None | Some("vault-unlock" | "vault-lock") => true,
+        Some(_) => false,
     }
 }
 
@@ -145,7 +160,15 @@ pub async fn run_wait(args: OpWaitArgs, approval: &ApprovalArgs, json: bool) -> 
                                 if json {
                                     println!("{}", body);
                                 }
-                                eprintln!("Approved. Re-run the original command.");
+                                let act = body.get("act").and_then(|s| s.as_str()).unwrap_or("");
+                                if rerun_after_approval(act) {
+                                    eprintln!("Approved. Re-run the original command.");
+                                } else {
+                                    eprintln!("Approved and applied.");
+                                    crate::cli::approve::say_not_served(
+                                        &crate::cli::approve::act_result(&body),
+                                    );
+                                }
                                 std::process::exit(0);
                             }
                             Verdict::Rejected => {
@@ -236,6 +259,29 @@ mod tests {
         assert!(matches!(verdict("rejected"), Verdict::Rejected));
         assert!(matches!(verdict("pending"), Verdict::Pending));
         assert!(matches!(verdict(""), Verdict::Pending));
+    }
+
+    #[test]
+    fn only_a_retry_or_a_lifecycle_op_is_re_run() {
+        assert!(rerun_after_approval("use"));
+        assert!(rerun_after_approval("export"));
+        assert!(rerun_after_approval("custom:vault-unlock"));
+        assert!(rerun_after_approval("custom:vault-lock"));
+        // A consumed tombstone carries no act.
+        assert!(rerun_after_approval(""));
+        for applied in [
+            "custom:secret-set",
+            "custom:secret-rm",
+            "custom:connection-add",
+            "custom:connection-rm",
+            "custom:widen-host",
+            "custom:narrow-host",
+            "custom:service-add",
+            "custom:service-rm",
+            "custom:vault-delete",
+        ] {
+            assert!(!rerun_after_approval(applied), "{applied}");
+        }
     }
 
     #[test]

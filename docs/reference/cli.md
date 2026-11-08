@@ -128,7 +128,7 @@ All commands: `0` success, `1` error, `2` usage error.
 
 | Code | Meaning |
 |---|---|
-| `0` | Approved. Run the original command again. |
+| `0` | Approved. Run the original command again, unless `op wait` printed `Approved and applied.` |
 | `3` | Expired or unknown. Run the command again for a fresh link. |
 | `4` | Stopped waiting (`--timeout`). The request may still be pending; wait again. |
 | `5` | Not approved. Don't retry it unchanged. |

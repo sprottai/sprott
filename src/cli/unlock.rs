@@ -4,10 +4,9 @@
 //! — every approval flows through the one code path.
 
 use serde_json::json;
-use std::io::IsTerminal;
 
 use crate::cli::active::resolve_active;
-use crate::cli::approve::{approve_op, ApproveOpts};
+use crate::cli::approve::{approve_op, Approval, ApproveOpts};
 use crate::cli::status::VaultState;
 use crate::cli::webauthn::now_unix;
 use crate::config::ApprovalArgs;
@@ -59,15 +58,8 @@ async fn drive(custom_op: &str, verb: &str, approval: &ApprovalArgs) -> Result<(
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
 
-    let opts = ApproveOpts {
-        return_after_remote_link: true,
-        ..ApproveOpts::from_flags(approval)
-    };
-    approve_op(&custodian, &vault, &op, label, &opts).await?;
-
-    if crate::cli::active::frontend_origin().is_some()
-        && (!std::io::stdin().is_terminal() || !std::io::stderr().is_terminal())
-    {
+    let opts = ApproveOpts::from_flags(approval);
+    if let Approval::Pending = approve_op(&custodian, &vault, &op, label, &opts).await? {
         return Ok(());
     }
 
