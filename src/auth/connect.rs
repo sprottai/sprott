@@ -947,16 +947,17 @@ fn code_expired_reason(host: &str, last: &ExchangeFailure) -> String {
     let with = |d: &str| if d.is_empty() { String::new() } else { format!(": {d}") };
     match last {
         ExchangeFailure::NotSent(d) => format!(
-            "couldn't reach {host} from this computer before the authorization expired{}. \
-             Suggestion: check this computer's network or proxy (`sprott config set proxy <url>`)",
+            "couldn't reach {host} from this computer; stopped retrying after 10 minutes{}. \
+             Connect again. Suggestion: check this computer's network or proxy \
+             (`sprott config set proxy <url>`)",
             with(d)
         ),
         ExchangeFailure::NoAnswer(d) => format!(
-            "got no answer from {host} before the authorization expired{}",
+            "got no answer from {host}; stopped retrying after 10 minutes{}. Connect again",
             with(d)
         ),
         ExchangeFailure::Answered(d) | ExchangeFailure::Terminal(d) => format!(
-            "{host} answered with an error until the authorization expired{}",
+            "{host} answered with an error; stopped retrying after 10 minutes{}. Connect again",
             with(d)
         ),
     }
@@ -2479,12 +2480,12 @@ mod tests {
         let r = code_expired_reason(host, &ExchangeFailure::NoAnswer("operation timed out".into()));
         assert_eq!(
             r,
-            "got no answer from oauth2.googleapis.com before the authorization expired: operation timed out"
+            "got no answer from oauth2.googleapis.com; stopped retrying after 10 minutes: operation timed out. Connect again"
         );
         let r = code_expired_reason(host, &ExchangeFailure::Answered("returned HTTP 503: busy".into()));
         assert_eq!(
             r,
-            "oauth2.googleapis.com answered with an error until the authorization expired: returned HTTP 503: busy"
+            "oauth2.googleapis.com answered with an error; stopped retrying after 10 minutes: returned HTTP 503: busy. Connect again"
         );
         assert!(!code_expired_reason(host, &ExchangeFailure::Answered(String::new())).contains(": "));
     }
@@ -3237,7 +3238,7 @@ refresh_token = "REFRESH_TOKEN"
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("before the authorization expired"));
+            .contains("stopped retrying after 10 minutes"));
     }
 
     /// A caught code fills only an empty pending entry (a pasted code already

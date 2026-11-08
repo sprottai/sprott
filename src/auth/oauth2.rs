@@ -225,6 +225,13 @@ pub const CODE_EXCHANGE_REQUEST_FAILED: &str = "oauth2 code-exchange request fai
 /// `auth` (a Basic header carries it; post puts it in `params`), and
 /// `Accept: application/json` always (some providers default to another
 /// representation without it).
+/// Whole-request bound for a token-endpoint call (code exchange and refresh).
+/// The shared client bounds only the connect. Without this, a proxy that
+/// accepts the tunnel and then stalls upstream hangs the request, and the
+/// vault write lock it runs under, until the proxy gives up. A timeout here is
+/// reported as "no answer", so a caught code keeps its claim.
+const TOKEN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn post_token_endpoint(
     token_url: &str,
     style: OAuthStyle,
@@ -235,6 +242,7 @@ async fn post_token_endpoint(
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut req = http_client()
         .post(token_url)
+        .timeout(TOKEN_REQUEST_TIMEOUT)
         .header("Accept", "application/json");
     if auth == TokenAuth::Basic {
         req = req.header("Authorization", basic_auth_value(client_id, client_secret));
