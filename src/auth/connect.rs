@@ -2514,8 +2514,9 @@ mod tests {
             entry.oauth2.error
         );
 
-        // A 5xx stays pending with NO error (retried on its own timer), but IS surfaced
-        // as `unreached` so `sc sync` can say "couldn't reach the provider".
+        // A 5xx stays pending with NO error (retried on its own timer). The
+        // provider answered, so it is surfaced as `provider_error`, not as
+        // `unreached` ("couldn't reach" is only for a request with no answer).
         let mut m = with_connecting("gmail", "gmail", "code-B");
         let report = run_pending(
             &services,
@@ -2529,9 +2530,9 @@ mod tests {
         .await;
         assert_eq!((report.completed.len(), report.failed.len()), (0, 0));
         assert_eq!(
-            report.unreached.len(),
-            1,
-            "a transient failure is reported as unreached"
+            (report.unreached.len(), report.provider_error.len()),
+            (0, 1),
+            "a provider's retryable error is reported as provider_error"
         );
         assert!(aux_map::<Connecting>(&m, "connecting")["gmail"]
             .oauth2

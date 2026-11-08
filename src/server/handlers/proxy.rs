@@ -27,7 +27,8 @@ use crate::state::AppState;
 pub async fn reload(State(state): State<Arc<AppState>>) -> Json<Value> {
     crate::core::forward::reload_egress_proxy();
     crate::proxy::upstream::reload_cell(&state.egress_proxy);
-    let proxy = crate::cli::egress_proxy::effective();
+    // Never log or return the URL as given: it can carry `user:password@`.
+    let proxy = crate::cli::egress_proxy::effective().map(|u| crate::cli::egress_proxy::redact(&u));
     tracing::info!(
         proxy = proxy.as_deref().unwrap_or("this computer's proxy settings"),
         "egress proxy hot-reloaded"

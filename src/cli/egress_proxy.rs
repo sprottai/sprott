@@ -317,6 +317,23 @@ pub fn client_streaming(connect: std::time::Duration) -> reqwest::Result<reqwest
         .build()
 }
 
+/// A proxy URL with any `user:password@` removed, for logs, replies and
+/// reports. A proxy URL can carry credentials; nothing Sprott prints or logs
+/// may include them.
+pub fn redact(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let host = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+            format!("{scheme}://{host}")
+        }
+        None => url
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(url)
+            .to_string(),
+    }
+}
+
 /// The first non-empty proxy variable in THIS process's env right now. Read once by
 /// `apply_to_env` before it shapes env, so it reflects the operator's shell.
 fn shell_proxy_now() -> Option<String> {
@@ -333,6 +350,14 @@ fn shell_proxy_now() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn redact_drops_userinfo_keeps_host_port() {
+        assert_eq!(redact("http://u:p@box:9999"), "http://box:9999");
+        assert_eq!(redact("http://proxy.local:3128"), "http://proxy.local:3128");
+        assert_eq!(redact("box:9999"), "box:9999");
+        assert_eq!(redact("u:p@box:9999"), "box:9999");
+    }
     use super::*;
 
     #[test]
