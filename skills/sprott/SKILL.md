@@ -62,7 +62,8 @@ If `sprott` cannot reach its daemon, start it with `sprott up`.
 - `sprott registry` is the catalog of supported services.
 - `sprott status` shows the vault's console URL and why a vault change was not applied.
 - When a task needs a service with no connection, the user adds it on
-  `<console_url>/connections` (`#custom` for an API not in the catalog). Details,
+  `<console_url>/connections` (`#custom` for an API not in the catalog), or you
+  propose one with `sprott connection add` from a credential you already have. Details,
   including connections backed by an existing secret:
   https://sprott.ai/docs/connections.md
 - A vault is a security boundary, and each connection belongs to one. Target it
