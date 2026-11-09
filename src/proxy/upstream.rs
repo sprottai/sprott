@@ -72,9 +72,11 @@ pub enum Upstream {
     System(Arc<hyper_util::client::proxy::matcher::Matcher>),
 }
 
-/// How often the daemon re-reads this computer's proxy settings. Polling is
-/// what Chromium does on Linux for the same job; the read is cheap (env vars,
-/// one SCDynamicStore lookup on macOS, one registry key on Windows).
+/// How often the daemon re-reads this computer's proxy settings. This polls:
+/// the platforms also offer change notifications (macOS SCDynamicStore,
+/// Windows registry change events), which this does not use yet. The read is
+/// cheap (env vars, one SCDynamicStore lookup on macOS, one registry key on
+/// Windows), so a change takes effect within this interval.
 const SYSTEM_PROXY_POLL: Duration = Duration::from_secs(5);
 
 /// Follow this computer's proxy settings while the daemon runs: when they
