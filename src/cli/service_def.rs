@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cli::active::resolve_active;
-use crate::cli::approve::{act_result, approve_op, ApproveOpts};
+use crate::cli::approve::{act_result, approve_op, Approval, ApproveOpts};
 use crate::cli::webauthn::now_unix;
 use crate::config::{
     ApprovalArgs, ServiceAddArgs, ServiceLsArgs, ServiceRmArgs, ServiceUpdateArgs,
@@ -225,14 +225,15 @@ fn group_of(l: &Listed) -> (String, String) {
 
 // ── add ──────────────────────────────────────────────────────────────────────
 
-/// Create the `service-add` op for `loaded` and wait for its approval.
+/// Create the `service-add` op for `loaded` and drive its approval: the act's
+/// result once applied, `None` while it is pending ([`Approval::Pending`]).
 async fn submit(
     custodian: &str,
     vault: &str,
     loaded: &Loaded,
     update: bool,
     opts: &ApproveOpts,
-) -> Result<Value, String> {
+) -> Result<Option<Value>, String> {
     let identity = loaded.source.identity();
     let op = source::add_op(vault, &loaded.source, &loaded.admitted, now_unix());
     let label = if update {
@@ -240,8 +241,10 @@ async fn submit(
     } else {
         format!("Add services from {}", identity)
     };
-    let body = approve_op(custodian, vault, &op, &label, opts).await?;
-    Ok(act_result(&body))
+    Ok(match approve_op(custodian, vault, &op, &label, opts).await? {
+        Approval::Done(body) => Some(act_result(&body)),
+        Approval::Pending => None,
+    })
 }
 
 fn ids_of(v: &Value, key: &str) -> Vec<String> {
@@ -281,14 +284,17 @@ pub async fn run_add(args: ServiceAddArgs, approval: &ApprovalArgs) -> Result<()
         ));
     }
     print_loaded(&loaded);
-    let result = submit(
+    let Some(result) = submit(
         &custodian,
         &vault,
         &loaded,
         false,
         &ApproveOpts::from_flags(approval),
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
     println!("stored: {}", safe(&ids_of(&result, "ids").join(", ")));
     crate::cli::approve::say_not_served(&result);
     Ok(())
@@ -473,7 +479,9 @@ pub async fn run_update(args: ServiceUpdateArgs, approval: &ApprovalArgs) -> Res
                 continue;
             }
         }
-        let result = submit(&custodian, &vault, &loaded, true, &approve).await?;
+        let Some(result) = submit(&custodian, &vault, &loaded, true, &approve).await? else {
+            continue;
+        };
         println!("  stored: {}", safe(&ids_of(&result, "ids").join(", ")));
         let removed = ids_of(&result, "removed");
         if !removed.is_empty() {
@@ -682,14 +690,17 @@ pub async fn run_rm(args: ServiceRmArgs, approval: &ApprovalArgs) -> Result<(), 
         "bind": { "redeemer": vault },
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         &custodian,
         &vault,
         &op,
         &format!("Remove {}", target),
         &ApproveOpts::from_flags(approval),
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
     let result = act_result(&body);
     println!("removed: {}", safe(&ids_of(&result, "removed").join(", ")));
     crate::cli::approve::say_not_served(&result);

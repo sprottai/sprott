@@ -174,57 +174,208 @@ async fn handle_callback(
         tracing::info!(vault = %pending.vault_id, conn = %pending.conn_id, "oauth loopback: redirect carried no usable code ({})", why);
         return (
             StatusCode::OK,
-            Html(done_page("Connection cancelled", &why)),
+            Html(result_page(&Outcome::Cancelled { why })),
         );
     }
 
-    // Inject the caught code into its pending entry and drive the EXISTING
-    // exchange → seal → MOVE → push machinery. Awaited so the page reflects the
-    // real outcome. The raw code never lands in durable storage: on success the
-    // entry is MOVEd to `connections` in the same re-seal; on a transient miss M
-    // is discarded unsealed.
+    // Inject the caught code and drive the EXISTING exchange → seal → MOVE →
+    // push machinery, the same path a pasted code takes. If this run does not
+    // finish the connect, the code is sealed into its pending entry like a
+    // paste, so the ordinary retry and expiry path owns it from here.
     let mut injected = std::collections::BTreeMap::new();
     injected.insert(pending.conn_id.clone(), q.code);
     let report =
         crate::auth::connect::process_vault_connects(&state, &pending.vault_id, Some(injected))
             .await;
 
-    let page = if report.completed.iter().any(|c| *c == pending.conn_id) {
+    let outcome = if report.completed.iter().any(|c| *c == pending.conn_id) {
         tracing::info!(vault = %pending.vault_id, conn = %pending.conn_id, "oauth loopback: connect completed via auto-catch");
         if report.not_served {
-            done_page("Connection stored", crate::error::STORED_NOT_SERVED_MSG)
+            Outcome::StoredNotServed
         } else {
-            done_page(
-                "Connected",
-                "Sprott finished the connection. You can close this window.",
-            )
+            Outcome::Connected
         }
-    } else if report.failed.iter().any(|(c, _)| *c == pending.conn_id) {
-        done_page(
-            "Connection failed",
-            "The authorization could not be completed. Return to Sprott and try connecting again.",
-        )
+    } else if let Some((_, reason)) = report.failed.iter().find(|(c, _)| *c == pending.conn_id) {
+        Outcome::Failed { reason: reason.clone() }
+    } else if let Some((_, host, detail)) =
+        report.unreached.iter().find(|(c, _, _)| *c == pending.conn_id)
+    {
+        Outcome::Unreached {
+            host: host.clone(),
+            detail: detail.clone(),
+            sent: !report.not_sent.contains(&pending.conn_id),
+            stored: report.code_stored.contains(&pending.conn_id),
+            handed_off: report.handed_off.contains(&pending.conn_id),
+        }
+    } else if let Some((_, host, detail)) =
+        report.provider_error.iter().find(|(c, _, _)| *c == pending.conn_id)
+    {
+        Outcome::ProviderError {
+            host: host.clone(),
+            detail: detail.clone(),
+            stored: report.code_stored.contains(&pending.conn_id),
+        }
+    } else if let Some((_, reason)) =
+        report.left_pending.iter().find(|(c, _)| *c == pending.conn_id)
+    {
+        Outcome::NotFinished { reason: reason.clone() }
+    } else if state.cloned_state_key(&pending.vault_id).is_none() {
+        // Locked between registration and the redirect: a locked vault cannot
+        // be written, so the code was not stored and a new consent is needed.
+        Outcome::Locked
     } else {
-        // Locked vault, transient provider error, or the entry was already
-        // completed. The console keeps waiting / offers the paste fallback.
-        done_page(
-            "Almost there",
-            "Return to Sprott. If the connection doesn't appear shortly, try connecting again.",
-        )
+        // Nothing this run can name: the console shows the connection's state.
+        Outcome::Pending
     };
-    (StatusCode::OK, Html(page))
+    (StatusCode::OK, Html(result_page(&outcome)))
 }
 
-/// A minimal self-closing result page for the consent popup. Deliberately
-/// generic (no account/secret detail); auto-closes after a beat.
-fn done_page(title: &str, body: &str) -> String {
+/// What the consent popup tells the person after the redirect was caught.
+#[derive(Debug)]
+enum Outcome {
+    Connected,
+    StoredNotServed,
+    Cancelled { why: String },
+    Failed { reason: String },
+    /// No HTTP answer from `host`. `sent`: the connection was made and the
+    /// request may have arrived (else the connection failed first);
+    /// `stored`: the store holds the caught code, retried; `handed_off`: it
+    /// was stored unclaimed, so any device on the account may finish it.
+    Unreached {
+        host: String,
+        detail: String,
+        sent: bool,
+        stored: bool,
+        handed_off: bool,
+    },
+    /// `host` answered with an error worth retrying.
+    ProviderError { host: String, detail: String, stored: bool },
+    NotFinished { reason: String },
+    Locked,
+    Pending,
+}
+
+/// The consent popup's result page. Only a finished connection closes itself;
+/// every other outcome stays open and says what happened and what to do, since
+/// the person cannot act on a page that vanished. No account or secret detail.
+fn result_page(o: &Outcome) -> String {
+    let window = crate::auth::connect::CODE_EXCHANGE_WINDOW.as_secs() / 60;
+    let (title, lines, command, detail, close): (String, Vec<String>, Option<&str>, Option<String>, bool) = match o {
+        Outcome::Connected => (
+            "Connected".into(),
+            vec!["You can close this window.".into()],
+            None,
+            None,
+            true,
+        ),
+        Outcome::StoredNotServed => (
+            "Connection stored".into(),
+            vec!["It is used on this computer after you unlock Sprott here.".into()],
+            Some("sprott unlock"),
+            None,
+            false,
+        ),
+        Outcome::Cancelled { why } => (
+            "Connection cancelled".into(),
+            vec!["The sign-in did not return an authorization. Connect again from Sprott.".into()],
+            None,
+            Some(why.clone()),
+            false,
+        ),
+        Outcome::Failed { reason } => (
+            "Connection failed".into(),
+            vec!["Connect again from Sprott.".into()],
+            None,
+            Some(reason.clone()),
+            false,
+        ),
+        Outcome::Unreached {
+            host,
+            detail,
+            sent,
+            stored,
+            handed_off,
+        } => {
+            let (title, what) = if *sent {
+                (
+                    format!("No answer from {host}"),
+                    format!("Sprott on this computer got no answer from {host}, so the connection isn't finished."),
+                )
+            } else {
+                (
+                    format!("Couldn't reach {host}"),
+                    format!("Sprott on this computer couldn't reach {host}, so the connection isn't finished."),
+                )
+            };
+            let mut lines = vec![what];
+            lines.push(match (stored, handed_off) {
+                (true, false) => format!("Sprott saved the sign-in and retries it for up to {window} minutes."),
+                (true, true) => format!("Sprott saved the sign-in and retries it for up to {window} minutes. Any computer on your account that runs Sprott with this vault unlocked can finish it."),
+                (false, _) => "Connect again from Sprott.".into(),
+            });
+            let mut command = None;
+            if !*sent {
+                lines.push("Suggestion: if this computer uses a proxy, set it for Sprott:".into());
+                command = Some("sprott config set proxy http://HOST:PORT");
+            }
+            (title, lines, command, Some(detail.clone()), false)
+        }
+        Outcome::ProviderError { host, detail, stored } => (
+            format!("{host} answered with an error"),
+            vec![
+                format!("{host} answered with an error, so the connection isn't finished."),
+                if *stored {
+                    format!("Sprott saved the sign-in and retries it for up to {window} minutes.")
+                } else {
+                    "Connect again from Sprott.".into()
+                },
+            ],
+            None,
+            Some(detail.clone()),
+            false,
+        ),
+        Outcome::NotFinished { reason } => (
+            "Connection not finished".into(),
+            vec!["Connect again from Sprott.".into()],
+            None,
+            Some(reason.clone()),
+            false,
+        ),
+        Outcome::Locked => (
+            "Sprott is locked".into(),
+            vec!["Sprott is locked on this computer, so it couldn't finish the connection. Unlock it, then connect again from Sprott.".into()],
+            Some("sprott unlock"),
+            None,
+            false,
+        ),
+        Outcome::Pending => (
+            "Return to Sprott".into(),
+            vec!["Sprott shows this connection's status.".into()],
+            None,
+            None,
+            false,
+        ),
+    };
+    let mut body = String::new();
+    for l in &lines {
+        body.push_str(&format!("<p>{}</p>", html_escape(l)));
+    }
+    if let Some(c) = command {
+        body.push_str(&format!("<pre>{}</pre>", html_escape(c)));
+    }
+    if let Some(d) = detail.filter(|d| !d.is_empty()) {
+        body.push_str(&format!("<p class=d>{}</p>", html_escape(&d)));
+    }
+    let script = if close {
+        "<script>setTimeout(function(){try{window.close()}catch(e){}},1500)</script>"
+    } else {
+        ""
+    };
     format!(
         "<!doctype html><meta charset=utf-8><title>{t}</title>\
-<style>body{{font:15px/1.6 -apple-system,system-ui;max-width:420px;margin:14vh auto;padding:0 24px;text-align:center;color:#111}}h2{{margin:0 0 6px;font-size:20px}}p{{color:#555}}</style>\
-<h2>{t}</h2><p>{b}</p>\
-<script>setTimeout(function(){{try{{window.close()}}catch(e){{}}}},1500)</script>",
-        t = html_escape(title),
-        b = html_escape(body),
+<style>body{{font:15px/1.6 -apple-system,system-ui;max-width:460px;margin:14vh auto;padding:0 24px;color:#111}}h2{{margin:0 0 6px;font-size:20px}}p{{color:#555}}pre{{background:#f4f4f5;padding:10px 12px;border-radius:6px;white-space:pre-wrap;user-select:all}}p.d{{font-size:12px;color:#888;word-break:break-word}}</style>\
+<h2>{t}</h2>{body}{script}",
+        t = html_escape(&title),
     )
 }
 
@@ -232,6 +383,7 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -274,6 +426,95 @@ mod tests {
         assert_eq!(loopback_port("https://127.0.0.1:8765/cb"), None); // not http
         assert_eq!(loopback_port("http://evil.example:8765/cb"), None); // not loopback
         assert_eq!(loopback_port("http://127.0.0.1/cb"), None); // no explicit port
+    }
+
+    #[test]
+    fn only_a_finished_connection_closes_its_page() {
+        let closes = |o: &Outcome| result_page(o).contains("window.close");
+        assert!(closes(&Outcome::Connected));
+        for o in [
+            Outcome::StoredNotServed,
+            Outcome::Cancelled { why: "access_denied".into() },
+            Outcome::Failed { reason: "provider rejected the exchange: invalid_client".into() },
+            Outcome::Unreached { host: "oauth2.googleapis.com".into(), detail: "operation timed out".into(), sent: true, stored: true, handed_off: false },
+            Outcome::ProviderError { host: "oauth2.googleapis.com".into(), detail: "HTTP 503".into(), stored: true },
+            Outcome::NotFinished { reason: "the provider returned no refresh token".into() },
+            Outcome::Locked,
+            Outcome::Pending,
+        ] {
+            assert!(!closes(&o), "{o:?} must stay open");
+        }
+    }
+
+    #[test]
+    fn unreached_page_names_the_host_the_fix_and_the_cause() {
+        let page = result_page(&Outcome::Unreached {
+            host: "oauth2.googleapis.com".into(),
+            detail: "error sending request: <b>timed out</b>".into(),
+            sent: false,
+            stored: true,
+            handed_off: false,
+        });
+        assert!(page.contains("Couldn't reach oauth2.googleapis.com"));
+        assert!(page.contains("sprott config set proxy"));
+        assert!(page.contains("&lt;b&gt;timed out&lt;/b&gt;"), "detail is escaped");
+        assert!(!page.contains("<b>"));
+    }
+
+    /// The page says the sign-in was saved and is retried only when the
+    /// store holds it; otherwise it says to connect again. A provider that
+    /// answered with an error is named as such, without a proxy suggestion.
+    #[test]
+    fn the_page_says_saved_only_when_stored() {
+        let host = "oauth2.googleapis.com".to_string();
+        let unreached = |stored, handed_off| {
+            result_page(&Outcome::Unreached {
+                host: host.clone(),
+                detail: "connection refused".into(),
+                sent: false,
+                stored,
+                handed_off,
+            })
+        };
+        assert!(unreached(true, false).contains("Sprott saved the sign-in"));
+        assert!(!unreached(true, false).contains("Any computer"));
+        assert!(unreached(true, true)
+            .contains("Any computer on your account that runs Sprott with this vault unlocked can finish it."));
+        let lost = unreached(false, true);
+        assert!(!lost.contains("saved"));
+        assert!(lost.contains("Connect again from Sprott."));
+
+        // Connected, then no answer: the request may have arrived.
+        let page = result_page(&Outcome::Unreached {
+            host: host.clone(),
+            detail: "operation timed out".into(),
+            sent: true,
+            stored: true,
+            handed_off: false,
+        });
+        assert!(page.contains("got no answer from oauth2.googleapis.com"));
+        assert!(!page.contains("couldn't reach") && !page.contains("proxy"));
+
+        let answered = |stored| {
+            result_page(&Outcome::ProviderError {
+                host: host.clone(),
+                detail: "returned HTTP 503 Service Unavailable: busy".into(),
+                stored,
+            })
+        };
+        let page = answered(true);
+        assert!(page.contains("oauth2.googleapis.com answered with an error"));
+        assert!(page.contains("HTTP 503"));
+        assert!(page.contains("Sprott saved the sign-in"));
+        assert!(!page.contains("couldn't reach") && !page.contains("proxy"));
+        assert!(answered(false).contains("Connect again from Sprott."));
+    }
+
+    #[test]
+    fn failed_page_shows_the_provider_reason() {
+        let page = result_page(&Outcome::Failed { reason: "authorization expired or already used".into() });
+        assert!(page.contains("Connection failed"));
+        assert!(page.contains("authorization expired or already used"));
     }
 
     #[test]

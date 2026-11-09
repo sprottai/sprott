@@ -640,6 +640,11 @@ pub struct AppState {
     /// sha256(authorization code) → when this daemon first tried to exchange
     /// it and failed transiently (the retry window counts from it).
     pub oauth_code_first_tried: Mutex<HashMap<String, std::time::Instant>>,
+    /// sha256(authorization code) → this process's history of it, for the
+    /// codes this process caught or claimed from an unclaimed row
+    /// ([`crate::auth::connect::CodeHistory`]). In memory only: after a
+    /// restart a code's history is unknown.
+    pub oauth_code_history: Mutex<HashMap<String, crate::auth::connect::CodeHistory>>,
     /// (vault, sha256(refresh token)) → the token a refresh in this process
     /// rotated it to, and when: a mint that read the replaced token (before
     /// it waited for the vault write lock, or from a fresh decrypt) follows
@@ -797,6 +802,7 @@ impl AppState {
             ledger_sync: tokio::sync::Mutex::new(None),
             oauth_redeemed_codes: Mutex::new(HashMap::new()),
             oauth_code_first_tried: Mutex::new(HashMap::new()),
+            oauth_code_history: Mutex::new(HashMap::new()),
             oauth_rotated_to: Mutex::new(HashMap::new()),
             boot_id: {
                 use rand::RngCore as _;
@@ -1181,6 +1187,48 @@ impl AppState {
         Self::reap_redeemed(&mut m);
         *m.entry(crate::api_key::sha256_hex(code))
             .or_insert_with(std::time::Instant::now)
+    }
+
+    /// Start this process's history of `code`: it caught the code, or
+    /// claimed it from an unclaimed row, so every attempt to exchange it from
+    /// here on is recorded. A history already started is kept.
+    pub fn code_history_start(&self, code: &str) {
+        let mut m = self.oauth_code_history.lock().unwrap();
+        Self::reap_history(&mut m);
+        m.entry(crate::api_key::sha256_hex(code))
+            .or_insert_with(|| crate::auth::connect::CodeHistory::new(std::time::Instant::now()));
+    }
+
+    /// Record an attempt to exchange `code`; `maybe_sent`: it may have
+    /// reached the provider. Nothing without a started history.
+    pub fn code_history_attempt(&self, code: &str, maybe_sent: bool) {
+        let mut m = self.oauth_code_history.lock().unwrap();
+        if let Some(h) = m.get_mut(&crate::api_key::sha256_hex(code)) {
+            h.maybe_sent |= maybe_sent;
+        }
+    }
+
+    /// Record that this device gave up its claim on `code` (released it, or
+    /// stored a caught code unclaimed). Nothing without a started history.
+    pub fn code_history_released(&self, code: &str) {
+        let mut m = self.oauth_code_history.lock().unwrap();
+        if let Some(h) = m.get_mut(&crate::api_key::sha256_hex(code)) {
+            h.releases = h.releases.saturating_add(1);
+            h.released_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// This process's history of `code`; `None`: unknown (never started
+    /// here, or expired).
+    pub fn code_history(&self, code: &str) -> Option<crate::auth::connect::CodeHistory> {
+        let mut m = self.oauth_code_history.lock().unwrap();
+        Self::reap_history(&mut m);
+        m.get(&crate::api_key::sha256_hex(code)).copied()
+    }
+
+    fn reap_history(m: &mut HashMap<String, crate::auth::connect::CodeHistory>) {
+        let now = std::time::Instant::now();
+        m.retain(|_, h| now.duration_since(h.started) < Self::REDEEMED_CODE_TTL);
     }
 
     fn reap_redeemed(m: &mut HashMap<String, std::time::Instant>) {

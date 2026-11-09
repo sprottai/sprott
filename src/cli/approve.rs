@@ -10,7 +10,9 @@
 //!     (`op.rs` → `relay::client::spawn_register_and_poll`); the browser
 //!     opens K, HPKE-seals it with its identity signature and deposits the grant; the daemon polls the
 //!     relay and applies it. The CLI just surfaces the link and polls the
-//!     daemon for the op to resolve — no local gesture.
+//!     daemon for the op to resolve — no local gesture. By default it prints
+//!     the link and a `To wait:` command and returns (the op stays pending);
+//!     it waits with `--wait`, or for an op whose value comes back to it.
 //!
 //!   • **Local** (self-host, no cloud pairing): the on-box ceremony — the
 //!     daemon serves the WebAuthn page on localhost, the CLI spawns a
@@ -25,7 +27,6 @@
 //! everywhere by construction.
 
 use std::time::{Duration, Instant};
-use std::io::IsTerminal;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -70,8 +71,21 @@ pub struct ApproveOpts {
     pub cb_port: Option<u16>,
     /// Local on-box gesture timeout (seconds).
     pub timeout: u64,
-    /// In a non-interactive remote unlock/lock, return after printing the link.
-    pub return_after_remote_link: bool,
+    /// A remote approval waits for the decision instead of returning after
+    /// the link ([`waits_for_decision`]).
+    pub wait: bool,
+}
+
+/// How [`approve_op`] ended for its caller.
+#[derive(Debug)]
+pub enum Approval {
+    /// Approved and applied: the daemon's approve response (see [`act_result`]).
+    Done(Value),
+    /// Remote, without `--wait`: the link and its `To wait:` command are
+    /// printed and the op stays pending on the daemon, which applies it on
+    /// approval (`sprott op wait` reports the outcome). The caller prints no
+    /// result line and exits 0.
+    Pending,
 }
 
 impl ApproveOpts {
@@ -83,9 +97,20 @@ impl ApproveOpts {
             timeout: flags
                 .timeout
                 .unwrap_or(crate::config::APPROVAL_TIMEOUT_SECS),
-            return_after_remote_link: false,
+            wait: waits_for_decision(flags.no_wait),
         }
     }
+}
+
+/// Whether a remote approval waits for the decision: always, unless
+/// `--no-wait`. The link is printed first and the command then waits, the
+/// way device-authorization CLIs do (RFC 8628: show the URL, then poll; `gh
+/// auth login`, `az login`). An agent runs the command in the background and
+/// passes the link on as soon as it appears. `--no-wait` returns after the
+/// link for a caller that can't read a running command's output; `sprott op
+/// wait` then reports the result. `--wait` is accepted and is the default.
+fn waits_for_decision(no_wait: bool) -> bool {
+    !no_wait
 }
 
 /// Fallback remote-approval wait, used only until the first successful poll
@@ -203,16 +228,18 @@ pub async fn set_secret_unlocked(
     Ok(None) // locked or needs-approval — fall back to the passkey ceremony
 }
 
-/// Create `op` on the daemon and drive it to a passkey approval. Returns the
-/// daemon's approve response JSON (e.g. the unlock's `{kv, aux}` value) on
-/// success. `label` is a human verb ("Unlock vault") used in prompts.
+/// Create `op` on the daemon and drive it to a passkey approval. Returns
+/// [`Approval::Done`] with the daemon's approve response once the op is
+/// approved and applied, or [`Approval::Pending`] when a remote approval
+/// returned after printing the link ([`returns_after_link`]).
+/// `label` is a human verb ("Unlock vault") used in prompts.
 pub async fn approve_op(
     custodian: &str,
     vault: &str,
     op: &Value,
     label: &str,
     opts: &ApproveOpts,
-) -> Result<Value, String> {
+) -> Result<Approval, String> {
     // Fetch passkey material — also the check that the vault actually exists on
     // this daemon (clear error instead of a later opaque create-op failure).
     let meta = fetch_passkey_meta(custodian, vault).await?;
@@ -227,12 +254,15 @@ pub async fn approve_op(
     // Paired ⇒ the user is (potentially) on another machine and can only reach
     // the cloud approval page. Local ⇒ the on-box ceremony.
     if crate::cli::active::frontend_origin().is_some() {
+        // An Export's value comes back to this process (an older daemon may
+        // mint it without a waiter secret, so the act type counts too).
+        let value_comes_back = waiter.is_some() || is_export(created.op.as_ref().unwrap_or(op));
         remote_approve(
             custodian,
             &created.op_id,
             label,
             waiter,
-            opts.return_after_remote_link,
+            returns_after_link(opts.wait, value_comes_back),
         )
         .await
     } else {
@@ -275,8 +305,22 @@ pub async fn approve_op(
             }
             return Err(e);
         }
-        res
+        res.map(Approval::Done)
     }
+}
+
+/// Whether `op` is an Export (`act.type == "export"`).
+fn is_export(op: &Value) -> bool {
+    op.pointer("/act/type").and_then(|t| t.as_str()) == Some("export")
+}
+
+/// Whether a remote approval returns once its link is printed instead of
+/// waiting for the decision: unless it waits ([`waits_for_decision`]). The
+/// daemon applies the op on approval without this process. An op whose value
+/// comes back to this process (an Export, released only to its waiter)
+/// always waits.
+fn returns_after_link(wait: bool, value_comes_back: bool) -> bool {
+    !wait && !value_comes_back
 }
 
 /// Request header carrying an Export's waiter secret (mirror of the daemon's
@@ -353,15 +397,18 @@ fn lower_first(label: &str) -> String {
 
 /// Remote arm: surface the cloud `/grant/{op_id}` link and poll the local
 /// daemon until the op resolves (its relay poller applies the browser-deposited
-/// grant via loopback approve). Ctrl-C, SIGTERM or giving up withdraws the op
-/// (`POST /op/{id}/cancel`), so an abandoned wait never lingers in the inbox.
+/// grant via loopback approve). With `return_after_link` it prints the
+/// `To wait:` command instead and returns [`Approval::Pending`] with no further
+/// daemon call: the op stays pending and is applied on approval. Ctrl-C,
+/// SIGTERM or giving up while waiting withdraws the op (`POST /op/{id}/cancel`),
+/// so an abandoned wait never lingers in the inbox.
 async fn remote_approve(
     custodian: &str,
     op_id: &str,
     label: &str,
     waiter: Option<&str>,
     return_after_link: bool,
-) -> Result<Value, String> {
+) -> Result<Approval, String> {
     let url = crate::cli::active::grant_url(op_id);
     eprintln!();
     eprintln!(
@@ -369,10 +416,10 @@ async fn remote_approve(
         lower_first(label)
     );
     eprintln!("  {}", url);
-    if return_after_link && (!std::io::stdin().is_terminal() || !std::io::stderr().is_terminal()) {
+    if return_after_link {
         eprintln!("{}", crate::cli::human_action::wait_command(op_id));
         crate::cli::human_action::report(&url, None, None);
-        return Ok(Value::Null);
+        return Ok(Approval::Pending);
     }
     eprintln!();
     eprintln!("Waiting for approval…");
@@ -390,7 +437,7 @@ async fn remote_approve(
         }
     };
     match outcome {
-        Ok(v) => Ok(v),
+        Ok(v) => Ok(Approval::Done(v)),
         Err(RemoteWaitErr::Failed(e)) => Err(e),
         Err(RemoteWaitErr::TimedOut { deadline_from_op }) => {
             let withdrawn = cancel_op(custodian, op_id, waiter).await;
@@ -734,6 +781,54 @@ mod tests {
     }
 
     use super::*;
+
+    /// A remote approval returns after its link unless the caller passed
+    /// `--wait` or its value comes back to this process (an Export always
+    /// waits for it).
+    /// An approval waits unless `--no-wait`, in a terminal or not.
+    #[test]
+    fn waits_unless_no_wait() {
+        assert!(waits_for_decision(false));
+        assert!(!waits_for_decision(true));
+    }
+
+    #[test]
+    fn returns_after_the_link_unless_wait_or_a_returned_value() {
+        assert!(returns_after_link(false, false));
+        assert!(!returns_after_link(false, true));
+        assert!(!returns_after_link(true, false));
+        assert!(!returns_after_link(true, true));
+    }
+
+    #[test]
+    fn is_export_reads_the_act_type() {
+        assert!(is_export(&json!({ "act": { "type": "export", "target": "K" } })));
+        assert!(!is_export(&json!({ "act": { "type": { "custom": "secret-set" } } })));
+        assert!(!is_export(&json!({})));
+    }
+
+    /// Returning after the link leaves the op to the daemon: no poll and no
+    /// withdrawal reach it, and the caller gets `Pending`.
+    #[tokio::test]
+    async fn returning_after_the_link_never_calls_the_daemon() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((_sock, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let out = remote_approve(&base, "op-1", "Store secret K", None, true)
+            .await
+            .unwrap();
+        assert!(matches!(out, Approval::Pending));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
 
     /// The local ceremony's grant carries only the sealed K and the identity
     /// signature: K opens with the daemon's key, the signature verifies under

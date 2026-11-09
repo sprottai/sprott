@@ -82,6 +82,13 @@ pub struct ApprovalArgs {
     /// 120), or in `sprott op wait` (default 1900).
     #[arg(long, global = true, value_name = "SECONDS")]
     pub timeout: Option<u64>,
+    /// Wait for the approval and print the result (the default).
+    #[arg(long, global = true, conflicts_with = "no_wait")]
+    pub wait: bool,
+    /// Print the approval link and return without waiting; `sprott op wait`
+    /// reports the result.
+    #[arg(long, global = true)]
+    pub no_wait: bool,
 }
 
 /// `--timeout` default for a local browser approval.
@@ -145,7 +152,8 @@ pub enum Command {
     Vault(VaultArgs),
     /// Read/write persistent preferences: `cb-port` (the fallback for
     /// `--cb-port`) and `proxy` (the HTTP proxy the daemon uses to reach the
-    /// internet). Subs: set / get / unset / ls.
+    /// internet; unset, it uses this computer's proxy settings). Subs: set /
+    /// get / unset / ls.
     Config(ConfigArgs),
     /// Manage the active vault's enrolled passkeys: `ls` lists them; `add` /
     /// `rm` / `rename` print the console page where that is done. Short:
@@ -725,7 +733,8 @@ pub enum ConfigSubcommand {
     /// Set a persistent preference. Keys: `cb-port` (e.g. `sprott config set
     /// cb-port 23394`) and `proxy`, the HTTP proxy the daemon uses to reach the
     /// internet (e.g. `sprott config set proxy http://127.0.0.1:7778`; applies
-    /// to the running daemon at once).
+    /// to the running daemon at once). Without it, Sprott uses this computer's
+    /// proxy settings and follows their changes.
     Set { key: String, value: String },
     /// Print the value of one preference. Exit code is nonzero when unset.
     Get { key: String },
@@ -1101,6 +1110,24 @@ mod cli_surface_tests {
         let cli = parse(&["--timeout", "60", "op", "wait", "op-1"]).unwrap();
         assert_eq!(cli.approval.timeout, Some(60));
         assert_eq!(parse(&["unlock"]).unwrap().approval.timeout, None);
+        // `--wait` / `--no-wait` are global and unset by default (waiting is
+        // the default); they can't be combined; `setup --wait` stays setup's.
+        assert!(!parse(&["unlock"]).unwrap().approval.wait);
+        assert!(!parse(&["unlock"]).unwrap().approval.no_wait);
+        assert!(parse(&["unlock", "--no-wait"]).unwrap().approval.no_wait);
+        assert!(parse(&["--no-wait", "restart"]).unwrap().approval.no_wait);
+        assert!(parse(&["unlock", "--wait", "--no-wait"]).is_err());
+        assert!(parse(&["set", "K", "v", "--wait"]).unwrap().approval.wait);
+        assert!(parse(&["--wait", "connection", "rm", "x", "--yes"]).unwrap().approval.wait);
+        let Command::Setup(s) = parse(&["setup", "--agent-name", "a", "--wait"]).unwrap().command
+        else {
+            panic!("setup");
+        };
+        assert!(s.wait);
+        {
+            use clap::CommandFactory as _;
+            Cli::command().debug_assert();
+        }
 
         let Command::Vault(v) = parse(&["vault", "use", "2"]).unwrap().command else {
             panic!("vault");

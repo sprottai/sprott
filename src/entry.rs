@@ -51,7 +51,7 @@ pub async fn run_cli(hooks: Arc<dyn TeamHooks>) -> Result<(), Box<dyn std::error
     // backend included, so `sc agent`/`sc login`/sync all honour it); a real
     // shell `HTTPS_PROXY` still wins, and only loopback stays direct. After the
     // move, so the first command after it reads the setting from `~/.sprott`.
-    cli::egress_proxy::apply_to_env();
+    cli::egress_proxy::apply_to_env(matches!(cli.command, Command::Serve(_)));
     // Record the global `--vault` once; `resolve_active` reads it as the top of
     // the vault chain (flag > env pin > config default).
     cli::active::set_vault_flag(cli.vault.clone());

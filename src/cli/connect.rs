@@ -39,7 +39,7 @@ use std::io::Write as _;
 use serde_json::{json, Value};
 
 use crate::cli::active::resolve_active;
-use crate::cli::approve::{act_result, approve_op, deposit_values, ApproveOpts};
+use crate::cli::approve::{act_result, approve_op, deposit_values, Approval, ApproveOpts};
 use crate::cli::conn::{slugify_conn_id, valid_role, validate_raw_host};
 use crate::cli::webauthn::now_unix;
 use crate::config::{ApprovalArgs, ConnectArgs, ConnectionHostArgs, ConnectionRmArgs};
@@ -195,14 +195,17 @@ pub async fn run_add_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> 
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         &custodian,
         &vault,
         &op,
         &format!("Add host {} to connection {}", host, id),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
     println!("host '{}' added to connection '{}'", host, id);
     crate::cli::approve::say_not_served(&act_result(&body));
     Ok(())
@@ -233,14 +236,17 @@ pub async fn run_rm_host(args: ConnectionHostArgs, approval: &ApprovalArgs) -> R
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         &custodian,
         &vault,
         &op,
         &format!("Remove host {} from connection {}", host, id),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
     let result = act_result(&body);
     let removed = result
         .get("removed")
@@ -297,14 +303,17 @@ pub async fn run_rm(args: ConnectionRmArgs, approval: &ApprovalArgs) -> Result<(
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         &custodian,
         &vault,
         &op,
         &format!("Remove connection {}", id),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
 
     let result = act_result(&body);
     let strs = |field: &str| -> Vec<String> {
@@ -445,14 +454,17 @@ async fn run_raw(
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         custodian,
         vault,
         &op,
         &format!("Add connection {}", name),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
 
     report_phantoms(name, &hosts, &secret_keys);
     crate::cli::approve::say_not_served(&act_result(&body));
@@ -583,14 +595,17 @@ async fn run_service_backed(
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         custodian,
         vault,
         &op,
         &format!("Add connection {}", name),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
 
     // The service def is the SSoT for the advertised phantoms.
     let phantoms: Vec<String> = crate::core::host::phantoms_for(name, def)

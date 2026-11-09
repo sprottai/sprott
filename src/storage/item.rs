@@ -722,7 +722,9 @@ pub enum Conflict {
     /// edit against their delete: the delete stands, ours becomes the copy.
     /// Their body equal to our base (normalized) is no conflict: ours applies.
     KeepBoth,
-    /// Ours is written over theirs.
+    /// Ours is written over theirs. This process only edits such records,
+    /// so its edit is written only while it still applies
+    /// ([`device_edit_applies`]): never over their delete.
     TakeWriter,
     /// Never overwritten, never re-sealed: ours is set aside and the user is
     /// told it changed elsewhere meanwhile.
@@ -905,6 +907,33 @@ pub fn rule(ns: ItemNs, name: &str) -> Option<&'static ItemRule> {
 /// by nobody; were one ever dirty, it is never overwritten.
 pub fn conflict_policy(ns: ItemNs, name: &str) -> Conflict {
     rule(ns, name).map_or(Conflict::OwnerConfig, |r| r.conflict)
+}
+
+/// Whether OUR live edit of a take-writer record still applies over THEIR
+/// row (`None`: gone) when theirs changed since ours was made; the re-read
+/// step of compare-and-swap, before ours is applied again. The device never
+/// creates such a record (the console starts a connect or asks for an
+/// install), it only edits one, so its edit never brings back a record
+/// deleted meanwhile. An in-flight connect's edit (a claim, a caught code, a
+/// failure stamp) also applies only to the same connect (its PKCE
+/// `code_verifier`) and never over another device's claim (`redeemer`). Our
+/// delete always applies.
+pub fn device_edit_applies(ours: &ItemPayload, theirs: Option<&ItemPayload>) -> bool {
+    if ours.is_tombstone() {
+        return true;
+    }
+    let Some(theirs) = theirs.filter(|p| !p.is_tombstone()) else {
+        return false;
+    };
+    if ours.ns != ItemNs::Connecting {
+        return true;
+    }
+    let field = |body: &serde_json::Value, key: &str| -> Option<String> {
+        body.get("oauth2")?.get(key)?.as_str().map(str::to_string)
+    };
+    let same_connect = field(&ours.body, "code_verifier") == field(&theirs.body, "code_verifier");
+    let claim = field(&theirs.body, "redeemer");
+    same_connect && (claim.is_none() || claim == field(&ours.body, "redeemer"))
 }
 
 /// True when the device (this process) may write `(ns, name)` (`tombstone`:
@@ -1683,6 +1712,86 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The device's edit of a take-writer record is applied again only over a
+    /// live row that is still the record it edited: a connect completed or
+    /// withdrawn elsewhere stays so, a connect started again is not
+    /// overwritten by an edit of the old one, another device's claim is never
+    /// written over. Our delete always applies.
+    #[test]
+    fn a_device_edit_applies_only_to_the_record_it_edited() {
+        let connect = |verifier: &str, redeemer: Option<&str>, error: Option<&str>| {
+            let mut oauth2 = serde_json::json!({ "code": "c", "code_verifier": verifier });
+            if let Some(r) = redeemer {
+                oauth2["redeemer"] = r.into();
+            }
+            if let Some(e) = error {
+                oauth2["error"] = e.into();
+            }
+            ItemPayload::live(
+                ItemNs::Connecting,
+                "gmail",
+                serde_json::json!({ "service": "gmail", "oauth2": oauth2 }),
+            )
+        };
+        let gone = ItemPayload::tombstone(ItemNs::Connecting, "gmail");
+        let stamp = connect(
+            "v1",
+            Some("dev_a"),
+            Some("authorization expired or already used"),
+        );
+        assert!(
+            !device_edit_applies(&stamp, Some(&gone)),
+            "completed elsewhere"
+        );
+        assert!(!device_edit_applies(&stamp, None), "deleted and collected");
+        assert!(
+            !device_edit_applies(&stamp, Some(&connect("v2", None, None))),
+            "a new connect"
+        );
+        assert!(
+            !device_edit_applies(&stamp, Some(&connect("v1", Some("dev_b"), None))),
+            "another device's claim"
+        );
+        assert!(
+            !device_edit_applies(
+                &connect("v1", None, Some("x")),
+                Some(&connect("v1", Some("dev_b"), None))
+            ),
+            "an unclaimed edit over a claim"
+        );
+        assert!(device_edit_applies(
+            &stamp,
+            Some(&connect("v1", Some("dev_a"), None))
+        ));
+        assert!(device_edit_applies(
+            &stamp,
+            Some(&connect("v1", None, None))
+        ));
+        assert!(device_edit_applies(
+            &gone,
+            Some(&connect("v2", Some("dev_b"), None))
+        ));
+        assert!(device_edit_applies(&gone, None));
+
+        let request = ItemPayload::live(
+            ItemNs::ServiceRequest,
+            "r",
+            serde_json::json!({ "claimed_by": "dev_a" }),
+        );
+        assert!(!device_edit_applies(
+            &request,
+            Some(&ItemPayload::tombstone(ItemNs::ServiceRequest, "r"))
+        ));
+        assert!(device_edit_applies(
+            &request,
+            Some(&ItemPayload::live(
+                ItemNs::ServiceRequest,
+                "r",
+                serde_json::json!({})
+            ))
+        ));
     }
 
     /// A service body compares in its object form: the plain-string entry is

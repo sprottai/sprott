@@ -205,10 +205,33 @@ fn params_json(params: &[(String, String)]) -> serde_json::Value {
     serde_json::Value::Object(body)
 }
 
+/// Prefix of a code exchange whose connection to the provider failed before
+/// the request was sent (DNS, TCP connect, TLS handshake, proxy CONNECT,
+/// connect timeout: `reqwest::Error::is_connect`), so the code never reached
+/// it. The rest of the message is the transport error chain.
+pub const CODE_EXCHANGE_NOT_SENT: &str = "oauth2 code-exchange not sent: ";
+
+/// Prefix of a code exchange whose request could not be built (the rest says
+/// why, e.g. a token URL without a scheme): never sent, and re-sending can
+/// never succeed.
+pub const CODE_EXCHANGE_NOT_BUILT: &str = "oauth2 code-exchange not built: ";
+
+/// Prefix of a code exchange that was sent and got no HTTP answer (a timeout
+/// or a reset after connecting): the code may have reached the provider. The
+/// rest of the message is the transport error chain.
+pub const CODE_EXCHANGE_REQUEST_FAILED: &str = "oauth2 code-exchange request failed: ";
+
 /// POST `params` to the token endpoint: the body in `style`, the client in
 /// `auth` (a Basic header carries it; post puts it in `params`), and
 /// `Accept: application/json` always (some providers default to another
 /// representation without it).
+/// Whole-request bound for a token-endpoint call (code exchange and refresh).
+/// The shared client bounds only the connect. Without this, a proxy that
+/// accepts the tunnel and then stalls upstream hangs the request, and the
+/// vault write lock it runs under, until the proxy gives up. A timeout here is
+/// reported as "no answer", so a caught code keeps its claim.
+const TOKEN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn post_token_endpoint(
     token_url: &str,
     style: OAuthStyle,
@@ -219,6 +242,7 @@ async fn post_token_endpoint(
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut req = http_client()
         .post(token_url)
+        .timeout(TOKEN_REQUEST_TIMEOUT)
         .header("Accept", "application/json");
     if auth == TokenAuth::Basic {
         req = req.header("Authorization", basic_auth_value(client_id, client_secret));
@@ -281,7 +305,16 @@ pub async fn exchange_code(
     );
     let resp = post_token_endpoint(token_url, style, auth, client_id, client_secret, &params)
         .await
-        .map_err(|e| format!("oauth2 code-exchange request failed: {}", e))?;
+        .map_err(|e| {
+            let prefix = if e.is_builder() {
+                CODE_EXCHANGE_NOT_BUILT
+            } else if e.is_connect() {
+                CODE_EXCHANGE_NOT_SENT
+            } else {
+                CODE_EXCHANGE_REQUEST_FAILED
+            };
+            format!("{}{}", prefix, crate::error::error_chain(&e))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -414,6 +447,27 @@ pub async fn perform_refresh(
 #[cfg(test)]
 mod connect_request_tests {
     use super::*;
+
+    /// A token URL the request can't be built from (no scheme) is a request
+    /// never built, not one that got no answer: nothing is sent.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_is_not_built() {
+        let e = exchange_code(
+            "oauth2.example.test/token",
+            "client",
+            None,
+            "code",
+            "verifier",
+            "http://127.0.0.1:8765/cb",
+            OAuthStyle::Form,
+            TokenAuth::Post,
+            &[],
+        )
+        .await
+        .err()
+        .expect("no request can be built");
+        assert!(e.starts_with(CODE_EXCHANGE_NOT_BUILT), "{e}");
+    }
 
     /// An unsigned JWT whose payload is `claims` (header/signature irrelevant —
     /// id_token_claim only reads the middle segment).

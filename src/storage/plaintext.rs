@@ -194,6 +194,15 @@ pub struct ConnectingOAuth2 {
     /// retries). Cleared when a fresh connect overwrites the entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The device (`dev_…`) that claimed `code`: only it exchanges the code,
+    /// stamps this entry or writes it otherwise (RFC 6749 §4.1.2: a code is
+    /// used at most once, and every device of the account is the same
+    /// client). Written with compare-and-swap before a device's first
+    /// exchange of a code it read here, or together with a code its loopback
+    /// listener caught. Absent = unclaimed, as on every entry written before
+    /// claims existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redeemer: Option<String>,
 }
 
 /// The vault KEY a connection's secret ROLE resolves to (CONNECTION_SCHEMA.md
@@ -985,6 +994,30 @@ secrets = ["ACME_TOKEN"]
         assert!(aux2.stores.contains_key("native-secrets"));
         assert!(!aux2.stores.contains_key("native-files")); // file store removed
         assert_eq!(aux2.store_order, vec!["native-secrets"]);
+    }
+
+    /// A connect's claim round-trips; an entry written before claims (or by
+    /// the console) reads as unclaimed and is written back without the field.
+    #[test]
+    fn connecting_redeemer_round_trips_and_defaults_to_unclaimed() {
+        let claimed: Connecting = serde_json::from_value(serde_json::json!({
+            "service": "gmail",
+            "oauth2": { "code": "c", "code_verifier": "v", "redeemer": "dev_a" }
+        }))
+        .unwrap();
+        assert_eq!(claimed.oauth2.redeemer.as_deref(), Some("dev_a"));
+        let json = serde_json::to_value(&claimed).unwrap();
+        assert_eq!(json["oauth2"]["redeemer"], "dev_a");
+        let again: Connecting = serde_json::from_value(json).unwrap();
+        assert_eq!(again.oauth2.redeemer.as_deref(), Some("dev_a"));
+
+        let old = serde_json::json!({
+            "service": "gmail",
+            "oauth2": { "code": "c", "code_verifier": "v", "state": "s" }
+        });
+        let unclaimed: Connecting = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(unclaimed.oauth2.redeemer, None);
+        assert_eq!(serde_json::to_value(&unclaimed).unwrap(), old);
     }
 
     #[test]

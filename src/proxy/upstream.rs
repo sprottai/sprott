@@ -39,6 +39,8 @@ use hudsucker::hyper_util::rt::TokioIo;
 use hudsucker::rustls::crypto::aws_lc_rs;
 use hudsucker::rustls::ClientConfig;
 use hyper_rustls::{ConfigBuilderExt, HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::client::legacy::connect::dns::GaiResolver;
+use hyper_util::client::legacy::connect::HttpConnector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tower_service::Service;
@@ -56,7 +58,55 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// place by [`reload_cell`] on `/proxy/reload` (after `sprott config set/unset proxy`), so
 /// the forward hop re-points on its next connection with NO daemon restart (and
 /// so no vault re-unlock).
-pub type EgressProxyCell = Arc<RwLock<Option<Arc<ProxyCfg>>>>;
+pub type EgressProxyCell = Arc<RwLock<Option<Upstream>>>;
+
+/// How the forward hop reaches the internet when it does not dial direct.
+#[derive(Clone)]
+pub enum Upstream {
+    /// The proxy Sprott was given (live shell proxy or `sprott config set proxy`).
+    Given(Arc<ProxyCfg>),
+    /// Nothing given: this computer's proxy settings, matched per destination
+    /// by the same community implementation reqwest uses (hyper-util
+    /// `Matcher::from_system`: `*_PROXY` variables, then macOS System Settings
+    /// or Windows Internet Settings).
+    System(Arc<hyper_util::client::proxy::matcher::Matcher>),
+}
+
+/// How often the daemon re-reads this computer's proxy settings. This polls:
+/// the platforms also offer change notifications (macOS SCDynamicStore,
+/// Windows registry change events), which this does not use yet. The read is
+/// cheap (env vars, one SCDynamicStore lookup on macOS, one registry key on
+/// Windows), so a change takes effect within this interval.
+const SYSTEM_PROXY_POLL: Duration = Duration::from_secs(5);
+
+/// Follow this computer's proxy settings while the daemon runs: when they
+/// change and nothing was given to Sprott, rebuild the shared reqwest client
+/// and this cell, so the next request and the next forward connection use the
+/// new settings. Per-call clients (`egress_proxy::client`) read them at build.
+pub fn spawn_system_proxy_watch(cell: EgressProxyCell) {
+    tokio::spawn(async move {
+        let mut last = system_settings_snapshot();
+        loop {
+            tokio::time::sleep(SYSTEM_PROXY_POLL).await;
+            let now = system_settings_snapshot();
+            if now == last {
+                continue;
+            }
+            last = now;
+            if crate::cli::egress_proxy::effective().is_none() {
+                tracing::info!("this computer's proxy settings changed; Sprott follows them");
+                crate::core::forward::reload_egress_proxy();
+                reload_cell(&cell);
+            }
+        }
+    });
+}
+
+/// A comparable snapshot of the computer's proxy settings. Compared in memory
+/// only, never logged: a proxy URL may carry credentials.
+fn system_settings_snapshot() -> String {
+    format!("{:?}", hyper_util::client::proxy::matcher::Matcher::from_system())
+}
 
 /// Build a fresh egress-proxy cell from the currently-effective proxy. Held in
 /// `AppState`; a clone backs the forward connector.
@@ -70,10 +120,15 @@ pub fn reload_cell(cell: &EgressProxyCell) {
     *cell.write().unwrap() = resolve_current();
 }
 
-/// The currently-effective egress proxy (env > stored file) parsed to a
-/// `ProxyCfg`. `None` = direct (unset, or a non-HTTP proxy we can't tunnel).
-fn resolve_current() -> Option<Arc<ProxyCfg>> {
-    let url = crate::cli::egress_proxy::effective()?;
+/// The forward hop's current route: the proxy Sprott was given, parsed; else
+/// this computer's proxy settings. `None` = direct (a given proxy that is not
+/// an HTTP proxy, which the CONNECT hop can't use).
+fn resolve_current() -> Option<Upstream> {
+    let Some(url) = crate::cli::egress_proxy::effective() else {
+        return Some(Upstream::System(Arc::new(
+            hyper_util::client::proxy::matcher::Matcher::from_system(),
+        )));
+    };
     match parse_proxy(&url) {
         Some(cfg) => {
             tracing::info!(
@@ -81,7 +136,7 @@ fn resolve_current() -> Option<Arc<ProxyCfg>> {
                 proxy_port = cfg.port,
                 "resident proxy forward hop routes through the egress proxy"
             );
-            Some(Arc::new(cfg))
+            Some(Upstream::Given(Arc::new(cfg)))
         }
         None => {
             tracing::warn!(
@@ -144,13 +199,18 @@ impl TunnelConnector {
         }
     }
 
-    fn use_proxy_for(&self, host: &str) -> Option<Arc<ProxyCfg>> {
-        let p = self.proxy.read().unwrap().clone()?;
+    /// The proxy to tunnel through for `host` (`https` = the forward target's
+    /// scheme), or `None` to dial direct.
+    fn use_proxy_for(&self, host: &str, https: bool) -> Option<Arc<ProxyCfg>> {
+        let route = self.proxy.read().unwrap().clone()?;
         let h = host.to_ascii_lowercase();
         if self.no_proxy.iter().any(|e| no_proxy_matches(e, &h)) {
             return None;
         }
-        Some(p)
+        match route {
+            Upstream::Given(p) => Some(p),
+            Upstream::System(m) => system_proxy_for(&m, &h, https),
+        }
     }
 }
 
@@ -176,30 +236,91 @@ impl Service<Uri> for TunnelConnector {
             });
 
             let connect = async {
-                match this.use_proxy_for(&host) {
+                match this.use_proxy_for(&host, dst.scheme_str() != Some("http")) {
                     Some(p) => connect_via_proxy(&p, &host, port).await,
-                    None => {
-                        let s = TcpStream::connect((host.as_str(), port)).await?;
-                        let _ = s.set_nodelay(true);
-                        Ok(s)
-                    }
+                    None => dial(tcp_dialer(GaiResolver::new()), &host, port).await,
                 }
             };
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect)
-                .await
-                .map_err(|_| -> BoxError {
-                    format!("forward connect to {}:{} timed out", host, port).into()
-                })??;
+            let stream = connect_within(CONNECT_TIMEOUT, &host, port, connect).await?;
             Ok(TokioIo::new(stream))
         })
     }
 }
 
+/// Bound a forward-hop connect to `host:port` by `limit`. However time runs out
+/// (this bound, or the dialer's own connect timeout), the error reads
+/// `forward connect to host:port timed out`.
+async fn connect_within(
+    limit: Duration,
+    host: &str,
+    port: u16,
+    connect: impl Future<Output = Result<TcpStream, BoxError>>,
+) -> Result<TcpStream, BoxError> {
+    match tokio::time::timeout(limit, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) if !is_timeout(&*e) => Err(e),
+        _ => Err(format!("forward connect to {}:{} timed out", host, port).into()),
+    }
+}
+
+/// Did time run out? The dialer reports its connect timeout as an
+/// `io::ErrorKind::TimedOut` somewhere in the error's source chain.
+fn is_timeout(err: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(err), |e| e.source()).any(|e| {
+        e.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
+    })
+}
+
+/// The TCP dialer for both forward-hop legs (straight to the upstream, or to the
+/// egress proxy): hyper-util's `HttpConnector`, the connector reqwest is built
+/// on, so the broker reaches a host the way a standard HTTP client does. When a
+/// name resolves to both IPv6 and IPv4 addresses it races the two families
+/// (Happy Eyeballs, RFC 8305: the second family starts after hyper-util's
+/// default 300 ms) instead of trying the addresses one after another, so a
+/// black-holed IPv6 route costs that delay, not the whole `CONNECT_TIMEOUT`.
+/// Its connect timeout is `CONNECT_TIMEOUT`, split across each family's
+/// addresses as reqwest's is, so one dead address doesn't use up the budget.
+/// `resolver` is the system resolver in production; tests pass a fixed one.
+fn tcp_dialer<R>(resolver: R) -> HttpConnector<R> {
+    let mut dialer = HttpConnector::new_with_resolver(resolver);
+    dialer.set_nodelay(true);
+    dialer.set_connect_timeout(Some(CONNECT_TIMEOUT));
+    dialer
+}
+
+/// `host:port` as a URI authority. An IPv6 literal is the only host with a
+/// colon (RFC 3986): one from a `Uri` keeps its brackets, an egress proxy given
+/// as `http://::1:7890` (or with a zone, `fe80::1%eth0`) arrives without them,
+/// so they are added here. The connector strips them again before resolving.
+fn authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Open a TCP connection to `host:port` with `dialer` (see [`tcp_dialer`]).
+async fn dial<C>(mut dialer: C, host: &str, port: u16) -> Result<TcpStream, BoxError>
+where
+    C: Service<Uri, Response = TokioIo<TcpStream>>,
+    C::Error: Into<BoxError>,
+{
+    // The `http` scheme only satisfies the connector, which dials TCP and nothing
+    // more; hyper-rustls layers TLS on top.
+    let uri: Uri = format!("http://{}", authority(host, port)).parse()?;
+    std::future::poll_fn(|cx| dialer.poll_ready(cx))
+        .await
+        .map_err(Into::into)?;
+    let io = dialer.call(uri).await.map_err(Into::into)?;
+    Ok(io.into_inner())
+}
+
 /// Open a CONNECT tunnel to `host:port` through the HTTP proxy `p` and return
 /// the tunneled TCP stream (TLS is layered on top by the caller).
 async fn connect_via_proxy(p: &ProxyCfg, host: &str, port: u16) -> Result<TcpStream, BoxError> {
-    let mut stream = TcpStream::connect((p.host.as_str(), p.port)).await?;
-    let _ = stream.set_nodelay(true);
+    let mut stream = dial(tcp_dialer(GaiResolver::new()), &p.host, p.port).await?;
 
     let mut req = format!(
         "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n",
@@ -261,6 +382,38 @@ async fn connect_via_proxy(p: &ProxyCfg, host: &str, port: u16) -> Result<TcpStr
         .into());
     }
     Ok(stream)
+}
+
+/// The proxy this computer's settings name for `host`, as a tunnel target.
+/// `None` = direct: the settings name none for it, or name a non-HTTP proxy
+/// the CONNECT hop can't use (logged).
+fn system_proxy_for(
+    m: &hyper_util::client::proxy::matcher::Matcher,
+    host: &str,
+    https: bool,
+) -> Option<Arc<ProxyCfg>> {
+    let scheme = if https { "https" } else { "http" };
+    let dst: Uri = format!("{scheme}://{host}/").parse().ok()?;
+    let intercept = m.intercept(&dst)?;
+    let uri = intercept.uri();
+    if uri.scheme_str() != Some("http") {
+        tracing::warn!(
+            "this computer's proxy for {} is not an HTTP proxy; the forward hop dials direct",
+            host
+        );
+        return None;
+    }
+    // Same host form `parse_proxy` yields (an IPv6 host keeps its brackets).
+    let proxy_host = uri.host()?.to_string();
+    let auth = intercept
+        .basic_auth()
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    Some(Arc::new(ProxyCfg {
+        host: proxy_host,
+        port: uri.port_u16().unwrap_or(80),
+        auth,
+    }))
 }
 
 /// Parse an `http://[user:pass@]host[:port]` proxy URL. Returns `None` for a
@@ -332,7 +485,7 @@ mod tests {
 
     /// A live cell holding `p` — the shape `AppState`/`forward_connector` share.
     fn cell(p: Option<ProxyCfg>) -> EgressProxyCell {
-        Arc::new(RwLock::new(p.map(Arc::new)))
+        Arc::new(RwLock::new(p.map(|p| Upstream::Given(Arc::new(p)))))
     }
 
     #[test]
@@ -405,11 +558,11 @@ mod tests {
             ]),
         };
         // external host → through the proxy
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_some());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_some());
         // loopback + NO_PROXY host → direct
-        assert!(c.use_proxy_for("localhost").is_none());
-        assert!(c.use_proxy_for("internal.corp").is_none());
-        assert!(c.use_proxy_for("db.internal.corp").is_none());
+        assert!(c.use_proxy_for("localhost", true).is_none());
+        assert!(c.use_proxy_for("internal.corp", true).is_none());
+        assert!(c.use_proxy_for("db.internal.corp", true).is_none());
     }
 
     #[test]
@@ -418,7 +571,7 @@ mod tests {
             proxy: cell(None),
             no_proxy: Arc::new(vec![]),
         };
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
     }
 
     #[test]
@@ -432,21 +585,21 @@ mod tests {
             no_proxy: Arc::new(vec!["localhost".into(), "127.0.0.1".into()]),
         };
         // Starts direct.
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
         // A `sprott config set proxy` reload swaps the cell…
-        *shared.write().unwrap() = Some(Arc::new(ProxyCfg {
+        *shared.write().unwrap() = Some(Upstream::Given(Arc::new(ProxyCfg {
             host: "127.0.0.1".into(),
             port: 7778,
             auth: None,
-        }));
+        })));
         // …and the same connector now tunnels — without being rebuilt.
         let p = c
-            .use_proxy_for("gmail.googleapis.com")
+            .use_proxy_for("gmail.googleapis.com", true)
             .expect("now proxied");
         assert_eq!((p.host.as_str(), p.port), ("127.0.0.1", 7778));
         // …and a `sprott config unset proxy` reload swaps it back to direct.
         *shared.write().unwrap() = None;
-        assert!(c.use_proxy_for("gmail.googleapis.com").is_none());
+        assert!(c.use_proxy_for("gmail.googleapis.com", true).is_none());
     }
 
     // ── live socket e2e: the actual thing that was broken ────────────────────
@@ -565,5 +718,167 @@ mod tests {
             .await
             .expect("read banner direct");
         assert_eq!(buf, BANNER);
+    }
+
+    // ── Happy Eyeballs: a hanging first address must not stall the dial ──────
+    // The api.cloudflare.com failure: the name resolves IPv6-first, the IPv6
+    // route black-holes (connects hang, they are not refused), IPv4 works.
+    use hyper_util::client::legacy::connect::dns::Name;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use tokio::net::TcpSocket;
+
+    /// Answers every name with a fixed address list, in order.
+    #[derive(Clone)]
+    struct FixedResolver(Vec<SocketAddr>);
+
+    impl Service<Name> for FixedResolver {
+        type Response = std::vec::IntoIter<SocketAddr>;
+        type Error = std::io::Error;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _name: Name) -> Self::Future {
+            std::future::ready(Ok(self.0.clone().into_iter()))
+        }
+    }
+
+    /// Fill the accept queue of `listener`, which never accepts, so any further
+    /// connect to it hangs: the kernel drops the SYN instead of refusing it, the
+    /// way a black-holed route behaves. The returned connections must stay alive.
+    async fn fill_accept_queue(listener: &TcpListener) -> Vec<TokioTcp> {
+        let addr = listener.local_addr().unwrap();
+        let mut queued = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(200), TokioTcp::connect(addr)).await {
+                Ok(Ok(s)) => queued.push(s),
+                Ok(Err(e)) => panic!("filling the accept queue of {addr}: {e}"),
+                Err(_) => return queued, // full: this connect hung
+            }
+            assert!(queued.len() < 64, "accept queue of {addr} never filled");
+        }
+    }
+
+    #[test]
+    fn authority_brackets_a_bare_ipv6_host() {
+        assert_eq!(authority("::1", 7890), "[::1]:7890");
+        assert_eq!(authority("[::1]", 7890), "[::1]:7890");
+        assert_eq!(authority("2001:db8::1", 443), "[2001:db8::1]:443");
+        assert_eq!(authority("fe80::1%eth0", 7890), "[fe80::1%eth0]:7890");
+        assert_eq!(authority("10.0.0.1", 80), "10.0.0.1:80");
+        assert_eq!(authority("api.example.com", 443), "api.example.com:443");
+        for (h, p) in [
+            ("::1", 7890u16),
+            ("[::1]", 7890),
+            ("fe80::1%eth0", 7890),
+            ("10.0.0.1", 80),
+            ("api.example.com", 443),
+        ] {
+            let uri: Uri = format!("http://{}", authority(h, p))
+                .parse()
+                .expect("valid authority");
+            assert_eq!(uri.port_u16(), Some(p));
+        }
+    }
+
+    #[tokio::test]
+    async fn dial_falls_back_to_ipv4_when_ipv6_hangs() {
+        // The connector applies the URI's port to every resolved address, so the
+        // working IPv4 listener and the hanging IPv6 one share a port.
+        let mut pair = None;
+        for _ in 0..20 {
+            let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = v4.local_addr().unwrap().port();
+            let v6 = match TcpSocket::new_v6() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("skipped: no IPv6 sockets on this machine ({e})");
+                    return;
+                }
+            };
+            match v6.bind((Ipv6Addr::LOCALHOST, port).into()) {
+                Ok(()) => {
+                    pair = Some((v4, v6.listen(1).unwrap(), port));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(e) => {
+                    eprintln!("skipped: no IPv6 loopback on this machine ({e})");
+                    return;
+                }
+            }
+        }
+        let (v4, v6, port) = pair.expect("a port free on both 127.0.0.1 and ::1");
+        let ok_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let hang_addr = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = v4.accept().await {
+                let _ = s.write_all(BANNER).await;
+                let _ = s.flush().await;
+            }
+        });
+        let _queued = fill_accept_queue(&v6).await;
+
+        let addrs = vec![hang_addr, ok_addr];
+        let bound = CONNECT_TIMEOUT / 4;
+
+        let started = std::time::Instant::now();
+        let dialer = tcp_dialer(FixedResolver(addrs.clone()));
+        let mut stream = connect_within(
+            CONNECT_TIMEOUT,
+            "upstream.test",
+            port,
+            dial(dialer, "upstream.test", port),
+        )
+        .await
+        .expect("dial");
+        let took = started.elapsed();
+        assert!(took < bound, "dial took {took:?}");
+        assert_eq!(stream.peer_addr().unwrap(), ok_addr);
+        let mut buf = vec![0u8; BANNER.len()];
+        stream.read_exact(&mut buf).await.expect("read banner");
+        assert_eq!(buf, BANNER);
+
+        // Control: the IPv6 address really hangs rather than failing fast, so
+        // the old one-address-after-another dial is still stuck on it after
+        // longer than the dial above took in total.
+        assert!(
+            tokio::time::timeout(bound, TokioTcp::connect(&addrs[..]))
+                .await
+                .is_err(),
+            "a sequential dial must still be waiting on {hang_addr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_dial_reads_forward_connect_timed_out() {
+        // A dial whose only address hangs, cut short either by the dialer's own
+        // connect timeout or by the outer bound: the agent sees the same text.
+        let sock = TcpSocket::new_v4().unwrap();
+        sock.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let hang = sock.listen(1).unwrap();
+        let _queued = fill_accept_queue(&hang).await;
+        let hang_addr = hang.local_addr().unwrap();
+        let port = hang_addr.port();
+        let want = format!("forward connect to upstream.test:{port} timed out");
+
+        let short = Duration::from_millis(300);
+        for (dialer_timeout, outer) in [(short, CONNECT_TIMEOUT), (CONNECT_TIMEOUT, short)] {
+            let mut dialer = tcp_dialer(FixedResolver(vec![hang_addr]));
+            dialer.set_connect_timeout(Some(dialer_timeout));
+            let started = std::time::Instant::now();
+            let err = connect_within(
+                outer,
+                "upstream.test",
+                port,
+                dial(dialer, "upstream.test", port),
+            )
+            .await
+            .expect_err("a hanging address cannot connect");
+            assert_eq!(err.to_string(), want);
+            assert!(started.elapsed() < CONNECT_TIMEOUT / 4);
+        }
     }
 }

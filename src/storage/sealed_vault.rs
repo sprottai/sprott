@@ -1808,7 +1808,21 @@ impl PerItemVault {
                                 .push((wire.clone(), crate::storage::item::record_label(&payload)));
                             continue;
                         }
-                        Conflict::TakeWriter => {}
+                        // Ours goes over theirs only while it still applies
+                        // (never over their delete, nor over a connect
+                        // started again or claimed by another device). A
+                        // row no current member can read (`existing` none
+                        // here) is no one's value: ours goes over it.
+                        Conflict::TakeWriter => {
+                            if existing.is_some()
+                                && !crate::storage::item::device_edit_applies(
+                                    &payload,
+                                    existing.as_ref(),
+                                )
+                            {
+                                continue;
+                            }
+                        }
                     }
                 }
             }

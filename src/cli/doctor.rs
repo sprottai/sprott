@@ -269,10 +269,29 @@ pub async fn run(json: bool) -> Result<(), String> {
     {
         let file = crate::cli::egress_proxy::load();
         match crate::cli::egress_proxy::effective() {
-            None => report.push(
-                Mark::Ok,
-                "egress proxy: none (connecting directly; loopback is never proxied)",
-            ),
+            // Nothing given to Sprott: it follows this computer's settings.
+            // Report what they name for an outside host (redacted).
+            None => {
+                let probe: hyper_util::client::proxy::matcher::Matcher =
+                    hyper_util::client::proxy::matcher::Matcher::from_system();
+                let named = "https://example.com/"
+                    .parse::<hudsucker::hyper::Uri>()
+                    .ok()
+                    .and_then(|u| probe.intercept(&u))
+                    .map(|i| crate::cli::egress_proxy::redact(&i.uri().to_string()));
+                report.push(
+                    Mark::Ok,
+                    match named {
+                        Some(p) => format!(
+                            "egress proxy: {} (from this computer's proxy settings)",
+                            p.trim_end_matches('/')
+                        ),
+                        None => "egress proxy: none (this computer's proxy settings name none; \
+                                 connecting directly)"
+                            .to_string(),
+                    },
+                )
+            }
             Some(url) => {
                 let source = if file.as_deref() == Some(url.as_str()) {
                     "from `sprott config set proxy`"
@@ -281,7 +300,7 @@ pub async fn run(json: bool) -> Result<(), String> {
                 };
                 report.push(
                     Mark::Ok,
-                    format!("egress proxy: {} ({})", redact_proxy(&url), source),
+                    format!("egress proxy: {} ({})", crate::cli::egress_proxy::redact(&url), source),
                 );
             }
         }
@@ -327,36 +346,5 @@ pub async fn run(json: bool) -> Result<(), String> {
         Ok(())
     } else {
         Err("one or more checks failed".into())
-    }
-}
-
-/// Strip any `user:pass@` userinfo from a proxy URL so creds never print.
-fn redact_proxy(url: &str) -> String {
-    match url.split_once("://") {
-        Some((scheme, rest)) => {
-            let host = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
-            format!("{scheme}://{host}")
-        }
-        None => url
-            .rsplit_once('@')
-            .map(|(_, h)| h)
-            .unwrap_or(url)
-            .to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redact_proxy_drops_userinfo_keeps_host_port() {
-        assert_eq!(redact_proxy("http://u:p@box:9999"), "http://box:9999");
-        assert_eq!(
-            redact_proxy("http://proxy.local:3128"),
-            "http://proxy.local:3128"
-        );
-        assert_eq!(redact_proxy("box:9999"), "box:9999");
-        assert_eq!(redact_proxy("u:p@box:9999"), "box:9999");
     }
 }

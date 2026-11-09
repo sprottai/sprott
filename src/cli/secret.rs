@@ -13,7 +13,7 @@ use std::io::IsTerminal;
 use serde_json::json;
 
 use crate::cli::active::resolve_active;
-use crate::cli::approve::{act_result, approve_op, deposit_values, ApproveOpts};
+use crate::cli::approve::{act_result, approve_op, deposit_values, Approval, ApproveOpts};
 use crate::cli::conn::{valid_conn_id, valid_role, validate_raw_host};
 use crate::cli::webauthn::*;
 use crate::config::{ApprovalArgs, GetArgs, RmArgs, SetArgs};
@@ -128,14 +128,17 @@ pub async fn run_set(args: SetArgs, approval: &ApprovalArgs) -> Result<(), Strin
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         &custodian,
         &vault,
         &op,
         &format!("Store secret {}", key),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
 
     let result = act_result(&body);
     print_set_result(&key, &conn, &intent, &result);
@@ -347,14 +350,17 @@ pub async fn run_rm(args: RmArgs, approval: &ApprovalArgs) -> Result<(), String>
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(
+    let Approval::Done(body) = approve_op(
         &custodian,
         &vault,
         &op,
         &format!("Remove key {}", key),
         &opts,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
 
     let result = act_result(&body);
     let refs: Vec<String> = result
@@ -398,7 +404,12 @@ pub async fn run_get(args: GetArgs, approval: &ApprovalArgs) -> Result<(), Strin
         "valid": { "iat": now_unix(), "multiplicity": 1 }
     });
     let opts = ApproveOpts::from_flags(approval);
-    let body = approve_op(&custodian, &vault, &op, &format!("Reveal {}", key), &opts).await?;
+    // An Export waits for its value (`approve_op` never returns it pending).
+    let Approval::Done(body) =
+        approve_op(&custodian, &vault, &op, &format!("Reveal {}", key), &opts).await?
+    else {
+        return Err("no value in response".into());
+    };
     let value = body
         .get("value")
         .and_then(|v| v.as_str())

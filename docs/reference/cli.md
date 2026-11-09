@@ -16,6 +16,8 @@ command's flags. `sc` and `safeclaw` are links to the same binary.
 | `--no-browser` | Print the approval link instead of opening a browser. |
 | `--cb-port <port>` | A fixed port for the local approval callback, for SSH port forwarding. |
 | `--timeout <seconds>` | How long to wait for a local browser approval (default 120), or in `sprott op wait` (default 1900). |
+| `--wait` | Wait for the approval and print the result. The default. |
+| `--no-wait` | Print the approval link and return; `sprott op wait` reports the result. |
 | `-v`, `-vv`, `-vvv` | More logging to stderr. |
 | `-h`, `--help` · `-V`, `--version` | Help and version. |
 
@@ -128,7 +130,7 @@ All commands: `0` success, `1` error, `2` usage error.
 
 | Code | Meaning |
 |---|---|
-| `0` | Approved. Run the original command again. |
+| `0` | Approved. Run the original command again, unless `op wait` printed `Approved and applied.` |
 | `3` | Expired or unknown. Run the command again for a fresh link. |
 | `4` | Stopped waiting (`--timeout`). The request may still be pending; wait again. |
 | `5` | Not approved. Don't retry it unchanged. |
