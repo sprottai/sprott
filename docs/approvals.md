@@ -113,11 +113,11 @@ your badge.
 
 ## For agents
 
-A command that needs an approval prints the approval link. In a terminal it
-then waits for your decision and prints the result. Run by an agent or a
-script, it prints a `To wait:` command and returns; the agent gives you the
-link and runs `sprott op wait <op_id>` in the background, and exit `0` means
-approved. `--wait` and `--no-wait` choose either behaviour. A request under
-`sprott run` is retried after that; `sprott get` always waits, because the
-value comes back to it. With several requests waiting, the agent sends you
+A command that needs an approval prints the approval link, then waits for
+your decision and prints the result. An agent runs it in the background and
+gives you the link as soon as it appears. With `--no-wait`, the command prints
+the link and a `To wait:` command, then returns; `sprott op wait <op_id>`
+reports the result, and exit `0` means approved. A request under `sprott run`
+is retried after that; `sprott get` always waits, because the value comes back
+to it. With several requests waiting, the agent sends you
 the console's Approvals page instead of each link.

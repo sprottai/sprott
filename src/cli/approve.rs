@@ -97,33 +97,20 @@ impl ApproveOpts {
             timeout: flags
                 .timeout
                 .unwrap_or(crate::config::APPROVAL_TIMEOUT_SECS),
-            wait: waits_for_decision(flags.wait, flags.no_wait, interactive()),
+            wait: waits_for_decision(flags.no_wait),
         }
     }
 }
 
-/// Whether a person is at a terminal: stdin and stderr both attached to one.
-/// An agent's tool call, a pipe or CI is not.
-fn interactive() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
-/// Whether a remote approval waits for the decision. `--wait` and
-/// `--no-wait` decide when given (clap refuses both). Otherwise it waits in
-/// a terminal, so a person gets the result from one command, and returns
-/// after the link elsewhere, so an agent's tool call, which shows output only
-/// when the command ends, can pass the link on. Mainstream CLIs wait by
-/// default with an opt-out (kubectl `--wait=false`, Azure CLI `--no-wait`,
-/// gcloud `--async`).
-fn waits_for_decision(wait: bool, no_wait: bool, interactive: bool) -> bool {
-    if wait {
-        true
-    } else if no_wait {
-        false
-    } else {
-        interactive
-    }
+/// Whether a remote approval waits for the decision: always, unless
+/// `--no-wait`. The link is printed first and the command then waits, the
+/// way device-authorization CLIs do (RFC 8628: show the URL, then poll; `gh
+/// auth login`, `az login`). An agent runs the command in the background and
+/// passes the link on as soon as it appears. `--no-wait` returns after the
+/// link for a caller that can't read a running command's output; `sprott op
+/// wait` then reports the result. `--wait` is accepted and is the default.
+fn waits_for_decision(no_wait: bool) -> bool {
+    !no_wait
 }
 
 /// Fallback remote-approval wait, used only until the first successful poll
@@ -798,14 +785,11 @@ mod tests {
     /// A remote approval returns after its link unless the caller passed
     /// `--wait` or its value comes back to this process (an Export always
     /// waits for it).
-    /// `--wait` / `--no-wait` decide when given; otherwise a terminal waits
-    /// and anything else returns after the link.
+    /// An approval waits unless `--no-wait`, in a terminal or not.
     #[test]
-    fn waits_in_a_terminal_unless_a_flag_says_otherwise() {
-        assert!(waits_for_decision(false, false, true));
-        assert!(!waits_for_decision(false, false, false));
-        assert!(waits_for_decision(true, false, false));
-        assert!(!waits_for_decision(false, true, true));
+    fn waits_unless_no_wait() {
+        assert!(waits_for_decision(false));
+        assert!(!waits_for_decision(true));
     }
 
     #[test]

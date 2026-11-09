@@ -82,12 +82,11 @@ pub struct ApprovalArgs {
     /// 120), or in `sprott op wait` (default 1900).
     #[arg(long, global = true, value_name = "SECONDS")]
     pub timeout: Option<u64>,
-    /// Wait for the approval and print the result. The default when run in a
-    /// terminal.
+    /// Wait for the approval and print the result (the default).
     #[arg(long, global = true, conflicts_with = "no_wait")]
     pub wait: bool,
     /// Print the approval link and return without waiting; `sprott op wait`
-    /// reports the outcome. The default when not run in a terminal.
+    /// reports the result.
     #[arg(long, global = true)]
     pub no_wait: bool,
 }
@@ -1111,8 +1110,8 @@ mod cli_surface_tests {
         let cli = parse(&["--timeout", "60", "op", "wait", "op-1"]).unwrap();
         assert_eq!(cli.approval.timeout, Some(60));
         assert_eq!(parse(&["unlock"]).unwrap().approval.timeout, None);
-        // `--wait` / `--no-wait` are global and unset by default (a terminal
-        // decides); they can't be combined; `setup --wait` stays setup's.
+        // `--wait` / `--no-wait` are global and unset by default (waiting is
+        // the default); they can't be combined; `setup --wait` stays setup's.
         assert!(!parse(&["unlock"]).unwrap().approval.wait);
         assert!(!parse(&["unlock"]).unwrap().approval.no_wait);
         assert!(parse(&["unlock", "--no-wait"]).unwrap().approval.no_wait);
