@@ -180,17 +180,44 @@ async fn resolve_base(client: &reqwest::Client, pre: bool) -> Result<(String, St
     if !pre {
         return Ok((latest_base(), "latest stable".to_string()));
     }
-    // GitHub requires a User-Agent; unauthenticated, the API includes
-    // pre-releases but not drafts (CI never drafts).
+    // GitHub requires a User-Agent; the API includes pre-releases but not
+    // drafts (CI never drafts). Unauthenticated, GitHub allows 60 API requests
+    // an hour per network address, which a shared proxy address can use up. A
+    // `GITHUB_TOKEN` / `GH_TOKEN` in the environment (the names gh and GitHub
+    // Actions use) makes the query count against that account's own limit.
     let url = format!("https://api.github.com/repos/{}/releases?per_page=100", REPO);
-    let resp = client
+    let mut req = client
         .get(&url)
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = github_token() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
-        .map_err(|e| format!("query releases: {}", e))?;
+        .map_err(|e| format!("query releases: {}", crate::error::error_chain(&e)))?;
     if !resp.status().is_success() {
-        return Err(format!("query releases: HTTP {}", resp.status()));
+        let status = resp.status();
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let remaining = header("x-ratelimit-remaining");
+        let reset = header("x-ratelimit-reset").and_then(|v| v.parse::<u64>().ok());
+        let message = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string));
+        return Err(releases_query_error(
+            status.as_u16(),
+            remaining.as_deref(),
+            reset,
+            message.as_deref(),
+            crate::util::now_unix(),
+        ));
     }
     let body: serde_json::Value = resp
         .json()
@@ -199,6 +226,46 @@ async fn resolve_base(client: &reqwest::Client, pre: bool) -> Result<(String, St
     let tag = newest_tag(&body).ok_or("no releases found (including pre-releases)")?;
     let base = format!("https://github.com/{}/releases/download/{}", REPO, tag);
     Ok((base, format!("pre-release {}", tag)))
+}
+
+/// A GitHub token from the environment, under the names gh and GitHub Actions
+/// use. Empty values don't count.
+fn github_token() -> Option<String> {
+    ["GITHUB_TOKEN", "GH_TOKEN"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty())
+}
+
+/// What a failed releases query says, limited to what GitHub reported: when
+/// its rate-limit headers show the quota used up, that and when it resets;
+/// otherwise the status and GitHub's own message.
+fn releases_query_error(
+    status: u16,
+    remaining: Option<&str>,
+    reset_unix: Option<u64>,
+    message: Option<&str>,
+    now_unix: u64,
+) -> String {
+    if remaining == Some("0") {
+        let when = match reset_unix {
+            Some(r) if r > now_unix => {
+                let mins = (r - now_unix).div_ceil(60);
+                format!("; it resets in {mins} minute{}", if mins == 1 { "" } else { "s" })
+            }
+            _ => String::new(),
+        };
+        return format!(
+            "query releases: HTTP {status}: GitHub's API rate limit for this network \
+             address is used up{when}. Suggestion: retry after that, or set \
+             GITHUB_TOKEN so the query uses your own GitHub limit"
+        );
+    }
+    match message {
+        Some(m) if !m.is_empty() => format!("query releases: HTTP {status}: {m}"),
+        _ => format!("query releases: HTTP {status}"),
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -223,6 +290,25 @@ fn expected_hash(sums: &str, asset: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_used_up_rate_limit_says_so_and_when_it_resets() {
+        let e = releases_query_error(403, Some("0"), Some(1_000 + 600), Some("API rate limit exceeded"), 1_000);
+        assert!(e.contains("rate limit for this network address is used up"), "{e}");
+        assert!(e.contains("resets in 10 minutes"), "{e}");
+        assert!(e.contains("Suggestion: "), "{e}");
+        let e = releases_query_error(403, Some("0"), None, None, 1_000);
+        assert!(!e.contains("resets"), "{e}");
+    }
+
+    #[test]
+    fn other_failures_report_status_and_githubs_message() {
+        assert_eq!(
+            releases_query_error(404, Some("57"), None, Some("Not Found"), 0),
+            "query releases: HTTP 404: Not Found"
+        );
+        assert_eq!(releases_query_error(502, None, None, None, 0), "query releases: HTTP 502");
+    }
 
     fn args(pre: bool, stable: bool) -> UpgradeArgs {
         UpgradeArgs {
