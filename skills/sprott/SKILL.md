@@ -74,6 +74,11 @@ If `sprott` cannot reach its daemon, start it with `sprott up`.
 
 Approval links are for the user: approving takes their passkey.
 
+Pass `--no-wait` to a command that may need an approval. It then prints the
+link and returns, so you can give the link to the user; `sprott op wait <op_id>`
+reports the result. Without it, a command run in a terminal waits for the
+decision.
+
 When several requests need approval, start them together and send the console's
 `/approvals` page instead of each `/grant` link; there the signed-in user approves
 them together.

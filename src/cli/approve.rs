@@ -71,8 +71,8 @@ pub struct ApproveOpts {
     pub cb_port: Option<u16>,
     /// Local on-box gesture timeout (seconds).
     pub timeout: u64,
-    /// `--wait`: a remote approval waits for the decision instead of
-    /// returning after the link.
+    /// A remote approval waits for the decision instead of returning after
+    /// the link ([`waits_for_decision`]).
     pub wait: bool,
 }
 
@@ -97,8 +97,32 @@ impl ApproveOpts {
             timeout: flags
                 .timeout
                 .unwrap_or(crate::config::APPROVAL_TIMEOUT_SECS),
-            wait: flags.wait,
+            wait: waits_for_decision(flags.wait, flags.no_wait, interactive()),
         }
+    }
+}
+
+/// Whether a person is at a terminal: stdin and stderr both attached to one.
+/// An agent's tool call, a pipe or CI is not.
+fn interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Whether a remote approval waits for the decision. `--wait` and
+/// `--no-wait` decide when given (clap refuses both). Otherwise it waits in
+/// a terminal, so a person gets the result from one command, and returns
+/// after the link elsewhere, so an agent's tool call, which shows output only
+/// when the command ends, can pass the link on. Mainstream CLIs wait by
+/// default with an opt-out (kubectl `--wait=false`, Azure CLI `--no-wait`,
+/// gcloud `--async`).
+fn waits_for_decision(wait: bool, no_wait: bool, interactive: bool) -> bool {
+    if wait {
+        true
+    } else if no_wait {
+        false
+    } else {
+        interactive
     }
 }
 
@@ -304,11 +328,10 @@ fn is_export(op: &Value) -> bool {
 }
 
 /// Whether a remote approval returns once its link is printed instead of
-/// waiting for the decision. It returns unless the caller passed `--wait`
-/// (like Helm's `--wait`, off by default): the daemon applies the op on
-/// approval without this process, and a caller such as an agent's tool call
-/// sees output only when the command ends. An op whose value comes back to
-/// this process (an Export, released only to its waiter) always waits.
+/// waiting for the decision: unless it waits ([`waits_for_decision`]). The
+/// daemon applies the op on approval without this process. An op whose value
+/// comes back to this process (an Export, released only to its waiter)
+/// always waits.
 fn returns_after_link(wait: bool, value_comes_back: bool) -> bool {
     !wait && !value_comes_back
 }
@@ -775,6 +798,16 @@ mod tests {
     /// A remote approval returns after its link unless the caller passed
     /// `--wait` or its value comes back to this process (an Export always
     /// waits for it).
+    /// `--wait` / `--no-wait` decide when given; otherwise a terminal waits
+    /// and anything else returns after the link.
+    #[test]
+    fn waits_in_a_terminal_unless_a_flag_says_otherwise() {
+        assert!(waits_for_decision(false, false, true));
+        assert!(!waits_for_decision(false, false, false));
+        assert!(waits_for_decision(true, false, false));
+        assert!(!waits_for_decision(false, true, true));
+    }
+
     #[test]
     fn returns_after_the_link_unless_wait_or_a_returned_value() {
         assert!(returns_after_link(false, false));
