@@ -44,8 +44,9 @@ To pair this machine, open this link on a device with your passkey and enter the
 Next: sprott setup --agent-name codex --wait
 ```
 
-Run each `Next:` until a run prints none. After an error, run the printed
-`Fix:`. With `--json`, each run prints one object whose `status` is
+Run each `Next:` until a run prints none. A `--wait` run returns when you
+approve or the code expires, so an agent runs it in the background. After an
+error, run the printed `Fix:`. With `--json`, each run prints one object whose `status` is
 `action_required`, `waiting`, `done` or `error`.
 
 In the browser you:

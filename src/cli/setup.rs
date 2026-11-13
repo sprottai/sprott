@@ -298,19 +298,15 @@ async fn wait_for_existing(
     pid: u32,
     json_output: bool,
 ) -> Result<Progress, i32> {
-    let seconds = std::env::var("SPROTT_SETUP_WAIT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(90);
-    let deadline = Instant::now() + Duration::from_secs(seconds);
+    // Waits until the person approves, or the background process ends (the
+    // code expired, was declined, or failed): no cap of its own, like every
+    // other approval wait. An agent runs it in the background.
     let status_path = context.setup_dir.join("status.json");
-    let mut profile = context.profile.clone();
     loop {
         if let Ok(status) = human_action::read(&status_path) {
             if let Some(result) = name_mismatch(context, &status, json_output) {
                 return result;
             }
-            profile = context.profile.clone().or(status.profile.clone());
             if status.state == "approved" {
                 finish_approved(context, pid).await;
                 return Ok(Progress::Continue);
@@ -321,10 +317,6 @@ async fn wait_for_existing(
         }
         if !human_action::pid_is_live(pid) {
             return consume_dead_status(context, &status_path, json_output);
-        }
-        if Instant::now() >= deadline {
-            emit_waiting(json_output, &next_command(context, profile.as_deref()));
-            return Ok(Progress::Emitted);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -882,7 +874,7 @@ fn emit_action(json_output: bool, context: &Context, status: &SetupStatus) {
         if let Some(code) = code {
             object.insert("code".into(), json!(code));
         }
-        if let Some(seconds) = status.expires_in {
+        if let Some(seconds) = remaining_expiry(status) {
             object.insert("expires_in".into(), json!(seconds));
         }
         object.insert("next_step".into(), json!(next));
@@ -891,7 +883,7 @@ fn emit_action(json_output: bool, context: &Context, status: &SetupStatus) {
         println!("{}:", instruction);
         println!("  {}", url);
         if let Some(code) = code {
-            match expiry_phrase(status.expires_in) {
+            match expiry_phrase(remaining_expiry(status)) {
                 Some(expiry) => println!("  Code: {} ({})", code, expiry),
                 None => println!("  Code: {}", code),
             }
@@ -916,6 +908,15 @@ fn pairing_instruction(entries: &[SetupEntry], has_code: bool) -> String {
         "To pair {}, open this link on a device with your passkey{}",
         subject, code
     )
+}
+
+/// Seconds the code has left: its lifetime minus the time since it was issued
+/// (the status was last written when the code was reported), so a re-run
+/// reprinting the same code states what is left, not the original lifetime.
+fn remaining_expiry(status: &SetupStatus) -> Option<u64> {
+    let lifetime = status.expires_in?;
+    let elapsed = crate::util::now_unix().saturating_sub(status.updated_at);
+    Some(lifetime.saturating_sub(elapsed))
 }
 
 fn expiry_phrase(expires_in: Option<u64>) -> Option<String> {
@@ -1074,6 +1075,20 @@ mod setup_tests {
         );
         assert_eq!(expiry_phrase(Some(59)).as_deref(), Some("expires soon"));
         assert_eq!(expiry_phrase(None), None);
+    }
+
+    #[test]
+    fn reprinted_code_states_the_time_left() {
+        let mut status = SetupStatus::new("pairing", "needs_user", 42, vec![], None);
+        status.expires_in = Some(900);
+        status.updated_at = crate::util::now_unix() - 600;
+        let left = remaining_expiry(&status).unwrap();
+        assert!((299..=300).contains(&left), "left {left}");
+        status.updated_at = crate::util::now_unix() - 1800;
+        assert_eq!(remaining_expiry(&status), Some(0));
+        assert_eq!(expiry_phrase(remaining_expiry(&status)).as_deref(), Some("expires soon"));
+        status.expires_in = None;
+        assert_eq!(remaining_expiry(&status), None);
     }
 
     #[test]
